@@ -1,0 +1,215 @@
+#![allow(dead_code)]
+
+use color_eyre::{Result, eyre::eyre};
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+/// Check if a path is inside a git repo.
+pub fn is_git_repo(path: &Path) -> bool {
+    Command::new("git")
+        .args(["rev-parse", "--git-dir"])
+        .current_dir(path)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Get the repo root for a given path.
+pub fn repo_root(path: &Path) -> Result<PathBuf> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(path)
+        .output()?;
+
+    if !output.status.success() {
+        return Err(eyre!("not a git repo: {}", path.display()));
+    }
+
+    let root = String::from_utf8(output.stdout)?.trim().to_string();
+    Ok(PathBuf::from(root))
+}
+
+/// Get the current branch name.
+pub fn current_branch(path: &Path) -> Result<String> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .current_dir(path)
+        .output()?;
+
+    Ok(String::from_utf8(output.stdout)?.trim().to_string())
+}
+
+/// Get the short SHA of HEAD.
+pub fn head_short_sha(path: &Path) -> Result<String> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .current_dir(path)
+        .output()?;
+
+    Ok(String::from_utf8(output.stdout)?.trim().to_string())
+}
+
+/// Get the repo name from the directory.
+pub fn repo_name(path: &Path) -> String {
+    repo_root(path)
+        .ok()
+        .and_then(|r| r.file_name().map(|n| n.to_string_lossy().to_string()))
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// Check if a branch exists.
+pub fn branch_exists(repo_path: &Path, branch: &str) -> bool {
+    Command::new("git")
+        .args(["rev-parse", "--verify", branch])
+        .current_dir(repo_path)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Create a worktree with a new branch. If the branch already exists,
+/// reuse it (checkout existing branch into worktree).
+pub fn create_worktree(repo_path: &Path, branch: &str, worktree_path: &Path) -> Result<()> {
+    let args = if branch_exists(repo_path, branch) {
+        // Branch exists — use it without -b
+        vec![
+            "worktree".to_string(),
+            "add".to_string(),
+            worktree_path.to_string_lossy().to_string(),
+            branch.to_string(),
+        ]
+    } else {
+        // New branch
+        vec![
+            "worktree".to_string(),
+            "add".to_string(),
+            "-b".to_string(),
+            branch.to_string(),
+            worktree_path.to_string_lossy().to_string(),
+        ]
+    };
+
+    let output = Command::new("git")
+        .args(&args)
+        .current_dir(repo_path)
+        .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(eyre!("failed to create worktree: {}", stderr));
+    }
+
+    Ok(())
+}
+
+/// Remove a worktree.
+pub fn remove_worktree(repo_path: &Path, worktree_path: &Path) -> Result<()> {
+    let output = Command::new("git")
+        .args([
+            "worktree",
+            "remove",
+            "--force",
+            &worktree_path.to_string_lossy(),
+        ])
+        .current_dir(repo_path)
+        .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(eyre!("failed to remove worktree: {}", stderr));
+    }
+
+    Ok(())
+}
+
+/// Delete a branch.
+pub fn delete_branch(repo_path: &Path, branch: &str) -> Result<()> {
+    Command::new("git")
+        .args(["branch", "-D", branch])
+        .current_dir(repo_path)
+        .output()?;
+    Ok(())
+}
+
+/// Prune stale worktree entries (directories that no longer exist).
+pub fn prune_worktrees(repo_path: &Path) -> Result<()> {
+    Command::new("git")
+        .args(["worktree", "prune"])
+        .current_dir(repo_path)
+        .output()?;
+    Ok(())
+}
+
+/// Check if a branch is currently checked out in any worktree.
+pub fn branch_in_worktree(repo_path: &Path, branch: &str) -> bool {
+    list_worktrees(repo_path)
+        .unwrap_or_default()
+        .iter()
+        .any(|(_, b)| b == branch)
+}
+
+/// List worktrees for a repo, returns (path, branch) pairs.
+pub fn list_worktrees(repo_path: &Path) -> Result<Vec<(PathBuf, String)>> {
+    let output = Command::new("git")
+        .args(["worktree", "list", "--porcelain"])
+        .current_dir(repo_path)
+        .output()?;
+
+    let text = String::from_utf8(output.stdout)?;
+    let mut worktrees = Vec::new();
+    let mut current_path: Option<PathBuf> = None;
+
+    for line in text.lines() {
+        if let Some(path) = line.strip_prefix("worktree ") {
+            current_path = Some(PathBuf::from(path));
+        } else if let Some(branch) = line.strip_prefix("branch refs/heads/") {
+            if let Some(path) = current_path.take() {
+                worktrees.push((path, branch.to_string()));
+            }
+        } else if line.is_empty() {
+            current_path = None;
+        }
+    }
+
+    Ok(worktrees)
+}
+
+/// Detect git repos in a directory (for multi-repo workspaces).
+/// Scans immediate children first — if any are git repos, use those.
+/// Falls back to the directory itself if it's a repo with no sub-repos.
+pub fn detect_repos(dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut child_repos = Vec::new();
+
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() && !path.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.')) && is_git_repo(&path) {
+                child_repos.push(path);
+            }
+        }
+    }
+
+    if !child_repos.is_empty() {
+        // Sort by recent commit count (most active first)
+        child_repos.sort_by(|a, b| {
+            let count = |repo: &Path| -> usize {
+                std::process::Command::new("git")
+                    .args(["rev-list", "--count", "--since=3 months ago", "HEAD"])
+                    .current_dir(repo)
+                    .output()
+                    .ok()
+                    .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse().ok())
+                    .unwrap_or(0)
+            };
+            count(b).cmp(&count(a))
+        });
+        return Ok(child_repos);
+    }
+
+    // No child repos — use dir itself if it's a repo
+    let mut repos = Vec::new();
+    if is_git_repo(dir) {
+        repos.push(dir.to_path_buf());
+    }
+    Ok(repos)
+}
