@@ -403,8 +403,10 @@ pub fn apply_session_style(session: &str) -> Result<()> {
         .args(["set-option", "-t", session, "pane-border-status", "top"])
         .output();
     // Set pane border format: selection-aware conditional
-    // Selected panes get a full-width colored line; non-selected get a dimmed small swatch
+    // Sidebar panes (@sidebar=1) get no border title at all.
+    // Selected panes get a full-width colored line; non-selected get a dimmed small swatch.
     let border_fmt = concat!(
+        "#{?#{@sidebar},,",
         "#{?#{@selected},",
         "#[fg=#{@color}]\u{2501}\u{2501} #{pane_title} ",
         "\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}",
@@ -426,6 +428,7 @@ pub fn apply_session_style(session: &str) -> Result<()> {
         "#[default]",
         ",",
         " #[fg=#{@color}]\u{2588}\u{2588}#[default]#[fg=#5a5550] #{pane_title} #[default]}",
+        "}",
     );
     let _ = Command::new("tmux")
         .args([
