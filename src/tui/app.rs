@@ -9,8 +9,9 @@ use std::time::Instant;
 
 /// Pane foreground colors for selected/dimmed states.
 const PANE_FG_SELECTED: &str = "#dcdce1"; // full FROST brightness
-const PANE_FG_DIMMED: &str = "#6e6b65"; // ~40% dimmed
-const PANE_BG: &str = "#282520"; // COMB (unchanged for both)
+const PANE_FG_DIMMED: &str = "#504d48"; // heavily dimmed
+const PANE_BG_SELECTED: &str = "#282520"; // COMB — normal brightness
+const PANE_BG_DIMMED: &str = "#1a1816"; // darkened, receded
 
 /// Hex colors for worktree pane border titles.
 const WORKTREE_BORDER_COLORS: &[&str] = &[
@@ -1296,7 +1297,8 @@ impl App {
         for idx in indices_to_update {
             let is_selected = idx == selected;
             let fg = if is_selected { PANE_FG_SELECTED } else { PANE_FG_DIMMED };
-            let style = format!("bg={},fg={}", PANE_BG, fg);
+            let bg = if is_selected { PANE_BG_SELECTED } else { PANE_BG_DIMMED };
+            let style = format!("bg={},fg={}", bg, fg);
 
             if let Some(wt) = self.worktrees.get(idx) {
                 if let Some(ref agent) = wt.agent {
