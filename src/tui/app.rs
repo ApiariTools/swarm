@@ -486,8 +486,7 @@ impl App {
         tmux::send_keys_to_pane(&pane_id, &cmd)?;
 
         // Rebalance, re-apply styling, re-select sidebar
-        let session_window = self.session_name.clone();
-        let _ = tmux::apply_layout(&session_window, 38);
+        self.rebalance_layout();
         let _ = tmux::apply_session_style(&self.session_name);
         if let Some(ref sidebar) = self.sidebar_pane_id {
             let _ = tmux::select_pane(sidebar);
@@ -601,8 +600,7 @@ impl App {
         });
 
         // Rebalance layout, re-apply styling, re-select sidebar
-        let session_window = self.session_name.clone();
-        let _ = tmux::apply_layout(&session_window, 38);
+        self.rebalance_layout();
         let _ = tmux::apply_session_style(&self.session_name);
         if let Some(ref sidebar) = self.sidebar_pane_id {
             let _ = tmux::select_pane(sidebar);
@@ -823,8 +821,7 @@ impl App {
         tmux::send_keys_to_pane(&pane_id, &cmd)?;
 
         // Rebalance layout and re-apply styling
-        let session_window = self.session_name.clone();
-        let _ = tmux::apply_layout(&session_window, 38);
+        self.rebalance_layout();
         let _ = tmux::apply_session_style(&self.session_name);
 
         // Re-select sidebar pane so TUI keeps focus
@@ -959,8 +956,7 @@ impl App {
         }
 
         // Rebalance layout after removing panes
-        let session_window = self.session_name.clone();
-        let _ = tmux::apply_layout(&session_window, 38);
+        self.rebalance_layout();
 
         // Remove worktree if it exists
         if wt.worktree_path.exists() {
@@ -1284,6 +1280,37 @@ impl App {
         }
 
         self.prev_selected = Some(selected);
+    }
+
+    /// Rebalance tmux pane layout into a tiled grid.
+    fn rebalance_layout(&self) {
+        let session_window = self.session_name.clone();
+        let sidebar = self
+            .sidebar_pane_id
+            .clone()
+            .unwrap_or_else(|| "%0".to_string());
+
+        // Collect live pane IDs grouped by worktree
+        let pane_groups: Vec<Vec<String>> = self
+            .worktrees
+            .iter()
+            .map(|wt| {
+                let mut panes = Vec::new();
+                if let Some(ref agent) = wt.agent {
+                    if agent.status == PaneStatus::Running {
+                        panes.push(agent.pane_id.clone());
+                    }
+                }
+                for term in &wt.terminals {
+                    if term.status == PaneStatus::Running {
+                        panes.push(term.pane_id.clone());
+                    }
+                }
+                panes
+            })
+            .collect();
+
+        let _ = tmux::apply_tiled_layout(&session_window, &sidebar, 38, pane_groups);
     }
 
     fn next_worktree_num(&self) -> usize {
