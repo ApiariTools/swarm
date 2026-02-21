@@ -1,4 +1,5 @@
 pub mod app;
+pub mod picker;
 pub mod render;
 pub mod theme;
 
