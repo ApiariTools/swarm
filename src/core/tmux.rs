@@ -449,9 +449,10 @@ pub fn apply_session_style(session: &str) -> Result<()> {
 }
 
 /// Set a pane's individual style (background/foreground).
+/// Uses set-option instead of select-pane to avoid focusing the pane as a side effect.
 pub fn set_pane_style(pane_id: &str, style: &str) -> Result<()> {
     Command::new("tmux")
-        .args(["select-pane", "-t", pane_id, "-P", style])
+        .args(["set-option", "-p", "-t", pane_id, "style", style])
         .output()?;
     Ok(())
 }
