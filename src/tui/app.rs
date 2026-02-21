@@ -10,9 +10,9 @@ use tokio::sync::mpsc;
 
 /// Pane foreground colors for selected/dimmed states.
 const PANE_FG_SELECTED: &str = "#dcdce1"; // full FROST brightness
-const PANE_FG_DIMMED: &str = "#504d48"; // heavily dimmed
-const PANE_BG_SELECTED: &str = "#282520"; // COMB — normal brightness
-const PANE_BG_DIMMED: &str = "#1a1816"; // darkened, receded
+const PANE_FG_DIMMED: &str = "#3a3835"; // heavily muted
+const PANE_BG_SELECTED: &str = "#302c26"; // slightly brighter than COMB — spotlight
+const PANE_BG_DIMMED: &str = "#141210"; // very dark, strongly receded
 
 /// Hex colors for worktree pane border titles.
 const WORKTREE_BORDER_COLORS: &[&str] = &[

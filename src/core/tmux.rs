@@ -384,14 +384,14 @@ pub fn apply_session_style(session: &str) -> Result<()> {
     let _ = Command::new("tmux")
         .args([
             "set-option", "-t", session,
-            "window-style", "bg=#1a1816,fg=#504d48,dim",
+            "window-style", "bg=#141210,fg=#3a3835,dim",
         ])
         .output();
     // Active pane (sidebar, or whichever has tmux focus) stays bright
     let _ = Command::new("tmux")
         .args([
             "set-option", "-t", session,
-            "window-active-style", "bg=#282520,fg=#dcdce1,nodim",
+            "window-active-style", "bg=#302c26,fg=#dcdce1,nodim",
         ])
         .output();
     // Padded borders for visible gaps between panes

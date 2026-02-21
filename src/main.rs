@@ -108,6 +108,8 @@ async fn run_sidebar(work_dir: std::path::PathBuf, agent: String) -> Result<()> 
                 let _ = std::process::Command::new("tmux")
                     .args(["set-option", "-p", "-t", pane_id, "@sidebar", "1"])
                     .output();
+                // Keep sidebar bright even when window-style defaults to dimmed
+                let _ = core::tmux::set_pane_style(pane_id, "bg=#302c26,fg=#dcdce1,nodim");
             }
             app.save_state();
             tui::run(&mut app).await?;

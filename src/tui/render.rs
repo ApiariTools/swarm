@@ -291,17 +291,6 @@ const SIDEBAR_COLORS: &[Color] = &[
     Color::Rgb(100, 180, 60),  // olive
 ];
 
-/// Dark tinted row backgrounds matching the pane tints.
-const ROW_BG_COLORS: &[Color] = &[
-    Color::Rgb(48, 36, 24),  // warm brown
-    Color::Rgb(24, 32, 48),  // cool blue
-    Color::Rgb(24, 48, 24),  // forest green
-    Color::Rgb(40, 24, 48),  // purple
-    Color::Rgb(24, 48, 48),  // teal
-    Color::Rgb(48, 40, 24),  // amber
-    Color::Rgb(48, 24, 40),  // rose
-    Color::Rgb(32, 48, 24),  // olive
-];
 
 fn draw_worktree_row(frame: &mut Frame, area: Rect, wt: &Worktree, selected: bool, idx: usize) {
     let status = wt.status();
@@ -315,12 +304,11 @@ fn draw_worktree_row(frame: &mut Frame, area: Rect, wt: &Worktree, selected: boo
     };
 
     let wt_color = SIDEBAR_COLORS[idx % SIDEBAR_COLORS.len()];
-    let row_bg = ROW_BG_COLORS[idx % ROW_BG_COLORS.len()];
 
     let row_style = if selected {
         Style::default().bg(Color::Rgb(58, 50, 42))
     } else {
-        Style::default().bg(row_bg)
+        Style::default().bg(theme::COMB)
     };
 
     // Background
