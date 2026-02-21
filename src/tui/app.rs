@@ -244,7 +244,15 @@ impl App {
 
     fn restore_state(&mut self) {
         // Phase 1: restore from state file
+        let mut restored_inbox_pos = false;
         if let Ok(Some(saved)) = state::load_state(&self.work_dir) {
+            // Always restore inbox position so we never replay old messages,
+            // even if the tmux session is gone.
+            if saved.last_inbox_pos > 0 {
+                self.last_inbox_pos = saved.last_inbox_pos;
+                restored_inbox_pos = true;
+            }
+
             if tmux::session_exists(&saved.session_name) {
                 self.session_name = saved.session_name;
                 self.sidebar_pane_id = saved.sidebar_pane_id;
@@ -274,6 +282,22 @@ impl App {
                     self.worktrees.push(wt);
                 }
             }
+        }
+
+        // If we didn't restore an inbox position (fresh start or old state format),
+        // skip to the end of the inbox so we don't replay historical messages.
+        if !restored_inbox_pos {
+            let inbox_path = self.work_dir.join(".swarm").join("inbox.jsonl");
+            if let Ok(meta) = std::fs::metadata(&inbox_path) {
+                self.last_inbox_pos = meta.len();
+            }
+        }
+
+        // Truncate inbox — everything up to last_inbox_pos has been processed.
+        let inbox_path = self.work_dir.join(".swarm").join("inbox.jsonl");
+        if inbox_path.exists() {
+            let _ = std::fs::write(&inbox_path, b"");
+            self.last_inbox_pos = 0;
         }
 
         // Phase 2: discover orphaned worktrees from git (scan all repos)
@@ -351,6 +375,7 @@ impl App {
             session_name: self.session_name.clone(),
             sidebar_pane_id: self.sidebar_pane_id.clone(),
             worktrees: self.worktrees.iter().map(|w| w.to_state()).collect(),
+            last_inbox_pos: self.last_inbox_pos,
         };
 
         let _ = state::save_state(&self.work_dir, &swarm_state);
@@ -998,7 +1023,17 @@ impl App {
             Ok(result) => result,
             Err(_) => return,
         };
+
+        if new_pos == self.last_inbox_pos {
+            return;
+        }
         self.last_inbox_pos = new_pos;
+
+        if messages.is_empty() {
+            // Position advanced (e.g. blank lines) — persist it
+            self.save_state();
+            return;
+        }
 
         for msg in messages {
             match msg {

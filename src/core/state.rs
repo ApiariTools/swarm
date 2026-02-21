@@ -39,6 +39,9 @@ pub struct SwarmState {
     #[serde(default)]
     pub sidebar_pane_id: Option<String>,
     pub worktrees: Vec<WorktreeState>,
+    /// Byte offset into inbox.jsonl — messages before this offset have already been processed.
+    #[serde(default)]
+    pub last_inbox_pos: u64,
 }
 
 /// Get the state file path.
