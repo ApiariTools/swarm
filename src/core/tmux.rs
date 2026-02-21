@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use color_eyre::{Result, eyre::eyre};
+use std::collections::HashMap;
 use std::process::Command;
 
 /// Check if we're inside a tmux session.
@@ -391,6 +392,10 @@ pub fn apply_session_style(session: &str) -> Result<()> {
             "window-active-style", "bg=#282520,fg=#dcdce1",
         ])
         .output();
+    // Padded borders for visible gaps between panes
+    let _ = Command::new("tmux")
+        .args(["set-option", "-t", session, "pane-border-lines", "padded"])
+        .output();
     // Enable pane border status (shows titles)
     let _ = Command::new("tmux")
         .args(["set-option", "-t", session, "pane-border-status", "top"])
@@ -497,6 +502,196 @@ pub fn apply_layout(session_window: &str, sidebar_width: u16) -> Result<()> {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(eyre!("failed to apply layout: {}", stderr));
     }
+    Ok(())
+}
+
+/// Get the window dimensions for a session:window target.
+pub fn get_window_size(session_window: &str) -> Result<(u16, u16)> {
+    let output = Command::new("tmux")
+        .args([
+            "display-message",
+            "-t",
+            session_window,
+            "-p",
+            "#{window_width} #{window_height}",
+        ])
+        .output()?;
+    let text = String::from_utf8(output.stdout)?.trim().to_string();
+    let parts: Vec<&str> = text.split_whitespace().collect();
+    if parts.len() >= 2 {
+        let w: u16 = parts[0].parse().unwrap_or(200);
+        let h: u16 = parts[1].parse().unwrap_or(50);
+        Ok((w, h))
+    } else {
+        Err(eyre!("failed to parse window size"))
+    }
+}
+
+/// Get mapping of pane_id (%N) to pane_index (0-based) for a window.
+fn get_pane_indices(target: &str) -> Result<HashMap<String, u16>> {
+    let output = Command::new("tmux")
+        .args([
+            "list-panes",
+            "-t",
+            target,
+            "-F",
+            "#{pane_id}\t#{pane_index}",
+        ])
+        .output()?;
+    let text = String::from_utf8(output.stdout)?;
+    let mut map = HashMap::new();
+    for line in text.lines() {
+        let parts: Vec<&str> = line.split('\t').collect();
+        if parts.len() >= 2 {
+            if let Ok(idx) = parts[1].parse::<u16>() {
+                map.insert(parts[0].to_string(), idx);
+            }
+        }
+    }
+    Ok(map)
+}
+
+/// Compute tmux layout checksum (16-bit rotate-and-add from tmux source).
+fn layout_checksum(layout: &str) -> u16 {
+    let mut csum: u16 = 0;
+    for byte in layout.bytes() {
+        csum = (csum >> 1) | ((csum & 1) << 15);
+        csum = csum.wrapping_add(byte as u16);
+    }
+    csum
+}
+
+/// Build a layout node for vertically stacked panes.
+fn build_vertical_stack(panes: &[u16], width: u16, height: u16, x: u16, y: u16) -> String {
+    if panes.len() == 1 {
+        return format!("{}x{},{},{},{}", width, height, x, y, panes[0]);
+    }
+    let n = panes.len() as u16;
+    let seps = n - 1;
+    let usable = height.saturating_sub(seps);
+    let base_h = usable / n;
+    let remainder = usable % n;
+
+    let mut nodes = Vec::new();
+    let mut cy = y;
+    for (i, &idx) in panes.iter().enumerate() {
+        let h = if (i as u16) == n - 1 {
+            (y + height) - cy
+        } else {
+            base_h + if (i as u16) < remainder { 1 } else { 0 }
+        };
+        nodes.push(format!("{}x{},{},{},{}", width, h, x, cy, idx));
+        cy += h + 1;
+    }
+    format!("{}x{},{},{}[{}]", width, height, x, y, nodes.join(","))
+}
+
+/// Build the right-side area of the layout (one or more columns).
+fn build_right_area(columns: &[Vec<u16>], total_w: u16, height: u16, start_x: u16) -> String {
+    if columns.len() == 1 {
+        return build_vertical_stack(&columns[0], total_w, height, start_x, 0);
+    }
+
+    let nc = columns.len() as u16;
+    let seps = nc - 1;
+    let usable = total_w.saturating_sub(seps);
+    let base_w = usable / nc;
+    let remainder = usable % nc;
+
+    let mut nodes = Vec::new();
+    let mut cx = start_x;
+    for (i, col) in columns.iter().enumerate() {
+        let w = if (i as u16) == nc - 1 {
+            (start_x + total_w) - cx
+        } else {
+            base_w + if (i as u16) < remainder { 1 } else { 0 }
+        };
+        nodes.push(build_vertical_stack(col, w, height, cx, 0));
+        cx += w + 1;
+    }
+
+    format!(
+        "{}x{},{},{}{{{}}}",
+        total_w,
+        height,
+        start_x,
+        0,
+        nodes.join(",")
+    )
+}
+
+/// Apply a tiled grid layout: sidebar on the left, agent panes in a grid on the right.
+/// Falls back to main-vertical if the custom layout fails.
+pub fn apply_tiled_layout(
+    session_window: &str,
+    sidebar_pane_id: &str,
+    sidebar_width: u16,
+    pane_groups: Vec<Vec<String>>,
+) -> Result<()> {
+    let pane_map = get_pane_indices(session_window)?;
+
+    // Convert pane IDs to indices, drop empty groups
+    let valid_groups: Vec<Vec<u16>> = pane_groups
+        .iter()
+        .filter_map(|group| {
+            let indices: Vec<u16> = group
+                .iter()
+                .filter_map(|id| pane_map.get(id).copied())
+                .collect();
+            if indices.is_empty() {
+                None
+            } else {
+                Some(indices)
+            }
+        })
+        .collect();
+
+    if valid_groups.is_empty() {
+        return apply_layout(session_window, sidebar_width);
+    }
+
+    let (win_w, win_h) = get_window_size(session_window)?;
+    let sidebar_idx = pane_map.get(sidebar_pane_id).copied().unwrap_or(0);
+
+    // Determine column count based on number of worktrees with live panes
+    let n = valid_groups.len();
+    let num_cols = if n <= 1 { 1 } else if n <= 4 { 2 } else { n.min(3) };
+
+    // Distribute worktree groups round-robin across columns
+    let mut columns: Vec<Vec<u16>> = vec![vec![]; num_cols];
+    for (i, group) in valid_groups.iter().enumerate() {
+        columns[i % num_cols].extend(group);
+    }
+    columns.retain(|c| !c.is_empty());
+    if columns.is_empty() {
+        return apply_layout(session_window, sidebar_width);
+    }
+
+    // Build layout string
+    let right_w = win_w.saturating_sub(sidebar_width + 1);
+    let right_x = sidebar_width + 1;
+    let sidebar_leaf = format!(
+        "{}x{},{},{},{}",
+        sidebar_width, win_h, 0, 0, sidebar_idx
+    );
+    let right_node = build_right_area(&columns, right_w, win_h, right_x);
+
+    let body = format!(
+        "{}x{},{},{}{{{},{}}}",
+        win_w, win_h, 0, 0, sidebar_leaf, right_node
+    );
+    let csum = layout_checksum(&body);
+    let layout = format!("{:04x},{}", csum, body);
+
+    let output = Command::new("tmux")
+        .args(["select-layout", "-t", session_window, &layout])
+        .output()?;
+
+    if !output.status.success() {
+        // Fall back to single-column main-vertical layout
+        return apply_layout(session_window, sidebar_width);
+    }
+
     Ok(())
 }
 
