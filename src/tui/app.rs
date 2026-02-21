@@ -293,6 +293,13 @@ impl App {
             }
         }
 
+        // Truncate inbox — everything up to last_inbox_pos has been processed.
+        let inbox_path = self.work_dir.join(".swarm").join("inbox.jsonl");
+        if inbox_path.exists() {
+            let _ = std::fs::write(&inbox_path, b"");
+            self.last_inbox_pos = 0;
+        }
+
         // Phase 2: discover orphaned worktrees from git (scan all repos)
         let repos_to_scan: Vec<PathBuf> = if self.repos.is_empty() {
             vec![self.work_dir.clone()]
