@@ -1098,6 +1098,8 @@ impl App {
     // ── PR Status ──────────────────────────────────────────
 
     fn refresh_pr_statuses(&mut self) {
+        let mut merged_ids = Vec::new();
+
         for wt in &mut self.worktrees {
             if wt.branch.is_empty() {
                 continue;
@@ -1124,10 +1126,14 @@ impl App {
                     let text = String::from_utf8_lossy(&output.stdout);
                     if let Ok(prs) = serde_json::from_str::<Vec<serde_json::Value>>(text.trim()) {
                         if let Some(pr) = prs.first() {
+                            let state = pr["state"].as_str().unwrap_or("").to_string();
+                            if state == "MERGED" && wt.pr.as_ref().map_or(true, |p| p.state != "MERGED") {
+                                merged_ids.push(wt.id.clone());
+                            }
                             wt.pr = Some(PrInfo {
                                 number: pr["number"].as_u64().unwrap_or(0),
                                 title: pr["title"].as_str().unwrap_or("").to_string(),
-                                state: pr["state"].as_str().unwrap_or("").to_string(),
+                                state,
                                 url: pr["url"].as_str().unwrap_or("").to_string(),
                             });
                         } else {
@@ -1135,6 +1141,15 @@ impl App {
                         }
                     }
                 }
+            }
+        }
+
+        // Auto-close worktrees whose PRs were just merged
+        for id in merged_ids {
+            if let Some(idx) = self.worktrees.iter().position(|w| w.id == id) {
+                let prompt = self.worktrees[idx].prompt.clone();
+                let _ = self.close_worktree(idx);
+                self.flash(format!("auto-closed \"{}\" (PR merged)", prompt));
             }
         }
     }
