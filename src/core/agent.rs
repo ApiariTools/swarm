@@ -49,6 +49,15 @@ impl AgentKind {
         }
     }
 
+    /// The shell command to launch this agent with an initial prompt baked in.
+    pub fn launch_cmd_with_prompt(&self, prompt: &str, dangerously_skip: bool) -> String {
+        let base = self.launch_cmd(dangerously_skip);
+        if prompt.trim().is_empty() {
+            return base;
+        }
+        format!("{} {}", base, shell_quote(prompt))
+    }
+
     /// All available agents.
     pub fn all() -> Vec<Self> {
         vec![Self::Claude, Self::Codex]
@@ -59,5 +68,11 @@ impl std::fmt::Display for AgentKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.name())
     }
+}
+
+/// Wrap a string in single quotes for safe embedding in a shell command.
+/// Single quotes inside the string are handled via the `'\''` idiom.
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
 }
 

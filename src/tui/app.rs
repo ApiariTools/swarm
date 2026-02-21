@@ -446,8 +446,8 @@ impl App {
 
         let _ = tmux::set_pane_title(&pane_id, &wt_id);
 
-        // Launch agent
-        let cmd = agent.launch_cmd(false);
+        // Launch agent with prompt baked into the command
+        let cmd = agent.launch_cmd_with_prompt(&prompt, false);
         tmux::send_keys_to_pane(&pane_id, &cmd)?;
 
         // Rebalance, re-apply styling, re-select sidebar
@@ -458,18 +458,11 @@ impl App {
             let _ = tmux::select_pane(sidebar);
         }
 
-        // Update worktree state
-        let pending = if prompt.is_empty() {
-            None
-        } else {
-            Some((prompt.clone(), Instant::now()))
-        };
-
         self.worktrees[idx].agent = Some(TrackedPane {
             pane_id: pane_id.clone(),
             status: PaneStatus::Running,
         });
-        self.worktrees[idx].pending_prompt = pending;
+        self.worktrees[idx].pending_prompt = None;
         self.apply_worktree_color(idx);
         self.save_state();
 
@@ -782,8 +775,8 @@ impl App {
         // Set pane title
         let _ = tmux::set_pane_title(&pane_id, &window_name);
 
-        // Launch agent
-        let cmd = agent.launch_cmd(false);
+        // Launch agent with prompt baked into the command
+        let cmd = agent.launch_cmd_with_prompt(prompt, false);
         tmux::send_keys_to_pane(&pane_id, &cmd)?;
 
         // Rebalance layout and re-apply styling
@@ -795,12 +788,6 @@ impl App {
         if let Some(ref sidebar) = self.sidebar_pane_id {
             let _ = tmux::select_pane(sidebar);
         }
-
-        let pending = if prompt.is_empty() {
-            None
-        } else {
-            Some((prompt.to_string(), Instant::now()))
-        };
 
         self.worktrees.push(Worktree {
             id: window_name.clone(),
@@ -816,7 +803,7 @@ impl App {
             }),
             terminals: Vec::new(),
             pr: None,
-            pending_prompt: pending,
+            pending_prompt: None,
         });
 
         self.selected = self.worktrees.len() - 1;
