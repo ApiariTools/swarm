@@ -486,18 +486,18 @@ impl App {
         let cmd = agent.launch_cmd_with_prompt(&prompt, true);
         tmux::send_keys_to_pane(&pane_id, &cmd)?;
 
-        // Rebalance, re-apply styling, re-select sidebar
-        self.rebalance_layout();
-        let _ = tmux::apply_session_style(&self.session_name);
-        if let Some(ref sidebar) = self.sidebar_pane_id {
-            let _ = tmux::select_pane(sidebar);
-        }
-
         self.worktrees[idx].agent = Some(TrackedPane {
             pane_id: pane_id.clone(),
             status: PaneStatus::Running,
         });
         self.worktrees[idx].pending_prompt = None;
+
+        // Rebalance, re-apply styling, re-select sidebar (after setting agent so pane is included)
+        self.rebalance_layout();
+        let _ = tmux::apply_session_style(&self.session_name);
+        if let Some(ref sidebar) = self.sidebar_pane_id {
+            let _ = tmux::select_pane(sidebar);
+        }
         self.apply_worktree_color(idx);
         self.update_pane_selection();
         self.save_state();
@@ -834,15 +834,6 @@ impl App {
         let cmd = agent.launch_cmd_with_prompt(prompt, true);
         tmux::send_keys_to_pane(&pane_id, &cmd)?;
 
-        // Rebalance layout and re-apply styling
-        self.rebalance_layout();
-        let _ = tmux::apply_session_style(&self.session_name);
-
-        // Re-select sidebar pane so TUI keeps focus
-        if let Some(ref sidebar) = self.sidebar_pane_id {
-            let _ = tmux::select_pane(sidebar);
-        }
-
         self.worktrees.push(Worktree {
             id: window_name.clone(),
             branch: branch_name.clone(),
@@ -864,6 +855,15 @@ impl App {
         self.apply_worktree_color(self.selected);
         self.prev_selected = None;
         self.update_pane_selection();
+
+        // Rebalance layout and re-apply styling (after push so the new pane is included)
+        self.rebalance_layout();
+        let _ = tmux::apply_session_style(&self.session_name);
+
+        // Re-select sidebar pane so TUI keeps focus
+        if let Some(ref sidebar) = self.sidebar_pane_id {
+            let _ = tmux::select_pane(sidebar);
+        }
         self.save_state();
 
         // Emit event
