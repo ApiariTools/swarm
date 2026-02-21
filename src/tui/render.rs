@@ -426,8 +426,8 @@ fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
 }
 
 fn draw_input_overlay(frame: &mut Frame, area: Rect, app: &App) {
-    let popup_width = (area.width).min(50);
-    let popup = centered_rect(popup_width, 5, area);
+    let popup_width = (area.width).min(60);
+    let popup = centered_rect(popup_width, 12, area);
     frame.render_widget(Clear, popup);
 
     let block = Block::default()
@@ -439,40 +439,97 @@ fn draw_input_overlay(frame: &mut Frame, area: Rect, app: &App) {
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
-    // Input line with cursor
-    let before: String = app.input_buffer.chars().take(app.input_cursor).collect();
-    let cursor_char = app
-        .input_buffer
-        .chars()
-        .nth(app.input_cursor)
-        .unwrap_or(' ');
-    let after: String = app
-        .input_buffer
-        .chars()
-        .skip(app.input_cursor + 1)
-        .collect();
+    // Split buffer into lines and locate cursor
+    let buf_lines: Vec<&str> = app.input_buffer.split('\n').collect();
+    let mut cursor_line = 0usize;
+    let mut cursor_col = 0usize;
+    let mut pos = 0usize;
+    for (i, line) in buf_lines.iter().enumerate() {
+        let line_chars = line.chars().count();
+        if pos + line_chars >= app.input_cursor && i <= buf_lines.len() - 1 {
+            cursor_line = i;
+            cursor_col = app.input_cursor - pos;
+            break;
+        }
+        pos += line_chars + 1; // +1 for the \n
+    }
 
-    let input_line = Line::from(vec![
-        Span::styled(" > ", theme::accent()),
-        Span::styled(before, theme::text()),
-        Span::styled(
-            cursor_char.to_string(),
-            Style::default().fg(theme::COMB).bg(theme::HONEY),
-        ),
-        Span::styled(after, theme::text()),
-    ]);
+    // Build styled lines with cursor highlight
+    let mut styled_lines: Vec<Line> = Vec::new();
+    for (i, line_str) in buf_lines.iter().enumerate() {
+        let prefix = if i == 0 { " > " } else { "   " };
+        let prefix_style = if i == 0 { theme::accent() } else { theme::text() };
 
-    let input_area = Rect::new(inner.x, inner.y + 1, inner.width, 1);
-    frame.render_widget(Paragraph::new(input_line), input_area);
+        if i == cursor_line {
+            let before: String = line_str.chars().take(cursor_col).collect();
+            let cursor_char = line_str.chars().nth(cursor_col).unwrap_or(' ');
+            let after: String = line_str.chars().skip(cursor_col + 1).collect();
+
+            styled_lines.push(Line::from(vec![
+                Span::styled(prefix, prefix_style),
+                Span::styled(before, theme::text()),
+                Span::styled(
+                    cursor_char.to_string(),
+                    Style::default().fg(theme::COMB).bg(theme::HONEY),
+                ),
+                Span::styled(after, theme::text()),
+            ]));
+        } else {
+            styled_lines.push(Line::from(vec![
+                Span::styled(prefix, prefix_style),
+                Span::styled(line_str.to_string(), theme::text()),
+            ]));
+        }
+    }
+
+    // Reserve 1 row for the hint line
+    let input_height = inner.height.saturating_sub(1);
+    let input_area = Rect::new(inner.x, inner.y, inner.width, input_height);
+
+    // Calculate scroll to keep cursor visible
+    // Approximate visual lines by accounting for wrapping
+    let wrap_width = inner.width as usize;
+    let mut visual_lines_before_cursor = 0usize;
+    for (_i, line_str) in buf_lines.iter().enumerate().take(cursor_line) {
+        let prefix_len = 3; // " > " or "   "
+        let line_width = prefix_len + line_str.chars().count();
+        visual_lines_before_cursor += 1 + line_width.saturating_sub(1) / wrap_width.max(1);
+    }
+    // Add the cursor line itself (partial)
+    let cursor_prefix_len = 3;
+    let cursor_line_width = cursor_prefix_len + cursor_col;
+    visual_lines_before_cursor += cursor_line_width / wrap_width.max(1);
+
+    let visible = input_height as usize;
+    let scroll = if visual_lines_before_cursor >= visible {
+        (visual_lines_before_cursor - visible + 1) as u16
+    } else {
+        0
+    };
+
+    let text = Text::from(styled_lines);
+    frame.render_widget(
+        Paragraph::new(text)
+            .wrap(Wrap { trim: false })
+            .scroll((scroll, 0)),
+        input_area,
+    );
 
     // Hint
     let hint = Line::from(vec![
-        Span::styled("enter", theme::key_hint()),
+        Span::styled("\u{21b5}", theme::key_hint()),
         Span::styled(" submit  ", theme::key_desc()),
+        Span::styled("alt+\u{21b5}", theme::key_hint()),
+        Span::styled(" newline  ", theme::key_desc()),
         Span::styled("esc", theme::key_hint()),
         Span::styled(" cancel", theme::key_desc()),
     ]);
-    let hint_area = Rect::new(inner.x + 1, inner.y + 2, inner.width.saturating_sub(2), 1);
+    let hint_area = Rect::new(
+        inner.x + 1,
+        inner.y + inner.height - 1,
+        inner.width.saturating_sub(2),
+        1,
+    );
     frame.render_widget(Paragraph::new(hint), hint_area);
 }
 
