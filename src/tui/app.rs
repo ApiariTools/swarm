@@ -503,7 +503,13 @@ impl App {
             tmux::split_pane_vertical(&last_agent_pane, &dir.to_string_lossy())?
         };
 
-        let _ = tmux::set_pane_title(&pane_id, &wt_id);
+        // Set pane title to truncated prompt so it matches the sidebar
+        let pane_title = if prompt.len() > 60 {
+            format!("{}…", &prompt[..prompt.char_indices().take_while(|&(i, _)| i < 60).last().map(|(i, c)| i + c.len_utf8()).unwrap_or(60)])
+        } else {
+            prompt.clone()
+        };
+        let _ = tmux::set_pane_title(&pane_id, &pane_title);
 
         // Launch agent with prompt baked into the command
         let cmd = agent.launch_cmd_with_prompt(&prompt, true);
@@ -882,8 +888,13 @@ impl App {
             )?
         };
 
-        // Set pane title
-        let _ = tmux::set_pane_title(&pane_id, &window_name);
+        // Set pane title to truncated prompt so it matches the sidebar
+        let pane_title = if prompt.len() > 60 {
+            format!("{}…", &prompt[..prompt.char_indices().take_while(|&(i, _)| i < 60).last().map(|(i, c)| i + c.len_utf8()).unwrap_or(60)])
+        } else {
+            prompt.to_string()
+        };
+        let _ = tmux::set_pane_title(&pane_id, &pane_title);
 
         // Launch agent with prompt baked into the command
         let cmd = agent.launch_cmd_with_prompt(prompt, true);
