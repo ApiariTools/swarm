@@ -113,6 +113,14 @@ async fn event_loop(
                         }
                         _ => {}
                     },
+                    app::Mode::PrDetail => match key.code {
+                        KeyCode::Char('o') | KeyCode::Enter => app.open_pr_in_browser(),
+                        KeyCode::Char('c') => app.copy_pr_url(),
+                        KeyCode::Esc | KeyCode::Char('p') | KeyCode::Char('q') => {
+                            app.dismiss_pr_detail()
+                        }
+                        _ => {}
+                    },
                 }
             }
         }

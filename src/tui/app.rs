@@ -166,6 +166,7 @@ pub enum Mode {
     AgentSelect,
     Confirm,
     Help,
+    PrDetail,
 }
 
 /// Pending action that needs confirmation.
@@ -564,11 +565,43 @@ impl App {
             return;
         }
         let wt = &self.worktrees[self.selected];
-        if let Some(ref pr) = wt.pr {
-            self.flash(pr.url.clone());
+        if wt.pr.is_some() {
+            self.mode = Mode::PrDetail;
         } else {
             self.flash("no PR found for this worktree".to_string());
         }
+    }
+
+    pub fn open_pr_in_browser(&mut self) {
+        if let Some(ref pr) = self.worktrees.get(self.selected).and_then(|wt| wt.pr.clone()) {
+            let _ = Command::new("open").arg(&pr.url).spawn();
+            self.mode = Mode::Normal;
+        }
+    }
+
+    pub fn copy_pr_url(&mut self) {
+        if let Some(ref pr) = self.worktrees.get(self.selected).and_then(|wt| wt.pr.clone()) {
+            // Use pbcopy on macOS, xclip on Linux
+            let result = Command::new("pbcopy")
+                .stdin(std::process::Stdio::piped())
+                .spawn()
+                .and_then(|mut child| {
+                    use std::io::Write;
+                    if let Some(ref mut stdin) = child.stdin {
+                        stdin.write_all(pr.url.as_bytes())?;
+                    }
+                    child.wait()
+                });
+            self.mode = Mode::Normal;
+            match result {
+                Ok(_) => self.flash("copied to clipboard".to_string()),
+                Err(_) => self.flash("error: failed to copy".to_string()),
+            }
+        }
+    }
+
+    pub fn dismiss_pr_detail(&mut self) {
+        self.mode = Mode::Normal;
     }
 
     pub fn add_terminal_to_selected(&mut self) {
