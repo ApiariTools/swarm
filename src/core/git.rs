@@ -67,9 +67,47 @@ pub fn branch_exists(repo_path: &Path, branch: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Fetch from origin remote.
+/// Returns Ok(true) if fetch succeeded, Ok(false) if no remote or fetch failed.
+pub fn fetch_origin(repo_path: &Path) -> Result<bool> {
+    let output = Command::new("git")
+        .args(["fetch", "origin"])
+        .current_dir(repo_path)
+        .output()?;
+    Ok(output.status.success())
+}
+
+/// Count how many commits `local` is behind `remote`.
+pub fn commits_behind(repo_path: &Path, local: &str, remote: &str) -> Result<usize> {
+    let range = format!("{}..{}", local, remote);
+    let output = Command::new("git")
+        .args(["rev-list", "--count", &range])
+        .current_dir(repo_path)
+        .output()?;
+    let text = String::from_utf8(output.stdout)?.trim().to_string();
+    Ok(text.parse().unwrap_or(0))
+}
+
+/// Try to fast-forward merge the current branch to a remote ref.
+/// Returns Ok(true) if ff-only merge succeeded, Ok(false) if not possible.
+pub fn merge_ff_only(repo_path: &Path, remote_ref: &str) -> Result<bool> {
+    let output = Command::new("git")
+        .args(["merge", "--ff-only", remote_ref])
+        .current_dir(repo_path)
+        .output()?;
+    Ok(output.status.success())
+}
+
 /// Create a worktree with a new branch. If the branch already exists,
 /// reuse it (checkout existing branch into worktree).
-pub fn create_worktree(repo_path: &Path, branch: &str, worktree_path: &Path) -> Result<()> {
+/// If `start_point` is provided, the new branch is created from that ref
+/// (e.g. "origin/main") instead of HEAD.
+pub fn create_worktree(
+    repo_path: &Path,
+    branch: &str,
+    worktree_path: &Path,
+    start_point: Option<&str>,
+) -> Result<()> {
     let args = if branch_exists(repo_path, branch) {
         // Branch exists — use it without -b
         vec![
@@ -80,13 +118,17 @@ pub fn create_worktree(repo_path: &Path, branch: &str, worktree_path: &Path) -> 
         ]
     } else {
         // New branch
-        vec![
+        let mut v = vec![
             "worktree".to_string(),
             "add".to_string(),
             "-b".to_string(),
             branch.to_string(),
             worktree_path.to_string_lossy().to_string(),
-        ]
+        ];
+        if let Some(sp) = start_point {
+            v.push(sp.to_string());
+        }
+        v
     };
 
     let output = Command::new("git")

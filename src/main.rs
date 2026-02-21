@@ -206,6 +206,7 @@ fn cmd_create(work_dir: std::path::PathBuf, prompt: String, agent: String) -> Re
         prompt,
         agent,
         repo: None,
+        start_point: None,
         timestamp: Local::now(),
     };
     core::ipc::write_inbox(&work_dir, &msg)?;
