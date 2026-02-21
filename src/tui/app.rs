@@ -196,6 +196,7 @@ pub struct App {
     pub tick_count: u64,
     pub sidebar_pane_id: Option<String>,
     prev_selected: Option<usize>,
+    layout_dirty: bool,
     last_refresh: Instant,
     last_pr_check: Instant,
     last_inbox_check: Instant,
@@ -238,6 +239,7 @@ impl App {
             tick_count: 0,
             sidebar_pane_id: None,
             prev_selected: None,
+            layout_dirty: false,
             last_refresh: Instant::now(),
             last_pr_check: Instant::now(),
             last_inbox_check: Instant::now(),
@@ -1210,6 +1212,14 @@ impl App {
         self.collect_summaries();
         self.deliver_pending_prompts();
 
+        // Retry layout rebalance if a previous attempt failed
+        if self.layout_dirty {
+            self.try_rebalance_layout();
+            if !self.layout_dirty {
+                let _ = tmux::apply_session_style(&self.session_name);
+            }
+        }
+
         // Process inbox every 500ms
         if self.last_inbox_check.elapsed().as_millis() >= 500 {
             self.process_inbox();
@@ -1383,7 +1393,14 @@ impl App {
     }
 
     /// Rebalance tmux pane layout into a tiled grid.
-    fn rebalance_layout(&self) {
+    /// Sets `layout_dirty` so the tick handler retries if this attempt fails.
+    fn rebalance_layout(&mut self) {
+        self.layout_dirty = true;
+        self.try_rebalance_layout();
+    }
+
+    /// Attempt to apply the tiled layout. Clears `layout_dirty` on success.
+    fn try_rebalance_layout(&mut self) {
         let session_window = self.session_name.clone();
         let sidebar = self
             .sidebar_pane_id
@@ -1410,7 +1427,9 @@ impl App {
             })
             .collect();
 
-        let _ = tmux::apply_tiled_layout(&session_window, &sidebar, 38, pane_groups);
+        if tmux::apply_tiled_layout(&session_window, &sidebar, 38, pane_groups).is_ok() {
+            self.layout_dirty = false;
+        }
     }
 
     fn next_worktree_num(&self) -> usize {

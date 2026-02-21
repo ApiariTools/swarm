@@ -690,8 +690,8 @@ pub fn apply_tiled_layout(
         .output()?;
 
     if !output.status.success() {
-        // Fall back to single-column main-vertical layout
-        return apply_layout(session_window, sidebar_width);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(eyre!("select-layout failed: {}", stderr));
     }
 
     Ok(())
