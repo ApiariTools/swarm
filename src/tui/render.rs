@@ -236,12 +236,12 @@ fn draw_worktree_list(frame: &mut Frame, area: Rect, app: &App) {
 
     let items = build_sidebar_items(app);
 
-    // Headers are 1 line, worktree rows are 2 lines
+    // Headers are 1 line, worktree rows are 3 lines
     let mut constraints: Vec<Constraint> = items
         .iter()
         .map(|item| match item {
             SidebarItem::RepoHeader(_) => Constraint::Length(1),
-            SidebarItem::WorktreeRow(_) => Constraint::Length(2),
+            SidebarItem::WorktreeRow(_) => Constraint::Length(3),
         })
         .collect();
     constraints.push(Constraint::Min(0));
@@ -327,7 +327,7 @@ fn draw_worktree_row(frame: &mut Frame, area: Rect, wt: &Worktree, selected: boo
 
     let row_chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Length(1)])
+        .constraints([Constraint::Length(1), Constraint::Length(1), Constraint::Length(1)])
         .split(area);
 
     // Line 1: color bar + selector + status + name + indicator + PR
@@ -389,6 +389,29 @@ fn draw_worktree_row(frame: &mut Frame, area: Rect, wt: &Worktree, selected: boo
         ),
     ]);
     frame.render_widget(Paragraph::new(line2), row_chunks[1]);
+
+    // Line 3: task summary (or truncated prompt as fallback)
+    let max_summary_len = (area.width as usize).saturating_sub(3); // bar + 2 spaces
+    let (summary_text, summary_style) = if let Some(ref summary) = wt.summary {
+        (
+            truncate_str(summary, max_summary_len),
+            Style::default().fg(Color::Rgb(140, 137, 130)),
+        )
+    } else if !wt.prompt.is_empty() {
+        (
+            truncate_str(&wt.prompt, max_summary_len),
+            Style::default().fg(Color::Rgb(90, 87, 80)),
+        )
+    } else {
+        (String::new(), theme::muted())
+    };
+
+    let line3 = Line::from(vec![
+        Span::styled("\u{258c}", Style::default().fg(wt_color)),
+        Span::styled("  ", Style::default()),
+        Span::styled(summary_text, summary_style),
+    ]);
+    frame.render_widget(Paragraph::new(line3), row_chunks[2]);
 }
 
 fn draw_status_bar(frame: &mut Frame, area: Rect, app: &App) {
