@@ -30,6 +30,8 @@ pub struct WorktreeState {
     pub agent: Option<PaneState>,
     #[serde(default)]
     pub terminals: Vec<PaneState>,
+    #[serde(default)]
+    pub summary: Option<String>,
 }
 
 /// All swarm state for a workspace.

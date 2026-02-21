@@ -6,6 +6,7 @@ use color_eyre::Result;
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::Instant;
+use tokio::sync::mpsc;
 
 /// Pane foreground colors for selected/dimmed states.
 const PANE_FG_SELECTED: &str = "#dcdce1"; // full FROST brightness
@@ -61,6 +62,8 @@ pub struct Worktree {
     pub agent: Option<TrackedPane>,
     pub terminals: Vec<TrackedPane>,
     pub pr: Option<PrInfo>,
+    /// LLM-generated short summary of the task prompt.
+    pub summary: Option<String>,
     /// Prompt to send once the agent is ready (sent after a delay, then cleared).
     pub pending_prompt: Option<(String, Instant)>,
 }
@@ -85,6 +88,7 @@ impl Worktree {
                 .iter()
                 .map(|p| state::PaneState::new(p.pane_id.clone()))
                 .collect(),
+            summary: self.summary.clone(),
         }
     }
 
@@ -111,6 +115,7 @@ impl Worktree {
                 })
                 .collect(),
             pr: None,
+            summary: ws.summary.clone(),
             pending_prompt: None,
         }
     }
@@ -195,6 +200,8 @@ pub struct App {
     last_pr_check: Instant,
     last_inbox_check: Instant,
     last_inbox_pos: u64,
+    summary_tx: mpsc::UnboundedSender<(String, String)>,
+    summary_rx: mpsc::UnboundedReceiver<(String, String)>,
 }
 
 impl App {
@@ -208,6 +215,8 @@ impl App {
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "swarm".to_string());
         let session_name = format!("swarm-{}", dir_name);
+
+        let (summary_tx, summary_rx) = mpsc::unbounded_channel();
 
         let mut app = Self {
             work_dir,
@@ -233,6 +242,8 @@ impl App {
             last_pr_check: Instant::now(),
             last_inbox_check: Instant::now(),
             last_inbox_pos: 0,
+            summary_tx,
+            summary_rx,
         };
 
         // Restore previous session
@@ -345,6 +356,7 @@ impl App {
                         agent: None,
                         terminals: Vec::new(),
                         pr: None,
+                        summary: None,
                         pending_prompt: None,
                     });
                     orphan_count += 1;
@@ -363,6 +375,14 @@ impl App {
                 self.apply_worktree_color(i);
             }
             self.update_pane_selection();
+
+            // Request summaries for worktrees that don't have one yet
+            for wt in &self.worktrees {
+                if wt.summary.is_none() && !wt.prompt.is_empty() {
+                    self.request_summary(wt.id.clone(), wt.prompt.clone());
+                }
+            }
+
             self.flash(format!(
                 "restored {} worktree{}",
                 total,
@@ -848,6 +868,7 @@ impl App {
             }),
             terminals: Vec::new(),
             pr: None,
+            summary: None,
             pending_prompt: None,
         });
 
@@ -865,6 +886,9 @@ impl App {
             let _ = tmux::select_pane(sidebar);
         }
         self.save_state();
+
+        // Request LLM-generated summary for the task prompt
+        self.request_summary(window_name.clone(), prompt.to_string());
 
         // Emit event
         let _ = ipc::emit_event(
@@ -1151,11 +1175,36 @@ impl App {
         }
     }
 
+    // ── Summary Generation ─────────────────────────────────
+
+    fn request_summary(&self, worktree_id: String, prompt: String) {
+        let tx = self.summary_tx.clone();
+        tokio::spawn(async move {
+            if let Some(summary) = generate_summary_via_claude(&prompt).await {
+                let _ = tx.send((worktree_id, summary));
+            }
+        });
+    }
+
+    fn collect_summaries(&mut self) {
+        let mut changed = false;
+        while let Ok((id, summary)) = self.summary_rx.try_recv() {
+            if let Some(wt) = self.worktrees.iter_mut().find(|w| w.id == id) {
+                wt.summary = Some(summary);
+                changed = true;
+            }
+        }
+        if changed {
+            self.save_state();
+        }
+    }
+
     // ── Tick ───────────────────────────────────────────────
 
     pub fn tick(&mut self) {
         self.tick_count += 1;
 
+        self.collect_summaries();
         self.deliver_pending_prompts();
 
         // Process inbox every 500ms
@@ -1385,4 +1434,30 @@ fn sanitize(s: &str) -> String {
         .chars()
         .take(40)
         .collect()
+}
+
+/// Generate a short task summary using the Claude CLI.
+/// Returns None if the CLI is unavailable or produces bad output.
+async fn generate_summary_via_claude(prompt: &str) -> Option<String> {
+    let output = tokio::process::Command::new("claude")
+        .args([
+            "--print",
+            &format!(
+                "Summarize this coding task in 4-6 words, lowercase, no punctuation: {}",
+                prompt
+            ),
+        ])
+        .output()
+        .await
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if text.is_empty() || text.len() > 80 {
+        return None;
+    }
+    Some(text)
 }
