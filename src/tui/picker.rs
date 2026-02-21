@@ -7,7 +7,7 @@ use crossterm::{
     ExecutableCommand,
 };
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Paragraph};
+use ratatui::widgets::{Block, Paragraph, Wrap};
 use std::io::stdout;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -117,6 +117,10 @@ fn picker_loop(
                             } else {
                                 break;
                             }
+                        }
+                        KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => {
+                            picker.input_buffer.insert(picker.input_cursor, '\n');
+                            picker.input_cursor += 1;
                         }
                         KeyCode::Enter => {
                             if !picker.input_buffer.trim().is_empty() {
@@ -274,6 +278,9 @@ fn draw_repo_phase(frame: &mut Frame, area: Rect, picker: &Picker) {
 fn draw_input_phase(frame: &mut Frame, area: Rect, picker: &Picker) {
     let inner = area;
 
+    // Track how much vertical space is used at the top
+    let mut content_y = inner.y + 1;
+
     // Show repo context if multi-repo
     if picker.repos.len() > 1 {
         let repo_name = git::repo_name(&picker.repos[picker.repo_index]);
@@ -283,43 +290,91 @@ fn draw_input_phase(frame: &mut Frame, area: Rect, picker: &Picker) {
         ]);
         frame.render_widget(
             Paragraph::new(ctx),
-            Rect::new(inner.x, inner.y + 1, inner.width, 1),
+            Rect::new(inner.x, content_y, inner.width, 1),
         );
+        content_y += 2; // repo line + spacer
     }
 
-    // Input line centered vertically
-    let input_y = inner.y + inner.height / 2;
+    // Split buffer into lines and locate cursor
+    let buf_lines: Vec<&str> = picker.input_buffer.split('\n').collect();
+    let mut cursor_line = 0usize;
+    let mut cursor_col = 0usize;
+    let mut pos = 0usize;
+    for (i, line) in buf_lines.iter().enumerate() {
+        let line_chars = line.chars().count();
+        if pos + line_chars >= picker.input_cursor && i <= buf_lines.len() - 1 {
+            cursor_line = i;
+            cursor_col = picker.input_cursor - pos;
+            break;
+        }
+        pos += line_chars + 1; // +1 for the \n
+    }
 
-    let before: String = picker.input_buffer.chars().take(picker.input_cursor).collect();
-    let cursor_char = picker
-        .input_buffer
-        .chars()
-        .nth(picker.input_cursor)
-        .unwrap_or(' ');
-    let after: String = picker
-        .input_buffer
-        .chars()
-        .skip(picker.input_cursor + 1)
-        .collect();
+    // Build styled lines with cursor highlight
+    let mut styled_lines: Vec<Line> = Vec::new();
+    for (i, line_str) in buf_lines.iter().enumerate() {
+        let prefix = if i == 0 { " > " } else { "   " };
+        let prefix_style = if i == 0 { theme::accent() } else { theme::text() };
 
-    let input_line = Line::from(vec![
-        Span::styled(" > ", theme::accent()),
-        Span::styled(before, theme::text()),
-        Span::styled(
-            cursor_char.to_string(),
-            Style::default().fg(theme::COMB).bg(theme::HONEY),
-        ),
-        Span::styled(after, theme::text()),
-    ]);
+        if i == cursor_line {
+            let before: String = line_str.chars().take(cursor_col).collect();
+            let cursor_char = line_str.chars().nth(cursor_col).unwrap_or(' ');
+            let after: String = line_str.chars().skip(cursor_col + 1).collect();
+
+            styled_lines.push(Line::from(vec![
+                Span::styled(prefix, prefix_style),
+                Span::styled(before, theme::text()),
+                Span::styled(
+                    cursor_char.to_string(),
+                    Style::default().fg(theme::COMB).bg(theme::HONEY),
+                ),
+                Span::styled(after, theme::text()),
+            ]));
+        } else {
+            styled_lines.push(Line::from(vec![
+                Span::styled(prefix, prefix_style),
+                Span::styled(line_str.to_string(), theme::text()),
+            ]));
+        }
+    }
+
+    // Reserve 1 row for the hint line at the bottom
+    let input_height = (inner.y + inner.height).saturating_sub(content_y + 1);
+    let input_area = Rect::new(inner.x, content_y, inner.width, input_height);
+
+    // Calculate scroll to keep cursor visible
+    let wrap_width = inner.width as usize;
+    let mut visual_lines_before_cursor = 0usize;
+    for (_i, line_str) in buf_lines.iter().enumerate().take(cursor_line) {
+        let prefix_len = 3; // " > " or "   "
+        let line_width = prefix_len + line_str.chars().count();
+        visual_lines_before_cursor += 1 + line_width.saturating_sub(1) / wrap_width.max(1);
+    }
+    let cursor_prefix_len = 3;
+    let cursor_line_width = cursor_prefix_len + cursor_col;
+    visual_lines_before_cursor += cursor_line_width / wrap_width.max(1);
+
+    let visible = input_height as usize;
+    let scroll = if visual_lines_before_cursor >= visible {
+        (visual_lines_before_cursor - visible + 1) as u16
+    } else {
+        0
+    };
+
+    let text = Text::from(styled_lines);
     frame.render_widget(
-        Paragraph::new(input_line),
-        Rect::new(inner.x, input_y, inner.width, 1),
+        Paragraph::new(text)
+            .wrap(Wrap { trim: false })
+            .scroll((scroll, 0)),
+        input_area,
     );
 
     // Hint at bottom
     let hint = Line::from(vec![
-        Span::styled("enter", theme::key_hint()),
+        Span::styled("\u{21b5}", theme::key_hint()),
         Span::styled(" submit  ", theme::key_desc()),
+        Span::styled("alt+\u{21b5}", theme::key_hint()),
+        Span::styled(" newline  ", theme::key_desc()),
         Span::styled("esc", theme::key_hint()),
         Span::styled(" back", theme::key_desc()),
     ]);
