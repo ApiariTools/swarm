@@ -680,6 +680,7 @@ fn draw_help_overlay(frame: &mut Frame, area: Rect) {
     let keys = vec![
         ("n", "new worktree + agent"),
         ("t", "add terminal pane"),
+        ("p", "show PR url"),
         ("j/k", "navigate worktrees"),
         ("\u{21b5}", "jump to agent pane"),
         ("m", "merge worktree to base"),

@@ -58,6 +58,7 @@ async fn event_loop(
                         }
                         KeyCode::Char('n') => app.start_new_worktree(),
                         KeyCode::Char('t') => app.add_terminal_to_selected(),
+                        KeyCode::Char('p') => app.show_pr_url(),
                         KeyCode::Char('j') | KeyCode::Down => app.select_next(),
                         KeyCode::Char('k') | KeyCode::Up => app.select_prev(),
                         KeyCode::Enter => app.jump_to_selected(),
