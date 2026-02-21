@@ -16,6 +16,8 @@ pub enum InboxMessage {
         agent: String,
         #[serde(default)]
         repo: Option<String>,
+        #[serde(default)]
+        start_point: Option<String>,
         timestamp: DateTime<Local>,
     },
     Send {

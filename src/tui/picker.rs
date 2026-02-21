@@ -19,6 +19,8 @@ enum Phase {
     RepoSelect,
     Input,
     AgentSelect,
+    Fetching,
+    FetchConfirm,
 }
 
 struct Picker {
@@ -29,6 +31,8 @@ struct Picker {
     input_buffer: String,
     input_cursor: usize,
     agent_index: usize,
+    start_point: Option<String>,
+    fetch_status: Option<String>,
 }
 
 impl Picker {
@@ -46,11 +50,20 @@ impl Picker {
             input_buffer: String::new(),
             input_cursor: 0,
             agent_index: 0,
+            start_point: None,
+            fetch_status: None,
         }
+    }
+
+    fn selected_repo(&self) -> PathBuf {
+        self.repos
+            .get(self.repo_index)
+            .cloned()
+            .unwrap_or_else(|| self.work_dir.clone())
     }
 }
 
-/// Run the popup picker TUI (repo → task → agent). Writes to IPC inbox on confirm.
+/// Run the popup picker TUI (repo -> task -> agent -> fetch). Writes to IPC inbox on confirm.
 pub fn run_picker(work_dir: PathBuf, repos: Vec<PathBuf>) -> Result<()> {
     stdout().execute(EnterAlternateScreen)?;
     enable_raw_mode()?;
@@ -73,6 +86,14 @@ fn picker_loop(
 ) -> Result<()> {
     loop {
         terminal.draw(|frame| draw_picker(frame, picker))?;
+
+        // Fetching phase runs logic immediately (no key input needed)
+        if matches!(picker.phase, Phase::Fetching) {
+            if run_fetch(picker)? {
+                break;
+            }
+            continue;
+        }
 
         if event::poll(Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
@@ -166,29 +187,96 @@ fn picker_loop(
                             };
                         }
                         KeyCode::Enter => {
-                            submit_picker(picker)?;
-                            break;
+                            picker.phase = Phase::Fetching;
                         }
                         KeyCode::Char('1') => {
                             picker.agent_index = 0;
-                            submit_picker(picker)?;
-                            break;
+                            picker.phase = Phase::Fetching;
                         }
                         KeyCode::Char('2') => {
                             if AgentKind::all().len() > 1 {
                                 picker.agent_index = 1;
-                                submit_picker(picker)?;
-                                break;
+                                picker.phase = Phase::Fetching;
                             }
                         }
                         _ => {}
                     },
+                    Phase::FetchConfirm => match key.code {
+                        KeyCode::Char('y') | KeyCode::Enter => {
+                            picker.start_point = Some("origin/main".to_string());
+                            submit_picker(picker)?;
+                            break;
+                        }
+                        KeyCode::Char('n') | KeyCode::Esc => {
+                            picker.start_point = None;
+                            submit_picker(picker)?;
+                            break;
+                        }
+                        _ => {}
+                    },
+                    Phase::Fetching => unreachable!(),
                 }
             }
         }
     }
 
     Ok(())
+}
+
+/// Run the fetch + ff-only merge logic. Transitions to FetchConfirm or submits directly.
+/// Returns Ok(true) if submitted (caller should break), Ok(false) if moved to FetchConfirm.
+fn run_fetch(picker: &mut Picker) -> Result<bool> {
+    let repo_path = picker.selected_repo();
+
+    // Determine the local branch name
+    let local_branch = match git::current_branch(&repo_path) {
+        Ok(b) if b != "HEAD" => b,
+        _ => {
+            // Detached HEAD or error — skip fetch, submit directly
+            picker.start_point = None;
+            submit_picker(picker)?;
+            return Ok(true);
+        }
+    };
+
+    let remote_ref = format!("origin/{}", local_branch);
+
+    // Try to fetch
+    picker.fetch_status = Some("fetching origin...".to_string());
+    let fetch_ok = git::fetch_origin(&repo_path).unwrap_or(false);
+
+    if !fetch_ok {
+        // No remote or offline — proceed with local HEAD
+        picker.start_point = None;
+        submit_picker(picker)?;
+        return Ok(true);
+    }
+
+    // Check if local is behind
+    let behind = git::commits_behind(&repo_path, &local_branch, &remote_ref).unwrap_or(0);
+    if behind == 0 {
+        // Already up to date
+        picker.start_point = None;
+        submit_picker(picker)?;
+        return Ok(true);
+    }
+
+    // Local is behind — try ff-only merge
+    let ff_ok = git::merge_ff_only(&repo_path, &remote_ref).unwrap_or(false);
+    if ff_ok {
+        // Successfully fast-forwarded, proceed with local HEAD (now current)
+        picker.start_point = None;
+        submit_picker(picker)?;
+        return Ok(true);
+    }
+
+    // ff-only failed — local has diverged, ask user
+    picker.fetch_status = Some(format!(
+        "local {} has diverged from {}",
+        local_branch, remote_ref
+    ));
+    picker.phase = Phase::FetchConfirm;
+    Ok(false)
 }
 
 fn submit_picker(picker: &Picker) -> Result<()> {
@@ -205,6 +293,7 @@ fn submit_picker(picker: &Picker) -> Result<()> {
         prompt: picker.input_buffer.clone(),
         agent: agent.label().to_string(),
         repo: repo_name,
+        start_point: picker.start_point.clone(),
         timestamp: Local::now(),
     };
     ipc::write_inbox(&picker.work_dir, &msg)?;
@@ -224,6 +313,8 @@ fn draw_picker(frame: &mut Frame, picker: &Picker) {
         Phase::RepoSelect => draw_repo_phase(frame, area, picker),
         Phase::Input => draw_input_phase(frame, area, picker),
         Phase::AgentSelect => draw_agent_phase(frame, area, picker),
+        Phase::Fetching => draw_fetching_phase(frame, area, picker),
+        Phase::FetchConfirm => draw_fetch_confirm_phase(frame, area, picker),
     }
 }
 
@@ -436,6 +527,68 @@ fn draw_agent_phase(frame: &mut Frame, area: Rect, picker: &Picker) {
         Span::styled(" confirm  ", theme::key_desc()),
         Span::styled("esc", theme::key_hint()),
         Span::styled(" back", theme::key_desc()),
+    ]);
+    let hint_y = inner.y + inner.height.saturating_sub(1);
+    frame.render_widget(
+        Paragraph::new(hint),
+        Rect::new(inner.x + 1, hint_y, inner.width.saturating_sub(2), 1),
+    );
+}
+
+fn draw_fetching_phase(frame: &mut Frame, area: Rect, picker: &Picker) {
+    let inner = area;
+
+    let status = picker
+        .fetch_status
+        .as_deref()
+        .unwrap_or("fetching origin...");
+
+    let line = Line::from(Span::styled(
+        format!(" {}", status),
+        theme::accent(),
+    ));
+    let y = inner.y + inner.height / 2;
+    frame.render_widget(
+        Paragraph::new(line),
+        Rect::new(inner.x, y, inner.width, 1),
+    );
+}
+
+fn draw_fetch_confirm_phase(frame: &mut Frame, area: Rect, picker: &Picker) {
+    let inner = area;
+
+    let status = picker
+        .fetch_status
+        .as_deref()
+        .unwrap_or("local branch has diverged from origin");
+
+    // Status message
+    let status_line = Line::from(Span::styled(
+        format!(" {}", status),
+        theme::text(),
+    ));
+    let y = inner.y + inner.height / 2 - 1;
+    frame.render_widget(
+        Paragraph::new(status_line),
+        Rect::new(inner.x, y, inner.width, 1),
+    );
+
+    // Prompt
+    let prompt_line = Line::from(Span::styled(
+        " branch from origin instead? (y/n)",
+        theme::accent(),
+    ));
+    frame.render_widget(
+        Paragraph::new(prompt_line),
+        Rect::new(inner.x, y + 2, inner.width, 1),
+    );
+
+    // Hint
+    let hint = Line::from(vec![
+        Span::styled("y", theme::key_hint()),
+        Span::styled(" use origin  ", theme::key_desc()),
+        Span::styled("n", theme::key_hint()),
+        Span::styled(" use local", theme::key_desc()),
     ]);
     let hint_y = inner.y + inner.height.saturating_sub(1);
     frame.render_widget(

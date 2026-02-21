@@ -741,12 +741,12 @@ impl App {
         self.input_buffer.clear();
         self.input_cursor = 0;
 
-        if let Err(e) = self.create_worktree_with_agent(&prompt, agent, &repo_path) {
+        if let Err(e) = self.create_worktree_with_agent(&prompt, agent, &repo_path, None) {
             self.flash(format!("error: {}", e));
         }
     }
 
-    fn create_worktree_with_agent(&mut self, prompt: &str, agent: AgentKind, repo_path: &std::path::Path) -> Result<()> {
+    fn create_worktree_with_agent(&mut self, prompt: &str, agent: AgentKind, repo_path: &std::path::Path, start_point: Option<&str>) -> Result<()> {
         self.ensure_session()?;
 
         let repo_path = repo_path.to_path_buf();
@@ -773,7 +773,7 @@ impl App {
             std::fs::create_dir_all(parent)?;
         }
 
-        git::create_worktree(&repo_path, &branch_name, &worktree_dir)?;
+        git::create_worktree(&repo_path, &branch_name, &worktree_dir, start_point)?;
 
         // Auto-trust mise if the repo uses it
         if repo_path.join(".mise.toml").exists() || repo_path.join("mise.toml").exists() {
@@ -1060,6 +1060,7 @@ impl App {
                     prompt,
                     agent,
                     repo,
+                    start_point,
                     ..
                 } => {
                     let agent_kind = AgentKind::from_str(&agent).unwrap_or(AgentKind::Claude);
@@ -1067,7 +1068,7 @@ impl App {
                         .and_then(|name| self.repos.iter().find(|r| git::repo_name(r) == name).cloned())
                         .or_else(|| self.repos.first().cloned())
                         .unwrap_or_else(|| self.work_dir.clone());
-                    if let Err(e) = self.create_worktree_with_agent(&prompt, agent_kind, &repo_path) {
+                    if let Err(e) = self.create_worktree_with_agent(&prompt, agent_kind, &repo_path, start_point.as_deref()) {
                         self.flash(format!("inbox create error: {}", e));
                     }
                 }
