@@ -395,12 +395,36 @@ pub fn apply_session_style(session: &str) -> Result<()> {
     let _ = Command::new("tmux")
         .args(["set-option", "-t", session, "pane-border-status", "top"])
         .output();
-    // Set pane border format: colored title using per-pane @color option
+    // Set pane border format: selection-aware conditional
+    // Selected panes get a full-width colored line; non-selected get a dimmed small swatch
+    let border_fmt = concat!(
+        "#{?#{@selected},",
+        "#[fg=#{@color}]\u{2501}\u{2501} #{pane_title} ",
+        "\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}",
+        "\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}",
+        "\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}",
+        "\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}",
+        "\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}",
+        "\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}",
+        "\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}",
+        "\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}",
+        "\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}",
+        "\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}",
+        "\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}",
+        "\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}",
+        "\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}",
+        "\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}",
+        "\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}",
+        "\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}",
+        "#[default]",
+        ",",
+        " #[fg=#{@color}]\u{2588}\u{2588}#[default]#[fg=#5a5550] #{pane_title} #[default]}",
+    );
     let _ = Command::new("tmux")
         .args([
             "set-option", "-t", session,
             "pane-border-format",
-            " #[fg=#{@color}]\u{2588}\u{2588}#[default] #{pane_title} ",
+            border_fmt,
         ])
         .output();
     // Inactive pane border color (WAX gray)
@@ -439,6 +463,15 @@ pub fn set_pane_color(pane_id: &str, hex_color: &str) -> Result<()> {
             "set-option", "-p", "-t", pane_id,
             "@color", hex_color,
         ])
+        .output()?;
+    Ok(())
+}
+
+/// Set a pane's @selected user option (used by border format conditional).
+pub fn set_pane_selected(pane_id: &str, selected: bool) -> Result<()> {
+    Command::new("tmux")
+        .args(["set-option", "-p", "-t", pane_id,
+               "@selected", if selected { "1" } else { "0" }])
         .output()?;
     Ok(())
 }

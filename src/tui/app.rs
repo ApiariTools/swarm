@@ -7,6 +7,11 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::Instant;
 
+/// Pane foreground colors for selected/dimmed states.
+const PANE_FG_SELECTED: &str = "#dcdce1"; // full FROST brightness
+const PANE_FG_DIMMED: &str = "#6e6b65"; // ~40% dimmed
+const PANE_BG: &str = "#282520"; // COMB (unchanged for both)
+
 /// Hex colors for worktree pane border titles.
 const WORKTREE_BORDER_COLORS: &[&str] = &[
     "#b47a3c", // warm brown
@@ -184,6 +189,7 @@ pub struct App {
     pub show_help: bool,
     pub tick_count: u64,
     pub sidebar_pane_id: Option<String>,
+    prev_selected: Option<usize>,
     last_refresh: Instant,
     last_pr_check: Instant,
     last_inbox_check: Instant,
@@ -221,6 +227,7 @@ impl App {
             show_help: false,
             tick_count: 0,
             sidebar_pane_id: None,
+            prev_selected: None,
             last_refresh: Instant::now(),
             last_pr_check: Instant::now(),
             last_inbox_check: Instant::now(),
@@ -330,6 +337,7 @@ impl App {
             for i in 0..total {
                 self.apply_worktree_color(i);
             }
+            self.update_pane_selection();
             self.flash(format!(
                 "restored {} worktree{}",
                 total,
@@ -355,6 +363,7 @@ impl App {
             return;
         }
         self.selected = (self.selected + 1) % self.worktrees.len();
+        self.update_pane_selection();
     }
 
     pub fn select_prev(&mut self) {
@@ -366,6 +375,7 @@ impl App {
         } else {
             self.selected - 1
         };
+        self.update_pane_selection();
     }
 
     // ── Jump to Agent Pane ─────────────────────────────────
@@ -464,6 +474,7 @@ impl App {
         });
         self.worktrees[idx].pending_prompt = None;
         self.apply_worktree_color(idx);
+        self.update_pane_selection();
         self.save_state();
 
         // Emit event
@@ -567,6 +578,7 @@ impl App {
         }
 
         self.apply_worktree_color(idx);
+        self.update_pane_selection();
         self.save_state();
         self.flash(format!("terminal {} attached", term_num));
         Ok(())
@@ -808,6 +820,8 @@ impl App {
 
         self.selected = self.worktrees.len() - 1;
         self.apply_worktree_color(self.selected);
+        self.prev_selected = None;
+        self.update_pane_selection();
         self.save_state();
 
         // Emit event
@@ -937,6 +951,8 @@ impl App {
         );
 
         self.save_state();
+        self.prev_selected = None;
+        self.update_pane_selection();
         Ok(())
     }
 
@@ -1177,6 +1193,56 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Update pane selection styling — dims non-selected worktrees, brightens selected.
+    /// Uses delta updates when possible (only touches changed worktrees).
+    fn update_pane_selection(&mut self) {
+        if self.worktrees.is_empty() {
+            self.prev_selected = None;
+            return;
+        }
+
+        let selected = self.selected;
+
+        // Determine which worktree indices to update
+        let indices_to_update: Vec<usize> = if let Some(prev) = self.prev_selected {
+            if prev == selected {
+                return; // No change
+            }
+            // Delta: only update the two changed worktrees
+            let mut v = vec![selected];
+            if prev < self.worktrees.len() {
+                v.push(prev);
+            }
+            v
+        } else {
+            // Full update (first call or after add/remove)
+            (0..self.worktrees.len()).collect()
+        };
+
+        for idx in indices_to_update {
+            let is_selected = idx == selected;
+            let fg = if is_selected { PANE_FG_SELECTED } else { PANE_FG_DIMMED };
+            let style = format!("bg={},fg={}", PANE_BG, fg);
+
+            if let Some(wt) = self.worktrees.get(idx) {
+                if let Some(ref agent) = wt.agent {
+                    if agent.status == PaneStatus::Running {
+                        let _ = tmux::set_pane_style(&agent.pane_id, &style);
+                        let _ = tmux::set_pane_selected(&agent.pane_id, is_selected);
+                    }
+                }
+                for term in &wt.terminals {
+                    if term.status == PaneStatus::Running {
+                        let _ = tmux::set_pane_style(&term.pane_id, &style);
+                        let _ = tmux::set_pane_selected(&term.pane_id, is_selected);
+                    }
+                }
+            }
+        }
+
+        self.prev_selected = Some(selected);
     }
 
     fn next_worktree_num(&self) -> usize {
