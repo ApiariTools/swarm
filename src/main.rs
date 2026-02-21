@@ -104,6 +104,10 @@ async fn run_sidebar(work_dir: std::path::PathBuf, agent: String) -> Result<()> 
             app.sidebar_pane_id = get_current_pane_id();
             if let Some(ref pane_id) = app.sidebar_pane_id {
                 let _ = core::tmux::set_pane_title(pane_id, "swarm");
+                // Mark as sidebar so pane-border-format renders no title for it
+                let _ = std::process::Command::new("tmux")
+                    .args(["set-option", "-p", "-t", pane_id, "@sidebar", "1"])
+                    .output();
             }
             app.save_state();
             tui::run(&mut app).await?;
