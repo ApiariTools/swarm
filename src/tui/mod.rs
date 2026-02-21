@@ -67,6 +67,9 @@ async fn event_loop(
                     },
                     app::Mode::Input => match key.code {
                         KeyCode::Esc => app.cancel_input(),
+                        KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => {
+                            app.input_char('\n');
+                        }
                         KeyCode::Enter => app.submit_input().await,
                         KeyCode::Backspace => app.input_backspace(),
                         KeyCode::Char(c) => app.input_char(c),
