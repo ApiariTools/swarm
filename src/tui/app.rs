@@ -483,14 +483,20 @@ impl App {
     // ── New Worktree Flow ─────────────────────────────────
 
     pub fn start_new_worktree(&mut self) {
-        if self.repos.len() > 1 {
-            self.mode = Mode::RepoSelect;
-            self.repo_select_index = 0;
-        } else {
-            self.mode = Mode::Input;
-            self.input_buffer.clear();
-            self.input_cursor = 0;
-            self.input_label = "task".to_string();
+        let exe = std::env::current_exe()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| "swarm".to_string());
+        let dir_str = self.work_dir.to_string_lossy();
+        let cmd = format!("'{}' -d '{}' pick", exe, dir_str);
+
+        if let Err(e) = tmux::display_popup(
+            &self.session_name,
+            "60%",
+            "50%",
+            " new task ",
+            &cmd,
+        ) {
+            self.flash(format!("error: {}", e));
         }
     }
 

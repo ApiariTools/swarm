@@ -466,6 +466,31 @@ pub fn apply_layout(session_window: &str, sidebar_width: u16) -> Result<()> {
     Ok(())
 }
 
+/// Launch a tmux popup overlay. Fire-and-forget — returns immediately.
+pub fn display_popup(target: &str, width: &str, height: &str, title: &str, cmd: &str) -> Result<()> {
+    let child = Command::new("tmux")
+        .args([
+            "display-popup",
+            "-E",
+            "-t", target,
+            "-w", width,
+            "-h", height,
+            "-T", title,
+            "-s", "bg=#282520",
+            "-S", "fg=#ffb74d,bg=#282520",
+            cmd,
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+
+    match child {
+        Ok(_) => Ok(()),
+        Err(e) => Err(eyre!("failed to open popup: {}", e)),
+    }
+}
+
 /// Send literal text + Enter to a pane by `%id`.
 pub fn send_keys_to_pane(pane_id: &str, text: &str) -> Result<()> {
     Command::new("tmux")

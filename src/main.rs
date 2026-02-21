@@ -54,6 +54,8 @@ enum Commands {
         /// Worktree ID
         worktree: String,
     },
+    /// Interactive picker for new worktree (runs inside tmux popup)
+    Pick,
 }
 
 #[tokio::main]
@@ -75,6 +77,10 @@ async fn main() -> Result<()> {
         Some(Commands::Send { worktree, message }) => cmd_send(work_dir, worktree, message),
         Some(Commands::Close { worktree }) => cmd_close(work_dir, worktree),
         Some(Commands::Merge { worktree }) => cmd_merge(work_dir, worktree),
+        Some(Commands::Pick) => {
+            let repos = core::git::detect_repos(&work_dir)?;
+            tui::picker::run_picker(work_dir, repos)
+        }
     }
 }
 
