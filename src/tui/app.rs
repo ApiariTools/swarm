@@ -447,7 +447,7 @@ impl App {
         let _ = tmux::set_pane_title(&pane_id, &wt_id);
 
         // Launch agent with prompt baked into the command
-        let cmd = agent.launch_cmd_with_prompt(&prompt, false);
+        let cmd = agent.launch_cmd_with_prompt(&prompt, true);
         tmux::send_keys_to_pane(&pane_id, &cmd)?;
 
         // Rebalance, re-apply styling, re-select sidebar
@@ -776,7 +776,7 @@ impl App {
         let _ = tmux::set_pane_title(&pane_id, &window_name);
 
         // Launch agent with prompt baked into the command
-        let cmd = agent.launch_cmd_with_prompt(prompt, false);
+        let cmd = agent.launch_cmd_with_prompt(prompt, true);
         tmux::send_keys_to_pane(&pane_id, &cmd)?;
 
         // Rebalance layout and re-apply styling
