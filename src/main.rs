@@ -102,6 +102,9 @@ async fn run_sidebar(work_dir: std::path::PathBuf, agent: String) -> Result<()> 
             // We're in the right session — run TUI directly (this IS the sidebar)
             let mut app = tui::app::App::new(work_dir, agent)?;
             app.sidebar_pane_id = get_current_pane_id();
+            if let Some(ref pane_id) = app.sidebar_pane_id {
+                let _ = core::tmux::set_pane_title(pane_id, "swarm");
+            }
             app.save_state();
             tui::run(&mut app).await?;
         } else {
