@@ -536,6 +536,19 @@ impl App {
         }
     }
 
+    pub fn show_pr_url(&mut self) {
+        if self.worktrees.is_empty() {
+            self.flash("no worktree selected".to_string());
+            return;
+        }
+        let wt = &self.worktrees[self.selected];
+        if let Some(ref pr) = wt.pr {
+            self.flash(pr.url.clone());
+        } else {
+            self.flash("no PR found for this worktree".to_string());
+        }
+    }
+
     pub fn add_terminal_to_selected(&mut self) {
         if self.worktrees.is_empty() {
             self.flash("no worktree selected".to_string());
@@ -1007,7 +1020,13 @@ impl App {
 
     pub fn current_status(&self) -> Option<&str> {
         self.status_message.as_ref().and_then(|(msg, when)| {
-            let duration = if msg.starts_with("error") { 10 } else { 4 };
+            let duration = if msg.starts_with("error") {
+                10
+            } else if msg.starts_with("http") {
+                30
+            } else {
+                4
+            };
             if when.elapsed().as_secs() < duration {
                 Some(msg.as_str())
             } else {
