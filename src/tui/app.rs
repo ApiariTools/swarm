@@ -1366,12 +1366,6 @@ impl App {
     /// Update pane selection styling — dims non-selected worktrees, brightens selected.
     /// Uses delta updates when possible (only touches changed worktrees).
     fn update_pane_selection(&mut self) {
-        // Always keep sidebar pane bright (even when it loses tmux focus)
-        if let Some(ref sidebar) = self.sidebar_pane_id {
-            let bright = format!("bg={},fg={},nodim", PANE_BG_SELECTED, PANE_FG_SELECTED);
-            let _ = tmux::set_pane_style(sidebar, &bright);
-        }
-
         if self.worktrees.is_empty() {
             self.prev_selected = None;
             return;
