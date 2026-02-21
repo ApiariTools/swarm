@@ -7,7 +7,7 @@ use crossterm::{
     ExecutableCommand,
 };
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, Paragraph, Wrap};
 use std::io::stdout;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -228,18 +228,18 @@ fn draw_picker(frame: &mut Frame, picker: &Picker) {
 }
 
 fn draw_repo_phase(frame: &mut Frame, area: Rect, picker: &Picker) {
-    let block = Block::default()
-        .title(Span::styled(" select repo ", theme::title()))
-        .borders(Borders::ALL)
-        .border_style(theme::border_active())
-        .style(Style::default().bg(theme::COMB));
+    let inner = area;
 
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+    // Title
+    let title = Line::from(Span::styled(" select repo", theme::title()));
+    frame.render_widget(
+        Paragraph::new(title),
+        Rect::new(inner.x, inner.y, inner.width, 1),
+    );
 
     for (i, repo) in picker.repos.iter().enumerate() {
         let is_selected = i == picker.repo_index;
-        let y = inner.y + 1 + i as u16;
+        let y = inner.y + 2 + i as u16;
         if y >= inner.y + inner.height.saturating_sub(1) {
             break;
         }
@@ -276,14 +276,7 @@ fn draw_repo_phase(frame: &mut Frame, area: Rect, picker: &Picker) {
 }
 
 fn draw_input_phase(frame: &mut Frame, area: Rect, picker: &Picker) {
-    let block = Block::default()
-        .title(Span::styled(" task ", theme::title()))
-        .borders(Borders::ALL)
-        .border_style(theme::border_active())
-        .style(Style::default().bg(theme::COMB));
-
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+    let inner = area;
 
     // Track how much vertical space is used at the top
     let mut content_y = inner.y + 1;
@@ -394,19 +387,18 @@ fn draw_input_phase(frame: &mut Frame, area: Rect, picker: &Picker) {
 
 fn draw_agent_phase(frame: &mut Frame, area: Rect, picker: &Picker) {
     let agents = AgentKind::all();
+    let inner = area;
 
-    let block = Block::default()
-        .title(Span::styled(" select agent ", theme::title()))
-        .borders(Borders::ALL)
-        .border_style(theme::border_active())
-        .style(Style::default().bg(theme::COMB));
-
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+    // Title
+    let title = Line::from(Span::styled(" select agent", theme::title()));
+    frame.render_widget(
+        Paragraph::new(title),
+        Rect::new(inner.x, inner.y, inner.width, 1),
+    );
 
     for (i, agent) in agents.iter().enumerate() {
         let is_selected = i == picker.agent_index;
-        let y = inner.y + 1 + i as u16;
+        let y = inner.y + 2 + i as u16;
         if y >= inner.y + inner.height.saturating_sub(3) {
             break;
         }
