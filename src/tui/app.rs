@@ -852,9 +852,6 @@ impl App {
         });
 
         self.selected = self.worktrees.len() - 1;
-        self.apply_worktree_color(self.selected);
-        self.prev_selected = None;
-        self.update_pane_selection();
 
         // Rebalance layout and re-apply styling (after push so the new pane is included)
         self.rebalance_layout();
@@ -864,6 +861,12 @@ impl App {
         if let Some(ref sidebar) = self.sidebar_pane_id {
             let _ = tmux::select_pane(sidebar);
         }
+
+        // Apply per-pane colors/selection AFTER layout + session style
+        // so they aren't overwritten by rebalance or apply_session_style
+        self.apply_worktree_color(self.selected);
+        self.prev_selected = None;
+        self.update_pane_selection();
         self.save_state();
 
         // Emit event
@@ -1271,6 +1274,12 @@ impl App {
     /// Update pane selection styling — dims non-selected worktrees, brightens selected.
     /// Uses delta updates when possible (only touches changed worktrees).
     fn update_pane_selection(&mut self) {
+        // Always keep sidebar pane bright (even when it loses tmux focus)
+        if let Some(ref sidebar) = self.sidebar_pane_id {
+            let bright = format!("bg={},fg={},nodim", PANE_BG_SELECTED, PANE_FG_SELECTED);
+            let _ = tmux::set_pane_style(sidebar, &bright);
+        }
+
         if self.worktrees.is_empty() {
             self.prev_selected = None;
             return;
@@ -1298,7 +1307,12 @@ impl App {
             let is_selected = idx == selected;
             let fg = if is_selected { PANE_FG_SELECTED } else { PANE_FG_DIMMED };
             let bg = if is_selected { PANE_BG_SELECTED } else { PANE_BG_DIMMED };
-            let style = format!("bg={},fg={}", bg, fg);
+            // Use dim/nodim attribute so colorized terminal output is also affected
+            let style = if is_selected {
+                format!("bg={},fg={},nodim", bg, fg)
+            } else {
+                format!("bg={},fg={},dim", bg, fg)
+            };
 
             if let Some(wt) = self.worktrees.get(idx) {
                 if let Some(ref agent) = wt.agent {

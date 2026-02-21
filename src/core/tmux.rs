@@ -379,17 +379,19 @@ pub fn pane_exists(pane_id: &str) -> bool {
 
 /// Apply session styling: pane borders, colors, background, disable status bar.
 pub fn apply_session_style(session: &str) -> Result<()> {
-    // Dark background + light text for ALL panes (COMB bg, FROST fg)
+    // Default pane style: dimmed (non-selected panes recede visually).
+    // Per-pane overrides brighten the selected worktree's panes.
     let _ = Command::new("tmux")
         .args([
             "set-option", "-t", session,
-            "window-style", "bg=#282520,fg=#dcdce1",
+            "window-style", "bg=#1a1816,fg=#504d48,dim",
         ])
         .output();
+    // Active pane (sidebar, or whichever has tmux focus) stays bright
     let _ = Command::new("tmux")
         .args([
             "set-option", "-t", session,
-            "window-active-style", "bg=#282520,fg=#dcdce1",
+            "window-active-style", "bg=#282520,fg=#dcdce1,nodim",
         ])
         .output();
     // Padded borders for visible gaps between panes
