@@ -104,8 +104,6 @@ async fn run_sidebar(work_dir: std::path::PathBuf, agent: String) -> Result<()> 
             app.sidebar_pane_id = get_current_pane_id();
             if let Some(ref pane_id) = app.sidebar_pane_id {
                 let _ = core::tmux::set_pane_title(pane_id, "swarm");
-                // Keep sidebar bright even when window-style defaults to dimmed
-                let _ = core::tmux::set_pane_style(pane_id, "bg=#282520,fg=#dcdce1,nodim");
             }
             app.save_state();
             tui::run(&mut app).await?;
