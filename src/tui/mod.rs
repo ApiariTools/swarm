@@ -6,9 +6,9 @@ pub mod theme;
 use app::App;
 use color_eyre::Result;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyModifiers},
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     ExecutableCommand,
+    event::{self, Event, KeyCode, KeyModifiers},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::prelude::*;
 use std::io::stdout;
@@ -43,9 +43,7 @@ async fn event_loop(
         if event::poll(Duration::from_millis(poll_ms))? {
             if let Event::Key(key) = event::read()? {
                 // Ctrl+C always quits
-                if key.modifiers.contains(KeyModifiers::CONTROL)
-                    && key.code == KeyCode::Char('c')
-                {
+                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
                     app.save_state();
                     break;
                 }
@@ -85,10 +83,12 @@ async fn event_loop(
                         KeyCode::Char('k') | KeyCode::Up => app.repo_select_prev(),
                         KeyCode::Enter => app.confirm_repo(),
                         KeyCode::Char(c @ '1'..='9') => {
-                            app.select_repo_by_index((c as usize) - ('1' as usize)).await;
+                            app.select_repo_by_index((c as usize) - ('1' as usize))
+                                .await;
                         }
                         KeyCode::Char(c @ 'a'..='z') if c != 'j' && c != 'k' => {
-                            app.select_repo_by_index(9 + (c as usize) - ('a' as usize)).await;
+                            app.select_repo_by_index(9 + (c as usize) - ('a' as usize))
+                                .await;
                         }
                         _ => {}
                     },
@@ -108,9 +108,7 @@ async fn event_loop(
                         _ => {}
                     },
                     app::Mode::Help => match key.code {
-                        KeyCode::Char('?') | KeyCode::Esc | KeyCode::Char('q') => {
-                            app.toggle_help()
-                        }
+                        KeyCode::Char('?') | KeyCode::Esc | KeyCode::Char('q') => app.toggle_help(),
                         _ => {}
                     },
                     app::Mode::PrDetail => match key.code {

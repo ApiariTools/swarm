@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 pub enum AgentKind {
     Claude,
     Codex,
+    #[serde(rename = "claude-tui")]
+    ClaudeTui,
 }
 
 impl AgentKind {
@@ -15,6 +17,7 @@ impl AgentKind {
         match s.to_lowercase().as_str() {
             "claude" => Some(Self::Claude),
             "codex" => Some(Self::Codex),
+            "claude-tui" => Some(Self::ClaudeTui),
             _ => None,
         }
     }
@@ -24,6 +27,7 @@ impl AgentKind {
         match self {
             Self::Claude => "Claude Code",
             Self::Codex => "Codex",
+            Self::ClaudeTui => "Claude TUI",
         }
     }
 
@@ -32,6 +36,7 @@ impl AgentKind {
         match self {
             Self::Claude => "claude",
             Self::Codex => "codex",
+            Self::ClaudeTui => "claude-tui",
         }
     }
 
@@ -47,6 +52,16 @@ impl AgentKind {
                 format!("claude{}", flags)
             }
             Self::Codex => "codex".to_string(),
+            Self::ClaudeTui => {
+                let exe = std::env::current_exe()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_else(|_| "swarm".to_string());
+                let mut cmd = format!("'{}' agent-tui", exe);
+                if dangerously_skip {
+                    cmd.push_str(" --dangerously-skip-permissions");
+                }
+                cmd
+            }
         }
     }
 
@@ -56,12 +71,18 @@ impl AgentKind {
         if prompt.trim().is_empty() {
             return base;
         }
-        format!("{} {}", base, shell_quote(prompt))
+        match self {
+            Self::ClaudeTui => {
+                // agent-tui takes prompt as a positional arg
+                format!("{} {}", base, shell_quote(prompt))
+            }
+            _ => format!("{} {}", base, shell_quote(prompt)),
+        }
     }
 
     /// All available agents.
     pub fn all() -> Vec<Self> {
-        vec![Self::Claude, Self::Codex]
+        vec![Self::Claude, Self::Codex, Self::ClaudeTui]
     }
 }
 
@@ -70,5 +91,3 @@ impl std::fmt::Display for AgentKind {
         write!(f, "{}", self.name())
     }
 }
-
-

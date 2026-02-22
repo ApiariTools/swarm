@@ -225,7 +225,12 @@ pub fn detect_repos(dir: &Path) -> Result<Vec<PathBuf>> {
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.is_dir() && !path.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.')) && is_git_repo(&path) {
+            if path.is_dir()
+                && !path
+                    .file_name()
+                    .is_some_and(|n| n.to_string_lossy().starts_with('.'))
+                && is_git_repo(&path)
+            {
                 child_repos.push(path);
             }
         }

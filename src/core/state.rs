@@ -32,6 +32,14 @@ pub struct WorktreeState {
     pub terminals: Vec<PaneState>,
     #[serde(default)]
     pub summary: Option<String>,
+    /// Agent status: "running" or "done". Computed at serialization time,
+    /// not persisted (defaults to "running" when loading from disk).
+    #[serde(default = "default_status")]
+    pub status: String,
+}
+
+fn default_status() -> String {
+    "running".to_string()
 }
 
 /// All swarm state for a workspace.

@@ -1,3 +1,4 @@
+mod agent_tui;
 mod core;
 mod tui;
 
@@ -56,6 +57,17 @@ enum Commands {
     },
     /// Interactive picker for new worktree (runs inside tmux popup)
     Pick,
+    /// Run the TUI-native Claude agent (launched inside a tmux pane)
+    AgentTui {
+        /// Task prompt
+        prompt: Option<String>,
+        /// Worktree ID (for event log path)
+        #[arg(long)]
+        worktree_id: Option<String>,
+        /// Skip all permission checks
+        #[arg(long)]
+        dangerously_skip_permissions: bool,
+    },
 }
 
 #[tokio::main]
@@ -80,6 +92,20 @@ async fn main() -> Result<()> {
         Some(Commands::Pick) => {
             let repos = core::git::detect_repos(&work_dir)?;
             tui::picker::run_picker(work_dir, repos)
+        }
+        Some(Commands::AgentTui {
+            prompt,
+            worktree_id,
+            dangerously_skip_permissions,
+        }) => {
+            let prompt = prompt.unwrap_or_default();
+            agent_tui::run(agent_tui::AgentTuiArgs {
+                prompt,
+                worktree_id,
+                dangerously_skip_permissions,
+                work_dir,
+            })
+            .await
         }
     }
 }
@@ -130,11 +156,7 @@ async fn run_sidebar(work_dir: std::path::PathBuf, agent: String) -> Result<()> 
         // Not inside tmux
         if !core::tmux::session_exists(&session_name) {
             let cmd = build_swarm_cmd(&work_dir, &agent);
-            core::tmux::create_session_with_cmd(
-                &session_name,
-                &work_dir.to_string_lossy(),
-                &cmd,
-            )?;
+            core::tmux::create_session_with_cmd(&session_name, &work_dir.to_string_lossy(), &cmd)?;
             core::tmux::apply_session_style(&session_name)?;
         }
         core::tmux::attach_session(&session_name)?;
@@ -183,11 +205,7 @@ fn ensure_swarm_running(work_dir: &std::path::Path, agent: &str) -> Result<()> {
     if !core::tmux::session_exists(&session_name) {
         eprintln!("[swarm] Starting swarm session: {session_name}");
         let cmd = build_swarm_cmd(work_dir, agent);
-        core::tmux::create_session_with_cmd(
-            &session_name,
-            &work_dir.to_string_lossy(),
-            &cmd,
-        )?;
+        core::tmux::create_session_with_cmd(&session_name, &work_dir.to_string_lossy(), &cmd)?;
         core::tmux::apply_session_style(&session_name)?;
     }
 
@@ -199,8 +217,13 @@ fn ensure_swarm_running(work_dir: &std::path::Path, agent: &str) -> Result<()> {
 fn cmd_status(work_dir: std::path::PathBuf, json: bool) -> Result<()> {
     let state = core::state::load_state(&work_dir)?;
     match state {
-        Some(s) => {
+        Some(mut s) => {
             if json {
+                // Check tmux pane liveness to compute accurate status
+                let live_panes = live_pane_ids(&s.session_name);
+                for wt in &mut s.worktrees {
+                    wt.status = worktree_status(wt, &live_panes);
+                }
                 println!("{}", serde_json::to_string_pretty(&s)?);
             } else {
                 println!("session: {}", s.session_name);
@@ -233,6 +256,39 @@ fn cmd_status(work_dir: std::path::PathBuf, json: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Get all live tmux pane IDs for a session.
+fn live_pane_ids(session: &str) -> Vec<String> {
+    // Use -s to list panes across all windows in the session
+    std::process::Command::new("tmux")
+        .args(["list-panes", "-s", "-t", session, "-F", "#{pane_id}"])
+        .output()
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Determine worktree status by checking if any of its panes are still live.
+fn worktree_status(wt: &core::state::WorktreeState, live_panes: &[String]) -> String {
+    let agent_alive = wt
+        .agent
+        .as_ref()
+        .is_some_and(|a| live_panes.contains(&a.pane_id));
+    let term_alive = wt
+        .terminals
+        .iter()
+        .any(|t| live_panes.contains(&t.pane_id));
+    if agent_alive || term_alive {
+        "running".to_string()
+    } else {
+        "done".to_string()
+    }
 }
 
 fn cmd_create(work_dir: std::path::PathBuf, prompt: String, agent: String) -> Result<()> {
