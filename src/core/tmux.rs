@@ -45,9 +45,7 @@ pub fn create_session(name: &str, dir: &str) -> Result<()> {
 /// (instead of a shell). The pane's process IS the command.
 pub fn create_session_with_cmd(name: &str, dir: &str, cmd: &str) -> Result<()> {
     let output = Command::new("tmux")
-        .args([
-            "new-session", "-d", "-s", name, "-c", dir, cmd,
-        ])
+        .args(["new-session", "-d", "-s", name, "-c", dir, cmd])
         .output()?;
 
     if !output.status.success() {
@@ -142,15 +140,7 @@ pub fn select_window(target: &str) -> Result<()> {
 pub fn capture_pane(target: &str, lines: u32) -> Result<String> {
     let start = format!("-{}", lines);
     let output = Command::new("tmux")
-        .args([
-            "capture-pane",
-            "-t",
-            target,
-            "-p",
-            "-S",
-            &start,
-            "-J",
-        ])
+        .args(["capture-pane", "-t", target, "-p", "-S", &start, "-J"])
         .output()?;
 
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
@@ -174,11 +164,7 @@ pub fn list_windows(session: &str) -> Result<Vec<(String, String, bool)>> {
     for line in text.lines() {
         let parts: Vec<&str> = line.split('\t').collect();
         if parts.len() >= 3 {
-            windows.push((
-                parts[0].to_string(),
-                parts[1].to_string(),
-                parts[2] == "1",
-            ));
+            windows.push((parts[0].to_string(), parts[1].to_string(), parts[2] == "1"));
         }
     }
 
@@ -362,12 +348,7 @@ pub fn list_panes(target: &str) -> Result<Vec<PaneInfo>> {
 /// Check if a pane exists by ID.
 pub fn pane_exists(pane_id: &str) -> bool {
     Command::new("tmux")
-        .args([
-            "list-panes",
-            "-a",
-            "-F",
-            "#{pane_id}",
-        ])
+        .args(["list-panes", "-a", "-F", "#{pane_id}"])
         .output()
         .map(|o| {
             String::from_utf8_lossy(&o.stdout)
@@ -383,15 +364,21 @@ pub fn apply_session_style(session: &str) -> Result<()> {
     // Per-pane overrides brighten the selected worktree's panes.
     let _ = Command::new("tmux")
         .args([
-            "set-option", "-t", session,
-            "window-style", "bg=#141210,fg=#3a3835,dim",
+            "set-option",
+            "-t",
+            session,
+            "window-style",
+            "bg=#141210,fg=#3a3835,dim",
         ])
         .output();
     // Active pane (sidebar, or whichever has tmux focus) stays bright
     let _ = Command::new("tmux")
         .args([
-            "set-option", "-t", session,
-            "window-active-style", "bg=#302c26,fg=#dcdce1,nodim",
+            "set-option",
+            "-t",
+            session,
+            "window-active-style",
+            "bg=#302c26,fg=#dcdce1,nodim",
         ])
         .output();
     // Padded borders for visible gaps between panes
@@ -432,7 +419,9 @@ pub fn apply_session_style(session: &str) -> Result<()> {
     );
     let _ = Command::new("tmux")
         .args([
-            "set-option", "-t", session,
+            "set-option",
+            "-t",
+            session,
             "pane-border-format",
             border_fmt,
         ])
@@ -440,15 +429,21 @@ pub fn apply_session_style(session: &str) -> Result<()> {
     // Inactive pane border color (WAX gray)
     let _ = Command::new("tmux")
         .args([
-            "set-option", "-t", session,
-            "pane-border-style", "fg=#3c3830,bg=#282520",
+            "set-option",
+            "-t",
+            session,
+            "pane-border-style",
+            "fg=#3c3830,bg=#282520",
         ])
         .output();
     // Active pane border color (HONEY amber)
     let _ = Command::new("tmux")
         .args([
-            "set-option", "-t", session,
-            "pane-active-border-style", "fg=#ffb74d,bg=#282520",
+            "set-option",
+            "-t",
+            session,
+            "pane-active-border-style",
+            "fg=#ffb74d,bg=#282520",
         ])
         .output();
     // Disable the tmux status bar
@@ -470,10 +465,7 @@ pub fn set_pane_style(pane_id: &str, style: &str) -> Result<()> {
 /// Set a pane's @color option (used by pane-border-format for colored titles).
 pub fn set_pane_color(pane_id: &str, hex_color: &str) -> Result<()> {
     Command::new("tmux")
-        .args([
-            "set-option", "-p", "-t", pane_id,
-            "@color", hex_color,
-        ])
+        .args(["set-option", "-p", "-t", pane_id, "@color", hex_color])
         .output()?;
     Ok(())
 }
@@ -481,8 +473,14 @@ pub fn set_pane_color(pane_id: &str, hex_color: &str) -> Result<()> {
 /// Set a pane's @selected user option (used by border format conditional).
 pub fn set_pane_selected(pane_id: &str, selected: bool) -> Result<()> {
     Command::new("tmux")
-        .args(["set-option", "-p", "-t", pane_id,
-               "@selected", if selected { "1" } else { "0" }])
+        .args([
+            "set-option",
+            "-p",
+            "-t",
+            pane_id,
+            "@selected",
+            if selected { "1" } else { "0" },
+        ])
         .output()?;
     Ok(())
 }
@@ -660,7 +658,13 @@ pub fn apply_tiled_layout(
 
     // Determine column count based on number of worktrees with live panes
     let n = valid_groups.len();
-    let num_cols = if n <= 1 { 1 } else if n <= 4 { 2 } else { n.min(3) };
+    let num_cols = if n <= 1 {
+        1
+    } else if n <= 4 {
+        2
+    } else {
+        n.min(3)
+    };
 
     // Distribute worktree groups round-robin across columns
     let mut columns: Vec<Vec<u16>> = vec![vec![]; num_cols];
@@ -675,10 +679,7 @@ pub fn apply_tiled_layout(
     // Build layout string
     let right_w = win_w.saturating_sub(sidebar_width + 1);
     let right_x = sidebar_width + 1;
-    let sidebar_leaf = format!(
-        "{}x{},{},{},{}",
-        sidebar_width, win_h, 0, 0, sidebar_idx
-    );
+    let sidebar_leaf = format!("{}x{},{},{},{}", sidebar_width, win_h, 0, 0, sidebar_idx);
     let right_node = build_right_area(&columns, right_w, win_h, right_x);
 
     let body = format!(
@@ -701,17 +702,29 @@ pub fn apply_tiled_layout(
 }
 
 /// Launch a tmux popup overlay. Fire-and-forget — returns immediately.
-pub fn display_popup(target: &str, width: &str, height: &str, title: &str, cmd: &str) -> Result<()> {
+pub fn display_popup(
+    target: &str,
+    width: &str,
+    height: &str,
+    title: &str,
+    cmd: &str,
+) -> Result<()> {
     let child = Command::new("tmux")
         .args([
             "display-popup",
             "-E",
-            "-t", target,
-            "-w", width,
-            "-h", height,
-            "-T", title,
-            "-s", "bg=#282520",
-            "-S", "fg=#ffb74d,bg=#282520",
+            "-t",
+            target,
+            "-w",
+            width,
+            "-h",
+            height,
+            "-T",
+            title,
+            "-s",
+            "bg=#282520",
+            "-S",
+            "fg=#ffb74d,bg=#282520",
             cmd,
         ])
         .stdin(std::process::Stdio::null())

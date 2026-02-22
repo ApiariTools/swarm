@@ -42,11 +42,7 @@ pub fn commit_all(worktree_path: &Path, message: &str) -> Result<()> {
 }
 
 /// Merge a branch into the base branch.
-pub fn merge_into_base(
-    repo_path: &Path,
-    branch: &str,
-    base_branch: &str,
-) -> Result<()> {
+pub fn merge_into_base(repo_path: &Path, branch: &str, base_branch: &str) -> Result<()> {
     // Checkout base
     let output = Command::new("git")
         .args(["checkout", base_branch])
@@ -60,7 +56,13 @@ pub fn merge_into_base(
 
     // Merge
     let output = Command::new("git")
-        .args(["merge", branch, "--no-ff", "-m", &format!("Merge {}", branch)])
+        .args([
+            "merge",
+            branch,
+            "--no-ff",
+            "-m",
+            &format!("Merge {}", branch),
+        ])
         .current_dir(repo_path)
         .output()?;
 

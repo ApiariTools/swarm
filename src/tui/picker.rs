@@ -2,9 +2,9 @@ use crate::core::{agent::AgentKind, git, ipc};
 use chrono::Local;
 use color_eyre::Result;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyModifiers},
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     ExecutableCommand,
+    event::{self, Event, KeyCode, KeyModifiers},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Paragraph, Wrap};
@@ -97,9 +97,7 @@ fn picker_loop(
 
         if event::poll(Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
-                if key.modifiers.contains(KeyModifiers::CONTROL)
-                    && key.code == KeyCode::Char('c')
-                {
+                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
                     break;
                 }
 
@@ -107,8 +105,7 @@ fn picker_loop(
                     Phase::RepoSelect => match key.code {
                         KeyCode::Esc => break,
                         KeyCode::Char('j') | KeyCode::Down => {
-                            picker.repo_index =
-                                (picker.repo_index + 1) % picker.repos.len();
+                            picker.repo_index = (picker.repo_index + 1) % picker.repos.len();
                         }
                         KeyCode::Char('k') | KeyCode::Up => {
                             picker.repo_index = if picker.repo_index == 0 {
@@ -175,8 +172,7 @@ fn picker_loop(
                             picker.phase = Phase::Input;
                         }
                         KeyCode::Char('j') | KeyCode::Down => {
-                            picker.agent_index =
-                                (picker.agent_index + 1) % AgentKind::all().len();
+                            picker.agent_index = (picker.agent_index + 1) % AgentKind::all().len();
                         }
                         KeyCode::Char('k') | KeyCode::Up => {
                             let count = AgentKind::all().len();
@@ -339,12 +335,20 @@ fn draw_repo_phase(frame: &mut Frame, area: Rect, picker: &Picker) {
         let line = Line::from(vec![
             Span::styled(
                 if is_selected { " \u{25b8} " } else { "   " },
-                if is_selected { theme::selected() } else { theme::muted() },
+                if is_selected {
+                    theme::selected()
+                } else {
+                    theme::muted()
+                },
             ),
             Span::styled(format!("{} ", i + 1), theme::muted()),
             Span::styled(
                 name,
-                if is_selected { theme::selected() } else { theme::text() },
+                if is_selected {
+                    theme::selected()
+                } else {
+                    theme::text()
+                },
             ),
         ]);
         frame.render_widget(Paragraph::new(line), Rect::new(inner.x, y, inner.width, 1));
@@ -405,7 +409,11 @@ fn draw_input_phase(frame: &mut Frame, area: Rect, picker: &Picker) {
     let mut styled_lines: Vec<Line> = Vec::new();
     for (i, line_str) in buf_lines.iter().enumerate() {
         let prefix = if i == 0 { " > " } else { "   " };
-        let prefix_style = if i == 0 { theme::accent() } else { theme::text() };
+        let prefix_style = if i == 0 {
+            theme::accent()
+        } else {
+            theme::text()
+        };
 
         if i == cursor_line {
             let before: String = line_str.chars().take(cursor_col).collect();
@@ -497,12 +505,20 @@ fn draw_agent_phase(frame: &mut Frame, area: Rect, picker: &Picker) {
         let line = Line::from(vec![
             Span::styled(
                 if is_selected { " \u{25b8} " } else { "   " },
-                if is_selected { theme::selected() } else { theme::muted() },
+                if is_selected {
+                    theme::selected()
+                } else {
+                    theme::muted()
+                },
             ),
             Span::styled(format!("{} ", i + 1), theme::muted()),
             Span::styled(
                 agent.name(),
-                if is_selected { theme::selected() } else { theme::text() },
+                if is_selected {
+                    theme::selected()
+                } else {
+                    theme::text()
+                },
             ),
         ]);
         frame.render_widget(Paragraph::new(line), Rect::new(inner.x, y, inner.width, 1));
@@ -543,15 +559,9 @@ fn draw_fetching_phase(frame: &mut Frame, area: Rect, picker: &Picker) {
         .as_deref()
         .unwrap_or("fetching origin...");
 
-    let line = Line::from(Span::styled(
-        format!(" {}", status),
-        theme::accent(),
-    ));
+    let line = Line::from(Span::styled(format!(" {}", status), theme::accent()));
     let y = inner.y + inner.height / 2;
-    frame.render_widget(
-        Paragraph::new(line),
-        Rect::new(inner.x, y, inner.width, 1),
-    );
+    frame.render_widget(Paragraph::new(line), Rect::new(inner.x, y, inner.width, 1));
 }
 
 fn draw_fetch_confirm_phase(frame: &mut Frame, area: Rect, picker: &Picker) {
@@ -563,10 +573,7 @@ fn draw_fetch_confirm_phase(frame: &mut Frame, area: Rect, picker: &Picker) {
         .unwrap_or("local branch has diverged from origin");
 
     // Status message
-    let status_line = Line::from(Span::styled(
-        format!(" {}", status),
-        theme::text(),
-    ));
+    let status_line = Line::from(Span::styled(format!(" {}", status), theme::text()));
     let y = inner.y + inner.height / 2 - 1;
     frame.render_widget(
         Paragraph::new(status_line),

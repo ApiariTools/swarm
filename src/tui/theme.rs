@@ -41,7 +41,10 @@ pub fn accent() -> Style {
 }
 
 pub fn highlight() -> Style {
-    Style::default().fg(COMB).bg(HONEY).add_modifier(Modifier::BOLD)
+    Style::default()
+        .fg(COMB)
+        .bg(HONEY)
+        .add_modifier(Modifier::BOLD)
 }
 
 pub fn selected() -> Style {

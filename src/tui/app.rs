@@ -90,6 +90,11 @@ impl Worktree {
                 .map(|p| state::PaneState::new(p.pane_id.clone()))
                 .collect(),
             summary: self.summary.clone(),
+            status: if self.agent.as_ref().is_some_and(|p| matches!(p.status, super::app::PaneStatus::Running)) {
+                "running".to_string()
+            } else {
+                "done".to_string()
+            },
         }
     }
 
