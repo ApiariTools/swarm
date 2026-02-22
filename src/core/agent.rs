@@ -1,4 +1,4 @@
-use apiari_common::shell::shell_quote;
+use crate::core::shell::shell_quote;
 use serde::{Deserialize, Serialize};
 
 /// Supported agent types.

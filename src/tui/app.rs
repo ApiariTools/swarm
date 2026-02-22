@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use apiari_common::shell::sanitize;
+use crate::core::shell::sanitize;
 use crate::core::{agent::AgentKind, git, ipc, merge, state, tmux};
 use chrono::{DateTime, Local};
 use color_eyre::Result;
