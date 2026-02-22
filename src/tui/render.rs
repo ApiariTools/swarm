@@ -236,31 +236,88 @@ fn draw_worktree_list(frame: &mut Frame, area: Rect, app: &App) {
     }
 
     let items = build_sidebar_items(app);
+    let viewport = area.height as usize;
 
-    // Headers are 1 line, worktree rows are 3 lines
-    let mut constraints: Vec<Constraint> = items
+    // Compute item heights and cumulative top positions
+    let heights: Vec<usize> = items
         .iter()
         .map(|item| match item {
-            SidebarItem::RepoHeader(_) => Constraint::Length(1),
-            SidebarItem::WorktreeRow(_) => Constraint::Length(3),
+            SidebarItem::RepoHeader(_) => 1,
+            SidebarItem::WorktreeRow(_) => 3,
         })
         .collect();
-    constraints.push(Constraint::Min(0));
 
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(constraints)
-        .split(area);
+    let mut tops = Vec::with_capacity(items.len());
+    let mut cumulative = 0usize;
+    for &h in &heights {
+        tops.push(cumulative);
+        cumulative += h;
+    }
+    let total_height = cumulative;
+
+    // Find the sidebar item index for the currently selected worktree
+    let selected_item = items
+        .iter()
+        .position(|item| matches!(item, SidebarItem::WorktreeRow(idx) if *idx == app.selected))
+        .unwrap_or(0);
+
+    // Adjust scroll offset to keep the selected item fully visible
+    let mut scroll = app.list_scroll.get();
+    let sel_top = tops[selected_item];
+    let sel_bottom = sel_top + heights[selected_item];
+
+    if sel_top < scroll {
+        scroll = sel_top;
+    } else if sel_bottom > scroll + viewport {
+        scroll = sel_bottom.saturating_sub(viewport);
+    }
+
+    // Clamp scroll to valid range
+    if total_height <= viewport {
+        scroll = 0;
+    } else {
+        scroll = scroll.min(total_height - viewport);
+    }
+
+    app.list_scroll.set(scroll);
+
+    // Render visible items with their positions offset by scroll
+    let mut render_y = area.y;
+    let viewport_bottom = area.y + area.height;
 
     for (i, item) in items.iter().enumerate() {
+        let item_top = tops[i];
+        let item_bottom = item_top + heights[i];
+
+        // Skip items fully above the scroll viewport
+        if item_bottom <= scroll {
+            continue;
+        }
+        // Stop if we've filled the viewport
+        if render_y >= viewport_bottom {
+            break;
+        }
+
+        // Lines clipped from the top of this item (for partial visibility)
+        let skip_top = scroll.saturating_sub(item_top);
+        let available = (viewport_bottom - render_y) as usize;
+        let render_h = (heights[i] - skip_top).min(available);
+
+        if render_h == 0 {
+            continue;
+        }
+
+        let rect = Rect::new(area.x, render_y, area.width, render_h as u16);
+        render_y += render_h as u16;
+
         match item {
             SidebarItem::RepoHeader(name) => {
-                draw_repo_header(frame, rows[i], name);
+                draw_repo_header(frame, rect, name);
             }
             SidebarItem::WorktreeRow(idx) => {
                 let wt = &app.worktrees[*idx];
                 let is_selected = *idx == app.selected;
-                draw_worktree_row(frame, rows[i], wt, is_selected, *idx);
+                draw_worktree_row(frame, rect, wt, is_selected, *idx);
             }
         }
     }
