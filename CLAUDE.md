@@ -89,6 +89,42 @@ project/
 - **color-eyre**: Error handling
 - **dirs**: Home directory lookup
 
+## Integration with Apiari Toolchain
+
+Swarm is part of the [Apiari](https://github.com/ApiariTools) toolchain. It can be used standalone or with the other tools:
+
+```
+hive start <quest-id>
+  |
+  v (subprocess)
+swarm create "task prompt"     # Hive dispatches tasks to swarm
+  |
+  v
+.swarm/state.json              # Keeper reads this for dashboard
+                               # Keeper also checks tmux pane liveness
+```
+
+| Tool | Relationship |
+|------|-------------|
+| **hive** | Calls swarm CLI as subprocess (`create`, `status`, `send`, `close`, `merge`) to execute tasks |
+| **keeper** | Reads `.swarm/state.json` and checks `swarm-*` tmux sessions for dashboard display |
+| **buzz** | No direct interaction (buzz signals go to hive/keeper, not swarm) |
+| **apiari-common** | Swarm uses `shell_quote` and `sanitize` from the shared library |
+
+### IPC Protocol
+
+Other tools interact with swarm via CLI commands that write to `.swarm/inbox.jsonl`:
+
+```bash
+swarm create "task prompt"     # Queues a CreateWorktree message
+swarm send <id> "message"      # Queues a SendMessage
+swarm close <id>               # Queues a CloseWorktree
+swarm merge <id>               # Queues a MergeWorktree
+swarm status --json            # Reads state directly (no IPC)
+```
+
+The TUI polls `inbox.jsonl` every 500ms and processes queued messages.
+
 ## Conventions
 
 - All git branches created by swarm are prefixed `swarm/`

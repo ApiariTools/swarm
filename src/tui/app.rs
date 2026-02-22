@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use apiari_common::shell::sanitize;
 use crate::core::{agent::AgentKind, git, ipc, merge, state, tmux};
 use chrono::{DateTime, Local};
 use color_eyre::Result;
@@ -505,15 +506,14 @@ impl App {
 
         let _ = tmux::set_pane_title(&pane_id, &wt_id);
 
-        // Launch agent with prompt baked into the command
+        // Build launch command but defer sending until the shell is ready
         let cmd = agent.launch_cmd_with_prompt(&prompt, true);
-        tmux::send_keys_to_pane(&pane_id, &cmd)?;
 
         self.worktrees[idx].agent = Some(TrackedPane {
             pane_id: pane_id.clone(),
             status: PaneStatus::Running,
         });
-        self.worktrees[idx].pending_prompt = None;
+        self.worktrees[idx].pending_prompt = Some((cmd, Instant::now()));
 
         // Rebalance, re-apply styling, re-select sidebar (after setting agent so pane is included)
         self.rebalance_layout();
@@ -885,9 +885,8 @@ impl App {
         // Set pane title
         let _ = tmux::set_pane_title(&pane_id, &window_name);
 
-        // Launch agent with prompt baked into the command
+        // Build launch command but defer sending until the shell is ready
         let cmd = agent.launch_cmd_with_prompt(prompt, true);
-        tmux::send_keys_to_pane(&pane_id, &cmd)?;
 
         self.worktrees.push(Worktree {
             id: window_name.clone(),
@@ -904,7 +903,7 @@ impl App {
             terminals: Vec::new(),
             pr: None,
             summary: None,
-            pending_prompt: None,
+            pending_prompt: Some((cmd, Instant::now())),
         });
 
         self.selected = self.worktrees.len() - 1;
@@ -1275,10 +1274,14 @@ impl App {
     fn deliver_pending_prompts(&mut self) {
         for wt in &mut self.worktrees {
             if let Some((ref prompt, created)) = wt.pending_prompt {
-                if created.elapsed().as_secs() >= 5 {
-                    if let Some(ref agent) = wt.agent {
-                        let _ = tmux::send_keys_to_pane(&agent.pane_id, prompt);
-                    }
+                let pane_id = match wt.agent.as_ref() {
+                    Some(agent) => agent.pane_id.clone(),
+                    None => continue,
+                };
+                let ready = tmux::pane_has_shell_prompt(&pane_id);
+                let timed_out = created.elapsed().as_secs() >= 30;
+                if ready || timed_out {
+                    let _ = tmux::send_keys_to_pane(&pane_id, prompt);
                     wt.pending_prompt = None;
                 }
             }
@@ -1481,19 +1484,6 @@ impl App {
             format!("{} repos", self.repos.len())
         }
     }
-}
-
-/// Sanitize a string for use in branch names.
-fn sanitize(s: &str) -> String {
-    s.to_lowercase()
-        .chars()
-        .map(|c| if c.is_alphanumeric() { c } else { '-' })
-        .collect::<String>()
-        .trim_matches('-')
-        .to_string()
-        .chars()
-        .take(40)
-        .collect()
 }
 
 /// Generate a short task summary using the Claude CLI.

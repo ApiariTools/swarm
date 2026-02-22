@@ -52,25 +52,20 @@ pub fn state_path(work_dir: &Path) -> PathBuf {
 }
 
 /// Load state from disk.
+///
+/// Returns `None` if the state file does not exist.
 pub fn load_state(work_dir: &Path) -> Result<Option<SwarmState>> {
     let path = state_path(work_dir);
     if !path.exists() {
         return Ok(None);
     }
-
-    let data = std::fs::read_to_string(&path)?;
-    let state: SwarmState = serde_json::from_str(&data)?;
+    let state: SwarmState = apiari_common::state::load_state(&path)?;
     Ok(Some(state))
 }
 
-/// Save state to disk.
+/// Save state to disk (atomic write via temp file + rename).
 pub fn save_state(work_dir: &Path, state: &SwarmState) -> Result<()> {
     let path = state_path(work_dir);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    let data = serde_json::to_string_pretty(state)?;
-    std::fs::write(&path, data)?;
+    apiari_common::state::save_state(&path, state)?;
     Ok(())
 }

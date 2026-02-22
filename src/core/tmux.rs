@@ -735,3 +735,32 @@ pub fn send_keys_to_pane(pane_id: &str, text: &str) -> Result<()> {
         .output()?;
     Ok(())
 }
+
+/// Capture the visible content of a tmux pane.
+pub fn capture_pane_content(pane_id: &str) -> Result<String> {
+    let output = Command::new("tmux")
+        .args(["capture-pane", "-p", "-t", pane_id])
+        .output()?;
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+/// Check if a pane appears to have a ready shell prompt on its last non-empty line.
+pub fn pane_has_shell_prompt(pane_id: &str) -> bool {
+    let content = match capture_pane_content(pane_id) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let last_line = content
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("");
+    last_line.contains("$ ")
+        || last_line.contains("% ")
+        || last_line.contains("➜")
+        || last_line.contains("❯")
+        || last_line.contains("❮")
+        || last_line.ends_with('$')
+        || last_line.ends_with('%')
+        || last_line.ends_with('>')
+}
