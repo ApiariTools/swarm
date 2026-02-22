@@ -4,6 +4,7 @@ use crate::core::shell::sanitize;
 use crate::core::{agent::AgentKind, git, ipc, merge, state, tmux};
 use chrono::{DateTime, Local};
 use color_eyre::Result;
+use std::cell::Cell;
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::Instant;
@@ -197,6 +198,8 @@ pub struct App {
     pub show_help: bool,
     pub tick_count: u64,
     pub sidebar_pane_id: Option<String>,
+    /// Scroll offset (in lines) for the sidebar worktree list.
+    pub list_scroll: Cell<usize>,
     prev_selected: Option<usize>,
     layout_dirty: bool,
     last_refresh: Instant,
@@ -240,6 +243,7 @@ impl App {
             show_help: false,
             tick_count: 0,
             sidebar_pane_id: None,
+            list_scroll: Cell::new(0),
             prev_selected: None,
             layout_dirty: false,
             last_refresh: Instant::now(),
