@@ -1,3 +1,4 @@
+use crate::core::shell::shell_quote;
 use serde::{Deserialize, Serialize};
 
 /// Supported agent types.
@@ -70,9 +71,4 @@ impl std::fmt::Display for AgentKind {
     }
 }
 
-/// Wrap a string in single quotes for safe embedding in a shell command.
-/// Single quotes inside the string are handled via the `'\''` idiom.
-fn shell_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
-}
 

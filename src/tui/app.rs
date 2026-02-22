@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use crate::core::shell::sanitize;
 use crate::core::{agent::AgentKind, git, ipc, merge, state, tmux};
 use chrono::{DateTime, Local};
 use color_eyre::Result;
@@ -308,12 +309,10 @@ impl App {
             }
         }
 
-        // Truncate inbox — everything up to last_inbox_pos has been processed.
-        let inbox_path = self.work_dir.join(".swarm").join("inbox.jsonl");
-        if inbox_path.exists() {
-            let _ = std::fs::write(&inbox_path, b"");
-            self.last_inbox_pos = 0;
-        }
+        // Note: we intentionally do NOT truncate the inbox on startup.
+        // Position tracking (last_inbox_pos) already skips processed messages,
+        // and truncating creates a race condition when messages are written
+        // between session creation and TUI initialization.
 
         // Phase 2: discover orphaned worktrees from git (scan all repos)
         let repos_to_scan: Vec<PathBuf> = if self.repos.is_empty() {
@@ -505,15 +504,14 @@ impl App {
 
         let _ = tmux::set_pane_title(&pane_id, &wt_id);
 
-        // Launch agent with prompt baked into the command
+        // Build launch command but defer sending until the shell is ready
         let cmd = agent.launch_cmd_with_prompt(&prompt, true);
-        tmux::send_keys_to_pane(&pane_id, &cmd)?;
 
         self.worktrees[idx].agent = Some(TrackedPane {
             pane_id: pane_id.clone(),
             status: PaneStatus::Running,
         });
-        self.worktrees[idx].pending_prompt = None;
+        self.worktrees[idx].pending_prompt = Some((cmd, Instant::now()));
 
         // Rebalance, re-apply styling, re-select sidebar (after setting agent so pane is included)
         self.rebalance_layout();
@@ -885,9 +883,8 @@ impl App {
         // Set pane title
         let _ = tmux::set_pane_title(&pane_id, &window_name);
 
-        // Launch agent with prompt baked into the command
+        // Build launch command but defer sending until the shell is ready
         let cmd = agent.launch_cmd_with_prompt(prompt, true);
-        tmux::send_keys_to_pane(&pane_id, &cmd)?;
 
         self.worktrees.push(Worktree {
             id: window_name.clone(),
@@ -904,7 +901,7 @@ impl App {
             terminals: Vec::new(),
             pr: None,
             summary: None,
-            pending_prompt: None,
+            pending_prompt: Some((cmd, Instant::now())),
         });
 
         self.selected = self.worktrees.len() - 1;
@@ -1034,11 +1031,11 @@ impl App {
         // Rebalance layout after removing panes
         self.rebalance_layout();
 
-        // Remove worktree if it exists
-        if wt.worktree_path.exists() {
-            let _ = git::remove_worktree(&wt.repo_path, &wt.worktree_path);
-            let _ = git::delete_branch(&wt.repo_path, &wt.branch);
-        }
+        // Remove git worktree and branch. Prune handles the case where the
+        // directory is already gone but git still tracks the worktree entry.
+        let _ = git::remove_worktree(&wt.repo_path, &wt.worktree_path);
+        let _ = git::prune_worktrees(&wt.repo_path);
+        let _ = git::delete_branch(&wt.repo_path, &wt.branch);
 
         if self.selected >= self.worktrees.len() && !self.worktrees.is_empty() {
             self.selected = self.worktrees.len() - 1;
@@ -1106,6 +1103,22 @@ impl App {
             return;
         }
         self.last_inbox_pos = new_pos;
+
+        // Compact the inbox once processed data exceeds 64 KB.
+        // Keeps only unprocessed bytes (from last_inbox_pos onward).
+        let inbox_path = self.work_dir.join(".swarm").join("inbox.jsonl");
+        if self.last_inbox_pos > 64 * 1024 {
+            if let Ok(contents) = std::fs::read(&inbox_path) {
+                let pos = self.last_inbox_pos as usize;
+                let remaining = if pos < contents.len() {
+                    &contents[pos..]
+                } else {
+                    &[]
+                };
+                let _ = std::fs::write(&inbox_path, remaining);
+                self.last_inbox_pos = 0;
+            }
+        }
 
         if messages.is_empty() {
             // Position advanced (e.g. blank lines) — persist it
@@ -1275,10 +1288,14 @@ impl App {
     fn deliver_pending_prompts(&mut self) {
         for wt in &mut self.worktrees {
             if let Some((ref prompt, created)) = wt.pending_prompt {
-                if created.elapsed().as_secs() >= 5 {
-                    if let Some(ref agent) = wt.agent {
-                        let _ = tmux::send_keys_to_pane(&agent.pane_id, prompt);
-                    }
+                let pane_id = match wt.agent.as_ref() {
+                    Some(agent) => agent.pane_id.clone(),
+                    None => continue,
+                };
+                let ready = tmux::pane_has_shell_prompt(&pane_id);
+                let timed_out = created.elapsed().as_secs() >= 30;
+                if ready || timed_out {
+                    let _ = tmux::send_keys_to_pane(&pane_id, prompt);
                     wt.pending_prompt = None;
                 }
             }
@@ -1481,19 +1498,6 @@ impl App {
             format!("{} repos", self.repos.len())
         }
     }
-}
-
-/// Sanitize a string for use in branch names.
-fn sanitize(s: &str) -> String {
-    s.to_lowercase()
-        .chars()
-        .map(|c| if c.is_alphanumeric() { c } else { '-' })
-        .collect::<String>()
-        .trim_matches('-')
-        .to_string()
-        .chars()
-        .take(40)
-        .collect()
 }
 
 /// Generate a short task summary using the Claude CLI.

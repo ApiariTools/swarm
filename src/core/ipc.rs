@@ -1,8 +1,7 @@
+use apiari_common::ipc::{JsonlReader, JsonlWriter};
 use chrono::{DateTime, Local};
 use color_eyre::Result;
 use serde::{Deserialize, Serialize};
-use std::fs::{self, OpenOptions};
-use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
 use std::path::Path;
 
 /// Inbox message — external commands sent to the sidebar.
@@ -85,77 +84,21 @@ fn events_path(work_dir: &Path) -> std::path::PathBuf {
 /// Returns parsed messages and the new offset for next read.
 pub fn read_inbox(work_dir: &Path, offset: u64) -> Result<(Vec<InboxMessage>, u64)> {
     let path = inbox_path(work_dir);
-    if !path.exists() {
-        return Ok((Vec::new(), offset));
-    }
-
-    let file = fs::File::open(&path)?;
-    let metadata = file.metadata()?;
-    let file_len = metadata.len();
-
-    if file_len <= offset {
-        return Ok((Vec::new(), offset));
-    }
-
-    let mut reader = BufReader::new(file);
-    reader.seek(SeekFrom::Start(offset))?;
-
-    let mut messages = Vec::new();
-    let mut new_offset = offset;
-
-    let mut line = String::new();
-    loop {
-        line.clear();
-        let bytes_read = reader.read_line(&mut line)?;
-        if bytes_read == 0 {
-            break;
-        }
-        new_offset += bytes_read as u64;
-
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-
-        match serde_json::from_str::<InboxMessage>(trimmed) {
-            Ok(msg) => messages.push(msg),
-            Err(_) => {} // skip malformed lines
-        }
-    }
-
-    Ok((messages, new_offset))
+    let mut reader = JsonlReader::<InboxMessage>::with_offset(path, offset);
+    let messages = reader.poll()?;
+    Ok((messages, reader.offset()))
 }
 
 /// Append a message to inbox.jsonl.
 pub fn write_inbox(work_dir: &Path, msg: &InboxMessage) -> Result<()> {
-    let path = inbox_path(work_dir);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)?;
-
-    let json = serde_json::to_string(msg)?;
-    writeln!(file, "{}", json)?;
+    let writer = JsonlWriter::<InboxMessage>::new(inbox_path(work_dir));
+    writer.append(msg)?;
     Ok(())
 }
 
 /// Append an event to events.jsonl.
 pub fn emit_event(work_dir: &Path, event: &SwarmEvent) -> Result<()> {
-    let path = events_path(work_dir);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)?;
-
-    let json = serde_json::to_string(event)?;
-    writeln!(file, "{}", json)?;
+    let writer = JsonlWriter::<SwarmEvent>::new(events_path(work_dir));
+    writer.append(event)?;
     Ok(())
 }

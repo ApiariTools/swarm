@@ -168,6 +168,32 @@ fn build_swarm_cmd(work_dir: &std::path::Path, agent: &str) -> String {
     format!("'{}' -d '{}' -a '{}'", exe, dir_str, agent)
 }
 
+/// Ensure the swarm tmux session is running, starting it (detached) if not.
+fn ensure_swarm_running(work_dir: &std::path::Path, agent: &str) -> Result<()> {
+    if !core::tmux::has_tmux() {
+        return Err(color_eyre::eyre::eyre!("tmux is not installed"));
+    }
+
+    let dir_name = work_dir
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "swarm".to_string());
+    let session_name = format!("swarm-{}", dir_name);
+
+    if !core::tmux::session_exists(&session_name) {
+        eprintln!("[swarm] Starting swarm session: {session_name}");
+        let cmd = build_swarm_cmd(work_dir, agent);
+        core::tmux::create_session_with_cmd(
+            &session_name,
+            &work_dir.to_string_lossy(),
+            &cmd,
+        )?;
+        core::tmux::apply_session_style(&session_name)?;
+    }
+
+    Ok(())
+}
+
 // ── IPC Subcommands ────────────────────────────────────────
 
 fn cmd_status(work_dir: std::path::PathBuf, json: bool) -> Result<()> {
@@ -210,6 +236,8 @@ fn cmd_status(work_dir: std::path::PathBuf, json: bool) -> Result<()> {
 }
 
 fn cmd_create(work_dir: std::path::PathBuf, prompt: String, agent: String) -> Result<()> {
+    ensure_swarm_running(&work_dir, &agent)?;
+
     let msg = core::ipc::InboxMessage::Create {
         id: Uuid::new_v4().to_string(),
         prompt,

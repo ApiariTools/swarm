@@ -71,6 +71,7 @@ swarm -a codex
 | `Enter` | Jump to agent pane |
 | `m` | Merge worktree into base branch |
 | `x` | Close worktree |
+| `p` | Show PR details |
 | `?` | Toggle help |
 | `q` | Quit |
 
