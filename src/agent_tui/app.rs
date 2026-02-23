@@ -42,6 +42,8 @@ pub enum SdkEvent {
     Error(String),
     /// System message (session metadata).
     System { model: Option<String> },
+    /// Session complete, now waiting for follow-up messages.
+    SessionWaiting { session_id: String },
 }
 
 /// Current status of the agent session.
@@ -57,6 +59,8 @@ pub enum SessionStatus {
     ToolRunning,
     /// Model turn complete, waiting for user or next turn.
     Idle,
+    /// Session finished, waiting for follow-up messages.
+    Waiting,
     /// Session finished.
     Done,
     /// Session errored.
@@ -256,6 +260,13 @@ impl TuiApp {
                 } else {
                     SessionStatus::Done
                 };
+            }
+            SdkEvent::SessionWaiting { session_id } => {
+                self.session_id = Some(session_id.clone());
+                self.status = SessionStatus::Waiting;
+                self.entries.push(ConversationEntry::Status {
+                    text: "Waiting for messages... (press i to type, or use `swarm send`)".to_string(),
+                });
             }
             SdkEvent::Error(msg) => {
                 self.flush_streaming_text();
