@@ -309,10 +309,15 @@ pub fn kill_pane(pane_id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Set a pane's border title.
+/// Set a pane's border title and lock it so child processes cannot override it.
 pub fn set_pane_title(pane_id: &str, title: &str) -> Result<()> {
     Command::new("tmux")
         .args(["select-pane", "-t", pane_id, "-T", title])
+        .output()?;
+    // Prevent the child process (e.g. Claude Code) from overriding the title
+    // via terminal escape sequences.
+    Command::new("tmux")
+        .args(["set-option", "-p", "-t", pane_id, "allow-rename", "off"])
         .output()?;
     Ok(())
 }
