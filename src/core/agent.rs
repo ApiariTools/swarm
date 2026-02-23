@@ -76,7 +76,8 @@ impl AgentKind {
                 // agent-tui takes prompt as a positional arg
                 format!("{} {}", base, shell_quote(prompt))
             }
-            _ => format!("{} {}", base, shell_quote(prompt)),
+            Self::Claude => format!("{} --max-turns 50 {}", base, shell_quote(prompt)),
+            Self::Codex => format!("{} {}", base, shell_quote(prompt)),
         }
     }
 
