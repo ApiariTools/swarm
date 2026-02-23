@@ -920,17 +920,22 @@ impl App {
 
         // Build launch command but defer sending until the shell is ready
         let cmd = if agent == AgentKind::ClaudeTui {
-            // ClaudeTui needs -d (project root) and --worktree-id for inbox polling
+            // ClaudeTui needs -d (project root) and --worktree-id for inbox polling.
+            // Write prompt to a temp file to avoid newlines breaking tmux send-keys.
             use crate::core::shell::shell_quote;
             let exe = std::env::current_exe()
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_else(|_| "swarm".to_string());
+            let prompt_file = format!("/tmp/swarm-prompt-{}.txt", window_name);
+            std::fs::write(&prompt_file, prompt).unwrap_or_else(|e| {
+                eprintln!("[swarm] failed to write prompt file {prompt_file}: {e}");
+            });
             format!(
-                "'{}' -d {} agent-tui --dangerously-skip-permissions --worktree-id {} {}",
+                "'{}' -d {} agent-tui --dangerously-skip-permissions --worktree-id {} --prompt-file {}",
                 exe,
                 shell_quote(&self.work_dir.to_string_lossy()),
                 shell_quote(&window_name),
-                shell_quote(prompt),
+                shell_quote(&prompt_file),
             )
         } else {
             agent.launch_cmd_with_prompt(prompt, true)

@@ -82,6 +82,9 @@ enum Commands {
     AgentTui {
         /// Task prompt
         prompt: Option<String>,
+        /// Read prompt from file instead of positional argument
+        #[arg(long)]
+        prompt_file: Option<String>,
         /// Worktree ID (for event log path)
         #[arg(long)]
         worktree_id: Option<String>,
@@ -136,10 +139,11 @@ async fn main() -> Result<()> {
         }),
         Some(Commands::AgentTui {
             prompt,
+            prompt_file,
             worktree_id,
             dangerously_skip_permissions,
         }) => {
-            let prompt = prompt.unwrap_or_default();
+            let prompt = resolve_prompt(prompt, prompt_file).unwrap_or_default();
             agent_tui::run(agent_tui::AgentTuiArgs {
                 prompt,
                 worktree_id,
