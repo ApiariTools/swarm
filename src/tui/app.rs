@@ -1865,6 +1865,44 @@ async fn generate_summary_via_claude(prompt: &str) -> Option<String> {
     Some(text)
 }
 
+/// Generate a branch name from a prompt and unique number.
+///
+/// Applies sanitization (lowercase, special chars -> hyphens, truncate to 40)
+/// and prepends the "swarm/" prefix.
+pub fn generate_branch_name(prompt: &str, num: usize) -> String {
+    format!("swarm/{}-{}", sanitize(prompt), num)
+}
+
+/// Generate a worktree directory name from a prompt and unique number.
+pub fn generate_worktree_dir_name(prompt: &str, num: usize) -> String {
+    format!("{}-{}", sanitize(prompt), num)
+}
+
+/// Read agent session status from an agent-status file.
+///
+/// Returns the trimmed file contents, or None if the file is missing or empty.
+pub fn read_agent_status(status_dir: &std::path::Path, id: &str) -> Option<String> {
+    std::fs::read_to_string(status_dir.join(id))
+        .ok()
+        .and_then(|s| {
+            let trimmed = s.trim().to_string();
+            if trimmed.is_empty() { None } else { Some(trimmed) }
+        })
+}
+
+/// Match a repo name against known repos, returning the path if found.
+///
+/// This is the pure matching logic extracted from process_inbox's Create handler.
+/// Returns the matching repo path, or None with a list of available repo names.
+pub fn find_repo_by_name<'a>(repos: &'a [PathBuf], name: &str) -> Option<&'a PathBuf> {
+    repos.iter().find(|r| {
+        r.file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default()
+            == name
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2104,4 +2142,127 @@ mod tests {
         let result = match_pr_by_local_branches(&branches, &prs);
         assert!(result.is_none());
     }
+
+    // --- Branch name generation tests ---
+
+    #[test]
+    fn test_branch_name_sanitizes_spaces() {
+        let name = generate_branch_name("Fix the bug", 1);
+        assert_eq!(name, "swarm/fix-the-bug-1");
+    }
+
+    #[test]
+    fn test_branch_name_truncates_long_prompts() {
+        let long_prompt = "a]".repeat(25); // 50 chars, should truncate to 40
+        let name = generate_branch_name(&long_prompt, 1);
+        // sanitize truncates to 40 chars, then we append -1
+        assert!(name.starts_with("swarm/"));
+        let without_prefix = &name["swarm/".len()..];
+        let without_suffix = without_prefix.strip_suffix("-1").expect("should end with -1");
+        assert!(without_suffix.len() <= 40, "sanitized part should be <= 40 chars, got {}", without_suffix.len());
+    }
+
+    #[test]
+    fn test_branch_name_removes_special_chars() {
+        let name = generate_branch_name("add user auth (v2)", 3);
+        assert_eq!(name, "swarm/add-user-auth--v2-3");
+        // No parens or spaces in the output
+        assert!(!name.contains('('));
+        assert!(!name.contains(')'));
+        assert!(!name.contains(' '));
+    }
+
+    #[test]
+    fn test_branch_name_appends_unique_suffix() {
+        let name1 = generate_branch_name("same prompt", 1);
+        let name2 = generate_branch_name("same prompt", 2);
+        assert_ne!(name1, name2);
+        assert!(name1.ends_with("-1"));
+        assert!(name2.ends_with("-2"));
+    }
+
+    #[test]
+    fn test_worktree_dir_name_matches_branch() {
+        let branch = generate_branch_name("Fix the bug", 1);
+        let dir = generate_worktree_dir_name("Fix the bug", 1);
+        // Branch should be "swarm/" + dir
+        assert_eq!(branch, format!("swarm/{}", dir));
+    }
+
+    // --- Agent status file reading tests ---
+
+    #[test]
+    fn test_agent_status_none_when_file_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = read_agent_status(dir.path(), "nonexistent-worker");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_agent_status_waiting_parsed() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("worker-1"), "waiting
+").unwrap();
+        let result = read_agent_status(dir.path(), "worker-1");
+        assert_eq!(result.as_deref(), Some("waiting"));
+    }
+
+    #[test]
+    fn test_agent_status_running_parsed() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("worker-1"), "running
+").unwrap();
+        let result = read_agent_status(dir.path(), "worker-1");
+        assert_eq!(result.as_deref(), Some("running"));
+    }
+
+    #[test]
+    fn test_agent_status_unknown_value_handled() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("worker-1"), "some-unknown-state
+").unwrap();
+        let result = read_agent_status(dir.path(), "worker-1");
+        // Gracefully returns whatever is in the file, trimmed
+        assert_eq!(result.as_deref(), Some("some-unknown-state"));
+    }
+
+    #[test]
+    fn test_agent_status_empty_file_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("worker-1"), "  
+").unwrap();
+        let result = read_agent_status(dir.path(), "worker-1");
+        assert!(result.is_none());
+    }
+
+    // --- Repo matching tests ---
+
+    #[test]
+    fn test_find_repo_by_name_found() {
+        let repos = vec![
+            PathBuf::from("/workspace/hive"),
+            PathBuf::from("/workspace/swarm"),
+            PathBuf::from("/workspace/common"),
+        ];
+        let result = find_repo_by_name(&repos, "swarm");
+        assert_eq!(result, Some(&PathBuf::from("/workspace/swarm")));
+    }
+
+    #[test]
+    fn test_find_repo_by_name_not_found() {
+        let repos = vec![
+            PathBuf::from("/workspace/hive"),
+            PathBuf::from("/workspace/swarm"),
+        ];
+        let result = find_repo_by_name(&repos, "nonexistent");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_find_repo_by_name_empty_repos() {
+        let repos: Vec<PathBuf> = vec![];
+        let result = find_repo_by_name(&repos, "anything");
+        assert!(result.is_none());
+    }
+
 }
