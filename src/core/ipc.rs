@@ -38,7 +38,7 @@ pub enum InboxMessage {
 }
 
 fn default_agent() -> String {
-    "claude".to_string()
+    "claude-tui".to_string()
 }
 
 /// Events emitted by the sidebar for external consumers.

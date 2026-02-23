@@ -217,7 +217,7 @@ pub struct App {
 impl App {
     pub fn new(work_dir: PathBuf, agent: String) -> Result<Self> {
         let repos = git::detect_repos(&work_dir)?;
-        let default_agent = AgentKind::from_str(&agent).unwrap_or(AgentKind::Claude);
+        let default_agent = AgentKind::from_str(&agent).unwrap_or(AgentKind::ClaudeTui);
 
         // Derive session name from dir
         let dir_name = work_dir
@@ -1146,7 +1146,7 @@ impl App {
                     start_point,
                     ..
                 } => {
-                    let agent_kind = AgentKind::from_str(&agent).unwrap_or(AgentKind::Claude);
+                    let agent_kind = AgentKind::from_str(&agent).unwrap_or(AgentKind::ClaudeTui);
                     let repo_path = match repo {
                         Some(name) => {
                             match self.repos.iter().find(|r| git::repo_name(r) == name).cloned() {

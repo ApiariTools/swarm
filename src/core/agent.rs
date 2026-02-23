@@ -76,13 +76,14 @@ impl AgentKind {
                 // agent-tui takes prompt as a positional arg
                 format!("{} {}", base, shell_quote(prompt))
             }
-            _ => format!("{} {}", base, shell_quote(prompt)),
+            Self::Claude => format!("{} --max-turns 50 {}", base, shell_quote(prompt)),
+            Self::Codex => format!("{} {}", base, shell_quote(prompt)),
         }
     }
 
     /// All available agents.
     pub fn all() -> Vec<Self> {
-        vec![Self::Claude, Self::Codex, Self::ClaudeTui]
+        vec![Self::ClaudeTui, Self::Claude, Self::Codex]
     }
 }
 

@@ -57,8 +57,8 @@ swarm
 # Launch with a specific directory
 swarm -d ~/projects/my-app
 
-# Use codex as default agent instead of claude
-swarm -a codex
+# Use claude (one-shot) instead of default claude-tui
+swarm -a claude
 ```
 
 ### Keyboard Shortcuts
