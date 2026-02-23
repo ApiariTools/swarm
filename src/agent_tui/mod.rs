@@ -338,6 +338,7 @@ async fn event_loop(
     // Track inbox offset for polling per-agent inbox
     let mut inbox_offset: u64 = 0;
     let mut inbox_poll_counter: u64 = 0;
+    let mut prev_status = app.status.clone();
 
     loop {
         terminal.draw(|frame| render::draw(frame, app))?;
@@ -345,6 +346,21 @@ async fn event_loop(
         // Drain SDK events and advance animation tick
         app.drain_sdk_events();
         app.tick();
+
+        // Write agent status file when SessionStatus transitions to/from Waiting
+        if app.status != prev_status {
+            if let Some(wt_id) = worktree_id {
+                let became_waiting = app.status == SessionStatus::Waiting;
+                let was_waiting = prev_status == SessionStatus::Waiting;
+                if became_waiting || was_waiting {
+                    let status_str = if became_waiting { "waiting" } else { "running" };
+                    let status_dir = work_dir.join(".swarm").join("agent-status");
+                    let _ = std::fs::create_dir_all(&status_dir);
+                    let _ = std::fs::write(status_dir.join(wt_id), status_str);
+                }
+            }
+            prev_status = app.status.clone();
+        }
 
         // Poll per-agent inbox every ~500ms (every 10 ticks at 50ms each)
         inbox_poll_counter += 1;
