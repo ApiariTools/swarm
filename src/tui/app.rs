@@ -76,6 +76,8 @@ pub struct Worktree {
     pub summary: Option<String>,
     /// Prompt to send once the agent is ready (sent after a delay, then cleared).
     pub pending_prompt: Option<(String, Instant)>,
+    /// Agent session status read from `.swarm/agent-status/<id>` (e.g. "waiting", "running").
+    pub agent_session_status: Option<String>,
 }
 
 impl Worktree {
@@ -105,7 +107,7 @@ impl Worktree {
             } else {
                 "done".to_string()
             },
-            agent_session_status: None,
+            agent_session_status: self.agent_session_status.clone(),
         }
     }
 
@@ -134,6 +136,7 @@ impl Worktree {
             pr: ws.pr.clone(),
             summary: ws.summary.clone(),
             pending_prompt: None,
+            agent_session_status: None,
         }
     }
 
@@ -378,6 +381,7 @@ impl App {
                         pr: None,
                         summary: None,
                         pending_prompt: None,
+                        agent_session_status: None,
                     });
                     orphan_count += 1;
                 }
@@ -948,6 +952,7 @@ impl App {
             pr: None,
             summary: None,
             pending_prompt: Some((cmd, Instant::now())),
+            agent_session_status: None,
         });
 
         self.selected = self.worktrees.len() - 1;
@@ -1240,130 +1245,12 @@ impl App {
     // ── PR Status ──────────────────────────────────────────
 
     fn refresh_pr_statuses(&mut self) {
-        let mut merged_ids = Vec::new();
         let all_repos = self.repos.clone();
+        let mut merged_ids = Vec::new();
 
         for wt in &mut self.worktrees {
-            if wt.branch.is_empty() {
-                continue;
-            }
-
-            // Build list of repos to search: wt.repo_path first, then others
-            let mut repos_to_try: Vec<&PathBuf> = vec![&wt.repo_path];
-            for repo in &all_repos {
-                if repo != &wt.repo_path {
-                    repos_to_try.push(repo);
-                }
-            }
-
-            let mut found = false;
-            for repo_dir in &repos_to_try {
-                let output = Command::new("gh")
-                    .args([
-                        "pr",
-                        "list",
-                        "--head",
-                        &wt.branch,
-                        "--state",
-                        "all",
-                        "--json",
-                        "number,title,state,url",
-                        "--limit",
-                        "1",
-                    ])
-                    .current_dir(repo_dir)
-                    .output();
-
-                if let Ok(output) = output {
-                    if output.status.success() {
-                        let text = String::from_utf8_lossy(&output.stdout);
-                        if let Ok(prs) = serde_json::from_str::<Vec<serde_json::Value>>(text.trim()) {
-                            if let Some(pr) = prs.first() {
-                                let new_pr = PrInfo {
-                                    number: pr["number"].as_u64().unwrap_or(0),
-                                    title: pr["title"].as_str().unwrap_or("").to_string(),
-                                    state: pr["state"].as_str().unwrap_or("").to_string(),
-                                    url: pr["url"].as_str().unwrap_or("").to_string(),
-                                };
-                                if new_pr.is_newly_merged(wt.pr.as_ref()) {
-                                    merged_ids.push(wt.id.clone());
-                                }
-                                let is_new = wt.pr.is_none();
-                                let state_changed = wt.pr.as_ref().is_some_and(|old| old.state != new_pr.state);
-                                if is_new {
-                                    eprintln!("[swarm] PR detected: #{} \"{}\" ({}) {}", new_pr.number, new_pr.title, new_pr.state, new_pr.url);
-                                } else if state_changed {
-                                    eprintln!("[swarm] PR updated: #{} state -> {} {}", new_pr.number, new_pr.state, new_pr.url);
-                                }
-                                wt.pr = Some(new_pr);
-                                found = true;
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Fallback: if the assigned branch yielded no PR, check the worktree's
-            // actual current branch. Workers (especially claude-tui) often create
-            // their own branch instead of using the swarm-assigned one.
-            if !found {
-                let actual_branch = Command::new("git")
-                    .arg("-C")
-                    .arg(&wt.worktree_path)
-                    .args(["branch", "--show-current"])
-                    .output()
-                    .ok()
-                    .and_then(|o| {
-                        let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                        if !s.is_empty() && s != wt.branch { Some(s) } else { None }
-                    });
-
-                if let Some(ref actual) = actual_branch {
-                    eprintln!("[swarm] Branch fallback for {}: assigned '{}', actual '{}'", wt.id, wt.branch, actual);
-                    for repo_dir in &repos_to_try {
-                        let output = Command::new("gh")
-                            .args([
-                                "pr", "list", "--head", actual, "--state", "all",
-                                "--json", "number,title,state,url", "--limit", "1",
-                            ])
-                            .current_dir(repo_dir)
-                            .output();
-
-                        if let Ok(output) = output {
-                            if output.status.success() {
-                                let text = String::from_utf8_lossy(&output.stdout);
-                                if let Ok(prs) = serde_json::from_str::<Vec<serde_json::Value>>(text.trim()) {
-                                    if let Some(pr) = prs.first() {
-                                        let new_pr = PrInfo {
-                                            number: pr["number"].as_u64().unwrap_or(0),
-                                            title: pr["title"].as_str().unwrap_or("").to_string(),
-                                            state: pr["state"].as_str().unwrap_or("").to_string(),
-                                            url: pr["url"].as_str().unwrap_or("").to_string(),
-                                        };
-                                        if new_pr.is_newly_merged(wt.pr.as_ref()) {
-                                            merged_ids.push(wt.id.clone());
-                                        }
-                                        let is_new = wt.pr.is_none();
-                                        let state_changed = wt.pr.as_ref().is_some_and(|old| old.state != new_pr.state);
-                                        if is_new {
-                                            eprintln!("[swarm] PR detected (via actual branch '{actual}'): #{} \"{}\" ({}) {}", new_pr.number, new_pr.title, new_pr.state, new_pr.url);
-                                        } else if state_changed {
-                                            eprintln!("[swarm] PR updated: #{} state -> {} {}", new_pr.number, new_pr.state, new_pr.url);
-                                        }
-                                        wt.pr = Some(new_pr);
-                                        found = true;
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            if !found {
-                wt.pr = None;
+            if lookup_pr_for_worktree(wt, &all_repos) {
+                merged_ids.push(wt.id.clone());
             }
         }
 
@@ -1378,6 +1265,70 @@ impl App {
                 let _ = self.close_worktree(idx);
                 self.flash(format!("auto-closed \"{}\" (PR merged)", prompt));
             }
+        }
+    }
+
+    // ── Agent Status Polling ─────────────────────────────────
+
+    /// Poll `.swarm/agent-status/<id>` files for each worktree. When a
+    /// worktree's status newly transitions to "waiting", trigger an
+    /// immediate PR lookup so the sidebar and state.json have fresh PR
+    /// info without waiting for the 30s poll cycle.
+    fn poll_agent_statuses(&mut self) {
+        let status_dir = self.work_dir.join(".swarm").join("agent-status");
+        let all_repos = self.repos.clone();
+        let mut needs_save = false;
+        let mut newly_waiting: Vec<usize> = Vec::new();
+
+        for (idx, wt) in self.worktrees.iter_mut().enumerate() {
+            let new_status = std::fs::read_to_string(status_dir.join(&wt.id))
+                .ok()
+                .and_then(|s| {
+                    let trimmed = s.trim().to_string();
+                    if trimmed.is_empty() { None } else { Some(trimmed) }
+                });
+
+            let was_waiting = wt.agent_session_status.as_deref() == Some("waiting");
+            let is_waiting = new_status.as_deref() == Some("waiting");
+
+            if wt.agent_session_status != new_status {
+                wt.agent_session_status = new_status;
+                needs_save = true;
+            }
+
+            // Newly transitioned to waiting — queue immediate PR lookup
+            if is_waiting && !was_waiting {
+                newly_waiting.push(idx);
+            }
+        }
+
+        // Run PR lookups for workers that just became waiting
+        if !newly_waiting.is_empty() {
+            let mut any_merged = Vec::new();
+            for idx in &newly_waiting {
+                let wt = &mut self.worktrees[*idx];
+                if wt.pr.is_none() {
+                    eprintln!("[swarm] Agent waiting — immediate PR lookup for {}", wt.id);
+                    if lookup_pr_for_worktree(wt, &all_repos) {
+                        any_merged.push(wt.id.clone());
+                    }
+                }
+            }
+            needs_save = true;
+
+            // Auto-close any that were merged
+            for id in any_merged {
+                if let Some(idx) = self.worktrees.iter().position(|w| w.id == id) {
+                    eprintln!("[swarm] Auto-closing worktree {} — PR merged", id);
+                    let prompt = self.worktrees[idx].prompt.clone();
+                    let _ = self.close_worktree(idx);
+                    self.flash(format!("auto-closed \"{}\" (PR merged)", prompt));
+                }
+            }
+        }
+
+        if needs_save {
+            self.save_state();
         }
     }
 
@@ -1427,9 +1378,10 @@ impl App {
             self.last_inbox_check = Instant::now();
         }
 
-        // Refresh pane states every 3s
+        // Refresh pane states and poll agent status files every 3s
         if self.last_refresh.elapsed().as_secs() >= 3 {
             self.refresh_pane_states();
+            self.poll_agent_statuses();
             self.last_refresh = Instant::now();
         }
 
@@ -1655,6 +1607,108 @@ impl App {
     }
 }
 
+/// Look up PR status for a single worktree via `gh pr list`.
+/// Tries the assigned branch first, then falls back to the worktree's actual
+/// current branch (workers often create their own). Returns `true` if the PR
+/// just transitioned to MERGED (caller should auto-close).
+fn lookup_pr_for_worktree(wt: &mut Worktree, all_repos: &[PathBuf]) -> bool {
+    if wt.branch.is_empty() {
+        return false;
+    }
+
+    // Build list of repos to search: wt.repo_path first, then others.
+    // Clone into owned vec to avoid borrowing wt while passing &mut wt.
+    let mut repos_to_try: Vec<PathBuf> = vec![wt.repo_path.clone()];
+    for repo in all_repos {
+        if *repo != wt.repo_path {
+            repos_to_try.push(repo.clone());
+        }
+    }
+    let repo_refs: Vec<&PathBuf> = repos_to_try.iter().collect();
+
+    let branch = wt.branch.clone();
+
+    // Try the assigned branch first
+    if let Some(newly_merged) = try_pr_lookup(wt, &branch, &repo_refs, None) {
+        return newly_merged;
+    }
+
+    // Fallback: check the worktree's actual current branch. Workers
+    // (especially claude-tui) often create their own branch instead of
+    // using the swarm-assigned one.
+    let actual_branch = Command::new("git")
+        .arg("-C")
+        .arg(&wt.worktree_path)
+        .args(["branch", "--show-current"])
+        .output()
+        .ok()
+        .and_then(|o| {
+            let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            if !s.is_empty() && s != wt.branch { Some(s) } else { None }
+        });
+
+    if let Some(ref actual) = actual_branch {
+        eprintln!("[swarm] Branch fallback for {}: assigned '{}', actual '{}'", wt.id, wt.branch, actual);
+        if let Some(newly_merged) = try_pr_lookup(wt, actual, &repo_refs, Some(actual)) {
+            return newly_merged;
+        }
+    }
+
+    wt.pr = None;
+    false
+}
+
+/// Try `gh pr list --head <branch>` across the given repos. On success,
+/// updates `wt.pr` and returns `Some(true)` if newly merged, `Some(false)`
+/// if found but not newly merged. Returns `None` if no PR was found.
+fn try_pr_lookup(
+    wt: &mut Worktree,
+    branch: &str,
+    repos_to_try: &[&PathBuf],
+    fallback_label: Option<&str>,
+) -> Option<bool> {
+    for repo_dir in repos_to_try {
+        let output = Command::new("gh")
+            .args([
+                "pr", "list", "--head", branch, "--state", "all",
+                "--json", "number,title,state,url", "--limit", "1",
+            ])
+            .current_dir(repo_dir)
+            .output();
+
+        if let Ok(output) = output {
+            if output.status.success() {
+                let text = String::from_utf8_lossy(&output.stdout);
+                if let Ok(prs) = serde_json::from_str::<Vec<serde_json::Value>>(text.trim()) {
+                    if let Some(pr) = prs.first() {
+                        let new_pr = PrInfo {
+                            number: pr["number"].as_u64().unwrap_or(0),
+                            title: pr["title"].as_str().unwrap_or("").to_string(),
+                            state: pr["state"].as_str().unwrap_or("").to_string(),
+                            url: pr["url"].as_str().unwrap_or("").to_string(),
+                        };
+                        let newly_merged = new_pr.is_newly_merged(wt.pr.as_ref());
+                        let is_new = wt.pr.is_none();
+                        let state_changed = wt.pr.as_ref().is_some_and(|old| old.state != new_pr.state);
+                        if is_new {
+                            if let Some(label) = fallback_label {
+                                eprintln!("[swarm] PR detected (via actual branch '{label}'): #{} \"{}\" ({}) {}", new_pr.number, new_pr.title, new_pr.state, new_pr.url);
+                            } else {
+                                eprintln!("[swarm] PR detected: #{} \"{}\" ({}) {}", new_pr.number, new_pr.title, new_pr.state, new_pr.url);
+                            }
+                        } else if state_changed {
+                            eprintln!("[swarm] PR updated: #{} state -> {} {}", new_pr.number, new_pr.state, new_pr.url);
+                        }
+                        wt.pr = Some(new_pr);
+                        return Some(newly_merged);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Generate a short task summary using the Claude CLI.
 /// Returns None if the CLI is unavailable or produces bad output.
 async fn generate_summary_via_claude(prompt: &str) -> Option<String> {
@@ -1741,6 +1795,7 @@ mod tests {
             pr: Some(make_pr("MERGED")),
             summary: None,
             pending_prompt: None,
+            agent_session_status: None,
         };
         let state = wt.to_state();
         let pr = state.pr.expect("pr should persist");
@@ -1768,5 +1823,47 @@ mod tests {
         let wt = Worktree::from_state(&ws);
         let pr = wt.pr.expect("pr should restore");
         assert_eq!(pr.state, "OPEN");
+    }
+
+    #[test]
+    fn to_state_propagates_agent_session_status() {
+        let wt = Worktree {
+            id: "test-1".to_string(),
+            branch: "swarm/test-1".to_string(),
+            prompt: "fix bug".to_string(),
+            agent_kind: AgentKind::Claude,
+            repo_path: PathBuf::from("/tmp/repo"),
+            worktree_path: PathBuf::from("/tmp/wt"),
+            created_at: Local::now(),
+            agent: None,
+            terminals: vec![],
+            pr: None,
+            summary: None,
+            pending_prompt: None,
+            agent_session_status: Some("waiting".to_string()),
+        };
+        let state = wt.to_state();
+        assert_eq!(state.agent_session_status.as_deref(), Some("waiting"));
+    }
+
+    #[test]
+    fn to_state_none_agent_session_status() {
+        let wt = Worktree {
+            id: "test-1".to_string(),
+            branch: "swarm/test-1".to_string(),
+            prompt: "fix bug".to_string(),
+            agent_kind: AgentKind::Claude,
+            repo_path: PathBuf::from("/tmp/repo"),
+            worktree_path: PathBuf::from("/tmp/wt"),
+            created_at: Local::now(),
+            agent: None,
+            terminals: vec![],
+            pr: None,
+            summary: None,
+            pending_prompt: None,
+            agent_session_status: None,
+        };
+        let state = wt.to_state();
+        assert!(state.agent_session_status.is_none());
     }
 }
