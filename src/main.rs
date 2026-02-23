@@ -57,6 +57,21 @@ enum Commands {
     },
     /// Interactive picker for new worktree (runs inside tmux popup)
     Pick,
+    /// Show PR details in a tmux popup
+    PrPopup {
+        /// PR number
+        #[arg(long)]
+        number: u64,
+        /// PR title
+        #[arg(long)]
+        title: String,
+        /// PR state (OPEN, MERGED, CLOSED)
+        #[arg(long)]
+        state: String,
+        /// PR URL
+        #[arg(long)]
+        url: String,
+    },
     /// Run the TUI-native Claude agent (launched inside a tmux pane)
     AgentTui {
         /// Task prompt
@@ -93,6 +108,17 @@ async fn main() -> Result<()> {
             let repos = core::git::detect_repos(&work_dir)?;
             tui::picker::run_picker(work_dir, repos)
         }
+        Some(Commands::PrPopup {
+            number,
+            title,
+            state,
+            url,
+        }) => tui::pr_popup::run_pr_popup(tui::pr_popup::PrPopupArgs {
+            number,
+            title,
+            state,
+            url,
+        }),
         Some(Commands::AgentTui {
             prompt,
             worktree_id,

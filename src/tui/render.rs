@@ -29,7 +29,6 @@ pub fn draw(frame: &mut Frame, app: &App) {
         Mode::AgentSelect => draw_agent_select_overlay(frame, area, app),
         Mode::Confirm => draw_confirm_overlay(frame, area, app),
         Mode::Help => draw_help_overlay(frame, area),
-        Mode::PrDetail => draw_pr_overlay(frame, area, app),
         _ => {}
     }
 }
@@ -774,86 +773,6 @@ fn draw_help_overlay(frame: &mut Frame, area: Rect) {
             Rect::new(inner.x, y, inner.width, 1),
         );
     }
-}
-
-fn draw_pr_overlay(frame: &mut Frame, area: Rect, app: &App) {
-    let wt = match app.worktrees.get(app.selected) {
-        Some(wt) => wt,
-        None => return,
-    };
-    let pr = match &wt.pr {
-        Some(pr) => pr,
-        None => return,
-    };
-
-    let popup_width = (area.width).min(50);
-    let popup_height = (area.height).min(12);
-    let popup = centered_rect(popup_width, popup_height, area);
-    frame.render_widget(Clear, popup);
-
-    let title = format!(" PR #{} ", pr.number);
-    let block = Block::default()
-        .title(Span::styled(title, theme::title()))
-        .borders(Borders::ALL)
-        .border_style(theme::border_active())
-        .style(Style::default().bg(theme::COMB));
-
-    let inner = block.inner(popup);
-    frame.render_widget(block, popup);
-
-    let mut y = inner.y + 1;
-
-    // PR title (wrapped)
-    let title_area = Rect::new(inner.x + 1, y, inner.width.saturating_sub(2), 2);
-    frame.render_widget(
-        Paragraph::new(pr.title.as_str())
-            .style(theme::text())
-            .wrap(Wrap { trim: true }),
-        title_area,
-    );
-    y += 2;
-
-    // State badge
-    let state_style = match pr.state.as_str() {
-        "MERGED" => theme::success(),
-        "OPEN" => Style::default().fg(theme::MINT),
-        _ => theme::muted(),
-    };
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(" state  ", theme::muted()),
-            Span::styled(pr.state.to_lowercase(), state_style),
-        ])),
-        Rect::new(inner.x + 1, y, inner.width.saturating_sub(2), 1),
-    );
-    y += 1;
-
-    // URL (wrapped)
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(" url    ", theme::muted()),
-            Span::styled(&pr.url, theme::accent()),
-        ]))
-        .wrap(Wrap { trim: false }),
-        Rect::new(inner.x + 1, y, inner.width.saturating_sub(2), 2),
-    );
-
-    // Hints at bottom
-    let hint = Line::from(vec![
-        Span::styled("o", theme::key_hint()),
-        Span::styled(" open  ", theme::key_desc()),
-        Span::styled("c", theme::key_hint()),
-        Span::styled(" copy  ", theme::key_desc()),
-        Span::styled("esc", theme::key_hint()),
-        Span::styled(" close", theme::key_desc()),
-    ]);
-    let hint_area = Rect::new(
-        inner.x + 1,
-        inner.y + inner.height - 1,
-        inner.width.saturating_sub(2),
-        1,
-    );
-    frame.render_widget(Paragraph::new(hint), hint_area);
 }
 
 // ── Helpers ────────────────────────────────────────────────
