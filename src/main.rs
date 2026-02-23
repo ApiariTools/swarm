@@ -32,8 +32,11 @@ enum Commands {
     },
     /// Create a new worktree + agent via IPC
     Create {
-        /// Task prompt
-        prompt: String,
+        /// Task prompt (optional if --prompt-file is provided)
+        prompt: Option<String>,
+        /// Read prompt from a file instead of positional argument
+        #[arg(long, value_name = "PATH")]
+        prompt_file: Option<String>,
         /// Agent type
         #[arg(long, default_value = "claude-tui")]
         agent: Option<String>,
@@ -101,9 +104,18 @@ async fn main() -> Result<()> {
     match cli.command {
         None => run_sidebar(work_dir, cli.agent).await,
         Some(Commands::Status { json }) => cmd_status(work_dir, json),
-        Some(Commands::Create { prompt, agent, repo }) => {
-            cmd_create(work_dir, prompt, agent.unwrap_or_else(|| cli.agent.clone()), repo)
-        }
+        Some(Commands::Create {
+            prompt,
+            prompt_file,
+            agent,
+            repo,
+        }) => cmd_create(
+            work_dir,
+            prompt,
+            prompt_file,
+            agent.unwrap_or_else(|| cli.agent.clone()),
+            repo,
+        ),
         Some(Commands::Send { worktree, message }) => cmd_send(work_dir, worktree, message),
         Some(Commands::Close { worktree }) => cmd_close(work_dir, worktree),
         Some(Commands::Merge { worktree }) => cmd_merge(work_dir, worktree),
@@ -369,7 +381,44 @@ fn worktree_status(wt: &core::state::WorktreeState, live_panes: &[String]) -> St
     }
 }
 
-fn cmd_create(work_dir: std::path::PathBuf, prompt: String, agent: String, repo: Option<String>) -> Result<()> {
+/// Resolve the task prompt from either the positional argument or --prompt-file.
+fn resolve_prompt(prompt: Option<String>, prompt_file: Option<String>) -> Result<String> {
+    match (prompt, prompt_file) {
+        (_, Some(path)) => {
+            let path = std::path::Path::new(&path);
+            eprintln!("[swarm] reading prompt from {}", path.display());
+            let content = std::fs::read_to_string(path).map_err(|e| {
+                color_eyre::eyre::eyre!("failed to read prompt file '{}': {}", path.display(), e)
+            })?;
+            let content = content.trim().to_string();
+            if content.is_empty() {
+                return Err(color_eyre::eyre::eyre!(
+                    "prompt file '{}' is empty",
+                    path.display()
+                ));
+            }
+            eprintln!(
+                "[swarm] loaded prompt from file ({} bytes)",
+                content.len()
+            );
+            Ok(content)
+        }
+        (Some(prompt), None) => Ok(prompt),
+        (None, None) => Err(color_eyre::eyre::eyre!(
+            "either a positional <PROMPT> or --prompt-file is required"
+        )),
+    }
+}
+
+fn cmd_create(
+    work_dir: std::path::PathBuf,
+    prompt: Option<String>,
+    prompt_file: Option<String>,
+    agent: String,
+    repo: Option<String>,
+) -> Result<()> {
+    let prompt = resolve_prompt(prompt, prompt_file)?;
+
     // Validate --repo when multiple repos detected
     let repo = if repo.is_some() {
         repo
@@ -432,4 +481,67 @@ fn cmd_merge(work_dir: std::path::PathBuf, worktree: String) -> Result<()> {
     core::ipc::write_inbox(&work_dir, &msg)?;
     println!("queued merge");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn resolve_prompt_positional() {
+        let result = resolve_prompt(Some("do the thing".into()), None).unwrap();
+        assert_eq!(result, "do the thing");
+    }
+
+    #[test]
+    fn resolve_prompt_from_file() {
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        write!(tmp, "build the feature\nwith multiple lines").unwrap();
+        let path = tmp.path().to_str().unwrap().to_string();
+
+        let result = resolve_prompt(None, Some(path)).unwrap();
+        assert_eq!(result, "build the feature\nwith multiple lines");
+    }
+
+    #[test]
+    fn resolve_prompt_file_overrides_positional() {
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        write!(tmp, "from file").unwrap();
+        let path = tmp.path().to_str().unwrap().to_string();
+
+        let result = resolve_prompt(Some("from arg".into()), Some(path)).unwrap();
+        assert_eq!(result, "from file");
+    }
+
+    #[test]
+    fn resolve_prompt_empty_file_errors() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_str().unwrap().to_string();
+
+        let err = resolve_prompt(None, Some(path)).unwrap_err();
+        assert!(err.to_string().contains("empty"));
+    }
+
+    #[test]
+    fn resolve_prompt_missing_file_errors() {
+        let err = resolve_prompt(None, Some("/no/such/file.txt".into())).unwrap_err();
+        assert!(err.to_string().contains("failed to read"));
+    }
+
+    #[test]
+    fn resolve_prompt_neither_errors() {
+        let err = resolve_prompt(None, None).unwrap_err();
+        assert!(err.to_string().contains("either"));
+    }
+
+    #[test]
+    fn resolve_prompt_trims_whitespace() {
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        write!(tmp, "  trimmed prompt  \n").unwrap();
+        let path = tmp.path().to_str().unwrap().to_string();
+
+        let result = resolve_prompt(None, Some(path)).unwrap();
+        assert_eq!(result, "trimmed prompt");
+    }
 }
