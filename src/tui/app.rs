@@ -51,6 +51,14 @@ pub struct PrInfo {
     pub url: String,
 }
 
+impl PrInfo {
+    /// Returns true when this PR just transitioned to MERGED relative to `prev`.
+    /// Used to decide whether to auto-close the worktree.
+    pub fn is_newly_merged(&self, prev: Option<&PrInfo>) -> bool {
+        self.state == "MERGED" && prev.map_or(true, |p| p.state != "MERGED")
+    }
+}
+
 /// A worktree — the primary unit of work.
 #[derive(Debug, Clone)]
 pub struct Worktree {
@@ -1271,16 +1279,15 @@ impl App {
                         let text = String::from_utf8_lossy(&output.stdout);
                         if let Ok(prs) = serde_json::from_str::<Vec<serde_json::Value>>(text.trim()) {
                             if let Some(pr) = prs.first() {
-                                let state = pr["state"].as_str().unwrap_or("").to_string();
-                                if state == "MERGED" && wt.pr.as_ref().map_or(true, |p| p.state != "MERGED") {
-                                    merged_ids.push(wt.id.clone());
-                                }
                                 let new_pr = PrInfo {
                                     number: pr["number"].as_u64().unwrap_or(0),
                                     title: pr["title"].as_str().unwrap_or("").to_string(),
-                                    state,
+                                    state: pr["state"].as_str().unwrap_or("").to_string(),
                                     url: pr["url"].as_str().unwrap_or("").to_string(),
                                 };
+                                if new_pr.is_newly_merged(wt.pr.as_ref()) {
+                                    merged_ids.push(wt.id.clone());
+                                }
                                 let is_new = wt.pr.is_none();
                                 let state_changed = wt.pr.as_ref().is_some_and(|old| old.state != new_pr.state);
                                 if is_new {
@@ -1313,6 +1320,7 @@ impl App {
                     });
 
                 if let Some(ref actual) = actual_branch {
+                    eprintln!("[swarm] Branch fallback for {}: assigned '{}', actual '{}'", wt.id, wt.branch, actual);
                     for repo_dir in &repos_to_try {
                         let output = Command::new("gh")
                             .args([
@@ -1327,16 +1335,15 @@ impl App {
                                 let text = String::from_utf8_lossy(&output.stdout);
                                 if let Ok(prs) = serde_json::from_str::<Vec<serde_json::Value>>(text.trim()) {
                                     if let Some(pr) = prs.first() {
-                                        let state = pr["state"].as_str().unwrap_or("").to_string();
-                                        if state == "MERGED" && wt.pr.as_ref().map_or(true, |p| p.state != "MERGED") {
-                                            merged_ids.push(wt.id.clone());
-                                        }
                                         let new_pr = PrInfo {
                                             number: pr["number"].as_u64().unwrap_or(0),
                                             title: pr["title"].as_str().unwrap_or("").to_string(),
-                                            state,
+                                            state: pr["state"].as_str().unwrap_or("").to_string(),
                                             url: pr["url"].as_str().unwrap_or("").to_string(),
                                         };
+                                        if new_pr.is_newly_merged(wt.pr.as_ref()) {
+                                            merged_ids.push(wt.id.clone());
+                                        }
                                         let is_new = wt.pr.is_none();
                                         let state_changed = wt.pr.as_ref().is_some_and(|old| old.state != new_pr.state);
                                         if is_new {
@@ -1366,6 +1373,7 @@ impl App {
         // Auto-close worktrees whose PRs were just merged
         for id in merged_ids {
             if let Some(idx) = self.worktrees.iter().position(|w| w.id == id) {
+                eprintln!("[swarm] Auto-closing worktree {} — PR merged", id);
                 let prompt = self.worktrees[idx].prompt.clone();
                 let _ = self.close_worktree(idx);
                 self.flash(format!("auto-closed \"{}\" (PR merged)", prompt));
@@ -1671,4 +1679,94 @@ async fn generate_summary_via_claude(prompt: &str) -> Option<String> {
         return None;
     }
     Some(text)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_pr(state: &str) -> PrInfo {
+        PrInfo {
+            number: 1,
+            title: "test".to_string(),
+            state: state.to_string(),
+            url: "https://example.com/pr/1".to_string(),
+        }
+    }
+
+    #[test]
+    fn is_newly_merged_no_previous_pr() {
+        let merged = make_pr("MERGED");
+        assert!(merged.is_newly_merged(None));
+    }
+
+    #[test]
+    fn is_newly_merged_from_open() {
+        let merged = make_pr("MERGED");
+        let prev = make_pr("OPEN");
+        assert!(merged.is_newly_merged(Some(&prev)));
+    }
+
+    #[test]
+    fn is_newly_merged_already_merged() {
+        let merged = make_pr("MERGED");
+        let prev = make_pr("MERGED");
+        assert!(!merged.is_newly_merged(Some(&prev)));
+    }
+
+    #[test]
+    fn is_newly_merged_open_pr() {
+        let open = make_pr("OPEN");
+        assert!(!open.is_newly_merged(None));
+    }
+
+    #[test]
+    fn is_newly_merged_closed_not_merged() {
+        let closed = make_pr("CLOSED");
+        assert!(!closed.is_newly_merged(None));
+    }
+
+    #[test]
+    fn worktree_to_state_preserves_pr() {
+        let wt = Worktree {
+            id: "test-1".to_string(),
+            branch: "swarm/test-1".to_string(),
+            prompt: "fix bug".to_string(),
+            agent_kind: AgentKind::Claude,
+            repo_path: PathBuf::from("/tmp/repo"),
+            worktree_path: PathBuf::from("/tmp/wt"),
+            created_at: Local::now(),
+            agent: None,
+            terminals: vec![],
+            pr: Some(make_pr("MERGED")),
+            summary: None,
+            pending_prompt: None,
+        };
+        let state = wt.to_state();
+        let pr = state.pr.expect("pr should persist");
+        assert_eq!(pr.state, "MERGED");
+        assert_eq!(pr.number, 1);
+    }
+
+    #[test]
+    fn worktree_from_state_preserves_pr() {
+        let ws = state::WorktreeState {
+            id: "test-1".to_string(),
+            branch: "swarm/test-1".to_string(),
+            prompt: "fix bug".to_string(),
+            agent_kind: AgentKind::Claude,
+            repo_path: PathBuf::from("/tmp/repo"),
+            worktree_path: PathBuf::from("/tmp/wt"),
+            created_at: Local::now(),
+            agent: None,
+            terminals: vec![],
+            summary: None,
+            pr: Some(make_pr("OPEN")),
+            status: "done".to_string(),
+            agent_session_status: None,
+        };
+        let wt = Worktree::from_state(&ws);
+        let pr = wt.pr.expect("pr should restore");
+        assert_eq!(pr.state, "OPEN");
+    }
 }
