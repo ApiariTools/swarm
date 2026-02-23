@@ -43,7 +43,7 @@ pub struct TrackedPane {
 }
 
 /// PR info fetched from `gh`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PrInfo {
     pub number: u64,
     pub title: String,
@@ -91,6 +91,7 @@ impl Worktree {
                 .map(|p| state::PaneState::new(p.pane_id.clone()))
                 .collect(),
             summary: self.summary.clone(),
+            pr: self.pr.clone(),
             status: if self.agent.as_ref().is_some_and(|p| matches!(p.status, super::app::PaneStatus::Running)) {
                 "running".to_string()
             } else {
@@ -121,7 +122,7 @@ impl Worktree {
                     status: PaneStatus::Running,
                 })
                 .collect(),
-            pr: None,
+            pr: ws.pr.clone(),
             summary: ws.summary.clone(),
             pending_prompt: None,
         }
@@ -1259,12 +1260,20 @@ impl App {
                                 if state == "MERGED" && wt.pr.as_ref().map_or(true, |p| p.state != "MERGED") {
                                     merged_ids.push(wt.id.clone());
                                 }
-                                wt.pr = Some(PrInfo {
+                                let new_pr = PrInfo {
                                     number: pr["number"].as_u64().unwrap_or(0),
                                     title: pr["title"].as_str().unwrap_or("").to_string(),
                                     state,
                                     url: pr["url"].as_str().unwrap_or("").to_string(),
-                                });
+                                };
+                                let is_new = wt.pr.is_none();
+                                let state_changed = wt.pr.as_ref().is_some_and(|old| old.state != new_pr.state);
+                                if is_new {
+                                    eprintln!("[swarm] PR detected: #{} \"{}\" ({}) {}", new_pr.number, new_pr.title, new_pr.state, new_pr.url);
+                                } else if state_changed {
+                                    eprintln!("[swarm] PR updated: #{} state -> {} {}", new_pr.number, new_pr.state, new_pr.url);
+                                }
+                                wt.pr = Some(new_pr);
                                 found = true;
                                 break;
                             }
@@ -1277,6 +1286,9 @@ impl App {
                 wt.pr = None;
             }
         }
+
+        // Persist updated PR info to state.json
+        self.save_state();
 
         // Auto-close worktrees whose PRs were just merged
         for id in merged_ids {
