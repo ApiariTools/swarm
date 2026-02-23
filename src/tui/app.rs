@@ -97,6 +97,7 @@ impl Worktree {
             } else {
                 "done".to_string()
             },
+            agent_session_status: None,
         }
     }
 
@@ -403,10 +404,24 @@ impl App {
     }
 
     pub fn save_state(&self) {
+        let mut worktree_states: Vec<state::WorktreeState> =
+            self.worktrees.iter().map(|w| w.to_state()).collect();
+
+        // Read agent session status from .swarm/agent-status/<id> files
+        let status_dir = self.work_dir.join(".swarm").join("agent-status");
+        for ws in &mut worktree_states {
+            if let Ok(contents) = std::fs::read_to_string(status_dir.join(&ws.id)) {
+                let trimmed = contents.trim();
+                if !trimmed.is_empty() {
+                    ws.agent_session_status = Some(trimmed.to_string());
+                }
+            }
+        }
+
         let swarm_state = state::SwarmState {
             session_name: self.session_name.clone(),
             sidebar_pane_id: self.sidebar_pane_id.clone(),
-            worktrees: self.worktrees.iter().map(|w| w.to_state()).collect(),
+            worktrees: worktree_states,
             last_inbox_pos: self.last_inbox_pos,
         };
 

@@ -40,6 +40,11 @@ pub struct WorktreeState {
     /// not persisted (defaults to "running" when loading from disk).
     #[serde(default = "default_status")]
     pub status: String,
+    /// Claude-tui session status (e.g. "waiting", "running"). Read from
+    /// `.swarm/agent-status/<worktree_id>` so hive can detect when a
+    /// worker is waiting for input.
+    #[serde(default, skip_deserializing)]
+    pub agent_session_status: Option<String>,
 }
 
 fn default_status() -> String {
@@ -100,6 +105,7 @@ mod tests {
             summary: Some("fix bug in auth".to_string()),
             pr,
             status: "running".to_string(),
+            agent_session_status: None,
         }
     }
 
