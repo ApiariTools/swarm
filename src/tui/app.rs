@@ -1720,20 +1720,46 @@ fn try_pr_lookup(
     None
 }
 
-/// Strategy 3: query recent open PRs for the repo and match by checking which
-/// `headRefName` exists as a local branch in the worktree. Skips branch names
-/// already tried by earlier strategies.
+/// Strategy 3: get ALL local branches in the worktree, query recent PRs
+/// (`--state all`) for the repo in ONE call, and match any PR whose
+/// `headRefName` is in the local branch list. O(1) API calls, covers the
+/// case where a worker creates its own branch without switching HEAD.
 fn try_pr_lookup_by_worktree_branches(
     wt: &mut Worktree,
     repos_to_try: &[&PathBuf],
     skip_branches: &[String],
 ) -> Option<bool> {
+    // 1. Get all local branches in the worktree
+    let branch_output = Command::new("git")
+        .arg("-C")
+        .arg(&wt.worktree_path)
+        .args(["branch", "--list", "--format=%(refname:short)"])
+        .output()
+        .ok()?;
+
+    if !branch_output.status.success() {
+        return None;
+    }
+
+    let local_branches: Vec<String> = String::from_utf8_lossy(&branch_output.stdout)
+        .lines()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty() && !skip_branches.iter().any(|skip| skip == s))
+        .collect();
+
+    if local_branches.is_empty() {
+        return None;
+    }
+
+    let branch_refs: Vec<&str> = local_branches.iter().map(|s| s.as_str()).collect();
+
+    // 2. Query all recent PRs for each repo (one API call per repo)
     for repo_dir in repos_to_try {
         let output = Command::new("gh")
             .args([
-                "pr", "list", "--state", "open",
+                "pr", "list", "--state", "all",
                 "--json", "number,title,state,url,headRefName",
-                "--limit", "10",
+                "--limit", "20",
             ])
             .current_dir(repo_dir)
             .output();
@@ -1741,28 +1767,30 @@ fn try_pr_lookup_by_worktree_branches(
         if let Ok(output) = output {
             if output.status.success() {
                 let text = String::from_utf8_lossy(&output.stdout);
-                let branch_exists = |name: &str| -> bool {
-                    Command::new("git")
-                        .arg("-C")
-                        .arg(&wt.worktree_path)
-                        .args(["show-ref", "--verify", &format!("refs/heads/{}", name)])
-                        .output()
-                        .is_ok_and(|o| o.status.success())
-                };
-                if let Some((new_pr, head_ref)) = match_pr_to_local_branch(&text, skip_branches, branch_exists) {
-                    let newly_merged = new_pr.is_newly_merged(wt.pr.as_ref());
-                    let is_new = wt.pr.is_none();
-                    let state_changed = wt.pr.as_ref().is_some_and(|old| old.state != new_pr.state);
-                    if is_new {
-                        eprintln!(
-                            "[swarm] PR detected (via worktree branch '{head_ref}'): #{} \"{}\" ({}) {}",
-                            new_pr.number, new_pr.title, new_pr.state, new_pr.url
-                        );
-                    } else if state_changed {
-                        eprintln!("[swarm] PR updated: #{} state -> {} {}", new_pr.number, new_pr.state, new_pr.url);
+                if let Ok(prs) = serde_json::from_str::<Vec<serde_json::Value>>(text.trim()) {
+                    // 3. Match using the pure function
+                    if let Some(pr) = match_pr_by_local_branches(&branch_refs, &prs) {
+                        let head_ref = pr["headRefName"].as_str().unwrap_or("").to_string();
+                        let new_pr = PrInfo {
+                            number: pr["number"].as_u64().unwrap_or(0),
+                            title: pr["title"].as_str().unwrap_or("").to_string(),
+                            state: pr["state"].as_str().unwrap_or("").to_string(),
+                            url: pr["url"].as_str().unwrap_or("").to_string(),
+                        };
+                        let newly_merged = new_pr.is_newly_merged(wt.pr.as_ref());
+                        let is_new = wt.pr.is_none();
+                        let state_changed = wt.pr.as_ref().is_some_and(|old| old.state != new_pr.state);
+                        if is_new {
+                            eprintln!(
+                                "[swarm] PR detected (via worktree branch '{head_ref}'): #{} \"{}\" ({}) {}",
+                                new_pr.number, new_pr.title, new_pr.state, new_pr.url
+                            );
+                        } else if state_changed {
+                            eprintln!("[swarm] PR updated: #{} state -> {} {}", new_pr.number, new_pr.state, new_pr.url);
+                        }
+                        wt.pr = Some(new_pr);
+                        return Some(newly_merged);
                     }
-                    wt.pr = Some(new_pr);
-                    return Some(newly_merged);
                 }
             }
         }
@@ -1770,27 +1798,16 @@ fn try_pr_lookup_by_worktree_branches(
     None
 }
 
-/// Parse gh PR list JSON and find the first PR whose `headRefName` passes
-/// `branch_exists`, skipping any branch in `skip_branches`.
-fn match_pr_to_local_branch(
-    json_text: &str,
-    skip_branches: &[String],
-    branch_exists: impl Fn(&str) -> bool,
-) -> Option<(PrInfo, String)> {
-    let prs: Vec<serde_json::Value> = serde_json::from_str(json_text.trim()).ok()?;
-    for pr in &prs {
+/// Pure matching: find the first PR whose `headRefName` is in `local_branches`.
+/// No subprocess calls — suitable for unit testing.
+fn match_pr_by_local_branches<'a>(
+    local_branches: &[&str],
+    prs: &'a [serde_json::Value],
+) -> Option<&'a serde_json::Value> {
+    for pr in prs {
         let head_ref = pr["headRefName"].as_str().unwrap_or("");
-        if head_ref.is_empty() || skip_branches.iter().any(|s| s == head_ref) {
-            continue;
-        }
-        if branch_exists(head_ref) {
-            let info = PrInfo {
-                number: pr["number"].as_u64().unwrap_or(0),
-                title: pr["title"].as_str().unwrap_or("").to_string(),
-                state: pr["state"].as_str().unwrap_or("").to_string(),
-                url: pr["url"].as_str().unwrap_or("").to_string(),
-            };
-            return Some((info, head_ref.to_string()));
+        if !head_ref.is_empty() && local_branches.contains(&head_ref) {
+            return Some(pr);
         }
     }
     None
@@ -1954,98 +1971,111 @@ mod tests {
         assert!(state.agent_session_status.is_none());
     }
 
-    // --- match_pr_to_local_branch tests ---
+    // --- match_pr_by_local_branches tests ---
 
-    const SAMPLE_PR_JSON: &str = r#"[
-        {"number": 42, "title": "Add README", "state": "OPEN", "url": "https://github.com/org/repo/pull/42", "headRefName": "add-readme"},
-        {"number": 43, "title": "Fix bug", "state": "OPEN", "url": "https://github.com/org/repo/pull/43", "headRefName": "fix/login-bug"},
-        {"number": 44, "title": "Refactor", "state": "OPEN", "url": "https://github.com/org/repo/pull/44", "headRefName": "refactor-auth"}
-    ]"#;
-
-    #[test]
-    fn match_pr_finds_existing_branch() {
-        let result = match_pr_to_local_branch(
-            SAMPLE_PR_JSON,
-            &[],
-            |name| name == "fix/login-bug",
-        );
-        let (pr, head) = result.expect("should find PR");
-        assert_eq!(pr.number, 43);
-        assert_eq!(pr.title, "Fix bug");
-        assert_eq!(pr.state, "OPEN");
-        assert_eq!(head, "fix/login-bug");
+    fn sample_prs() -> Vec<serde_json::Value> {
+        serde_json::from_str(r#"[
+            {"number": 42, "title": "Add README", "state": "OPEN", "url": "https://github.com/org/repo/pull/42", "headRefName": "add-readme"},
+            {"number": 43, "title": "Fix bug", "state": "OPEN", "url": "https://github.com/org/repo/pull/43", "headRefName": "fix/login-bug"},
+            {"number": 44, "title": "Refactor", "state": "MERGED", "url": "https://github.com/org/repo/pull/44", "headRefName": "refactor-auth"}
+        ]"#).unwrap()
     }
 
     #[test]
-    fn match_pr_returns_first_match() {
-        // Both add-readme and refactor-auth "exist" — should return the first one
-        let result = match_pr_to_local_branch(
-            SAMPLE_PR_JSON,
-            &[],
-            |name| name == "add-readme" || name == "refactor-auth",
-        );
-        let (pr, head) = result.expect("should find PR");
-        assert_eq!(pr.number, 42);
-        assert_eq!(head, "add-readme");
+    fn strategy3_finds_pr_by_local_branch() {
+        let prs = sample_prs();
+        let branches = vec!["main", "fix/login-bug"];
+        let result = match_pr_by_local_branches(&branches, &prs);
+        let pr = result.expect("should find PR #43");
+        assert_eq!(pr["number"].as_u64().unwrap(), 43);
+        assert_eq!(pr["title"].as_str().unwrap(), "Fix bug");
+        assert_eq!(pr["headRefName"].as_str().unwrap(), "fix/login-bug");
     }
 
     #[test]
-    fn match_pr_skips_branches_in_skip_list() {
-        let skip = vec!["add-readme".to_string()];
-        let result = match_pr_to_local_branch(
-            SAMPLE_PR_JSON,
-            &skip,
-            |name| name == "add-readme" || name == "fix/login-bug",
-        );
-        let (pr, head) = result.expect("should skip add-readme");
-        assert_eq!(pr.number, 43);
-        assert_eq!(head, "fix/login-bug");
-    }
-
-    #[test]
-    fn match_pr_returns_none_when_no_branch_exists() {
-        let result = match_pr_to_local_branch(
-            SAMPLE_PR_JSON,
-            &[],
-            |_| false,
-        );
+    fn strategy3_returns_none_when_no_branch_matches() {
+        let prs = sample_prs();
+        let branches = vec!["main", "develop", "feature/unrelated"];
+        let result = match_pr_by_local_branches(&branches, &prs);
         assert!(result.is_none());
     }
 
     #[test]
-    fn match_pr_returns_none_for_empty_json() {
-        let result = match_pr_to_local_branch("[]", &[], |_| true);
+    fn strategy3_handles_empty_branch_list() {
+        let prs = sample_prs();
+        let branches: Vec<&str> = vec![];
+        let result = match_pr_by_local_branches(&branches, &prs);
         assert!(result.is_none());
     }
 
     #[test]
-    fn match_pr_returns_none_for_invalid_json() {
-        let result = match_pr_to_local_branch("not json", &[], |_| true);
+    fn strategy3_handles_empty_pr_list() {
+        let prs: Vec<serde_json::Value> = vec![];
+        let branches = vec!["add-readme", "fix/login-bug"];
+        let result = match_pr_by_local_branches(&branches, &prs);
         assert!(result.is_none());
     }
 
     #[test]
-    fn match_pr_skips_empty_head_ref() {
-        let json = r#"[{"number": 1, "title": "t", "state": "OPEN", "url": "u", "headRefName": ""}]"#;
-        let result = match_pr_to_local_branch(json, &[], |_| true);
+    fn strategy3_multiple_branches_picks_first_matching_pr() {
+        let prs = sample_prs();
+        // Both add-readme and refactor-auth are local — should return first PR match (42)
+        let branches = vec!["add-readme", "refactor-auth"];
+        let result = match_pr_by_local_branches(&branches, &prs);
+        let pr = result.expect("should find PR #42");
+        assert_eq!(pr["number"].as_u64().unwrap(), 42);
+        assert_eq!(pr["headRefName"].as_str().unwrap(), "add-readme");
+    }
+
+    #[test]
+    fn strategy3_detects_merged_pr() {
+        let prs = sample_prs();
+        // Only refactor-auth is local — matches PR #44 which is MERGED
+        let branches = vec!["refactor-auth"];
+        let result = match_pr_by_local_branches(&branches, &prs);
+        let pr = result.expect("should find merged PR #44");
+        assert_eq!(pr["number"].as_u64().unwrap(), 44);
+        assert_eq!(pr["state"].as_str().unwrap(), "MERGED");
+    }
+
+    #[test]
+    fn strategy3_merged_pr_triggers_newly_merged() {
+        let prs = sample_prs();
+        let branches = vec!["refactor-auth"];
+        let pr_val = match_pr_by_local_branches(&branches, &prs).unwrap();
+        let pr_info = PrInfo {
+            number: pr_val["number"].as_u64().unwrap(),
+            title: pr_val["title"].as_str().unwrap().to_string(),
+            state: pr_val["state"].as_str().unwrap().to_string(),
+            url: pr_val["url"].as_str().unwrap().to_string(),
+        };
+        // No previous PR — newly merged should be true
+        assert!(pr_info.is_newly_merged(None));
+        // Previous was OPEN — newly merged should be true
+        let prev_open = make_pr("OPEN");
+        assert!(pr_info.is_newly_merged(Some(&prev_open)));
+        // Previous was already MERGED — not newly merged
+        let prev_merged = make_pr("MERGED");
+        assert!(!pr_info.is_newly_merged(Some(&prev_merged)));
+    }
+
+    #[test]
+    fn strategy3_skips_empty_head_ref() {
+        let prs: Vec<serde_json::Value> = serde_json::from_str(
+            r#"[{"number": 1, "title": "t", "state": "OPEN", "url": "u", "headRefName": ""}]"#,
+        ).unwrap();
+        let branches = vec!["", "main"];
+        let result = match_pr_by_local_branches(&branches, &prs);
         assert!(result.is_none());
     }
 
     #[test]
-    fn match_pr_skips_missing_head_ref() {
-        let json = r#"[{"number": 1, "title": "t", "state": "OPEN", "url": "u"}]"#;
-        let result = match_pr_to_local_branch(json, &[], |_| true);
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn match_pr_all_skipped() {
-        let skip = vec![
-            "add-readme".to_string(),
-            "fix/login-bug".to_string(),
-            "refactor-auth".to_string(),
-        ];
-        let result = match_pr_to_local_branch(SAMPLE_PR_JSON, &skip, |_| true);
+    fn strategy3_skips_missing_head_ref() {
+        let prs: Vec<serde_json::Value> = serde_json::from_str(
+            r#"[{"number": 1, "title": "t", "state": "OPEN", "url": "u"}]"#,
+        ).unwrap();
+        let branches = vec!["main"];
+        let result = match_pr_by_local_branches(&branches, &prs);
         assert!(result.is_none());
     }
 }
