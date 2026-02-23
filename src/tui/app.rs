@@ -1249,7 +1249,7 @@ impl App {
             }
 
             let mut found = false;
-            for repo_dir in repos_to_try {
+            for repo_dir in &repos_to_try {
                 let output = Command::new("gh")
                     .args([
                         "pr",
@@ -1291,6 +1291,64 @@ impl App {
                                 wt.pr = Some(new_pr);
                                 found = true;
                                 break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Fallback: if the assigned branch yielded no PR, check the worktree's
+            // actual current branch. Workers (especially claude-tui) often create
+            // their own branch instead of using the swarm-assigned one.
+            if !found {
+                let actual_branch = Command::new("git")
+                    .arg("-C")
+                    .arg(&wt.worktree_path)
+                    .args(["branch", "--show-current"])
+                    .output()
+                    .ok()
+                    .and_then(|o| {
+                        let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                        if !s.is_empty() && s != wt.branch { Some(s) } else { None }
+                    });
+
+                if let Some(ref actual) = actual_branch {
+                    for repo_dir in &repos_to_try {
+                        let output = Command::new("gh")
+                            .args([
+                                "pr", "list", "--head", actual, "--state", "all",
+                                "--json", "number,title,state,url", "--limit", "1",
+                            ])
+                            .current_dir(repo_dir)
+                            .output();
+
+                        if let Ok(output) = output {
+                            if output.status.success() {
+                                let text = String::from_utf8_lossy(&output.stdout);
+                                if let Ok(prs) = serde_json::from_str::<Vec<serde_json::Value>>(text.trim()) {
+                                    if let Some(pr) = prs.first() {
+                                        let state = pr["state"].as_str().unwrap_or("").to_string();
+                                        if state == "MERGED" && wt.pr.as_ref().map_or(true, |p| p.state != "MERGED") {
+                                            merged_ids.push(wt.id.clone());
+                                        }
+                                        let new_pr = PrInfo {
+                                            number: pr["number"].as_u64().unwrap_or(0),
+                                            title: pr["title"].as_str().unwrap_or("").to_string(),
+                                            state,
+                                            url: pr["url"].as_str().unwrap_or("").to_string(),
+                                        };
+                                        let is_new = wt.pr.is_none();
+                                        let state_changed = wt.pr.as_ref().is_some_and(|old| old.state != new_pr.state);
+                                        if is_new {
+                                            eprintln!("[swarm] PR detected (via actual branch '{actual}'): #{} \"{}\" ({}) {}", new_pr.number, new_pr.title, new_pr.state, new_pr.url);
+                                        } else if state_changed {
+                                            eprintln!("[swarm] PR updated: #{} state -> {} {}", new_pr.number, new_pr.state, new_pr.url);
+                                        }
+                                        wt.pr = Some(new_pr);
+                                        found = true;
+                                        break;
+                                    }
+                                }
                             }
                         }
                     }
