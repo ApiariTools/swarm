@@ -102,3 +102,42 @@ pub fn emit_event(work_dir: &Path, event: &SwarmEvent) -> Result<()> {
     writer.append(event)?;
     Ok(())
 }
+
+// ── Per-Agent Inbox ───────────────────────────────────────
+
+/// A message sent to a specific agent's inbox (used by claude-tui).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentInboxMessage {
+    pub message: String,
+    pub timestamp: DateTime<Local>,
+}
+
+fn agent_inbox_path(work_dir: &Path, worktree_id: &str) -> std::path::PathBuf {
+    work_dir
+        .join(".swarm")
+        .join("agents")
+        .join(worktree_id)
+        .join("inbox.jsonl")
+}
+
+/// Write a message to a specific agent's inbox.
+pub fn write_agent_inbox(work_dir: &Path, worktree_id: &str, message: &str) -> Result<()> {
+    let writer = JsonlWriter::<AgentInboxMessage>::new(agent_inbox_path(work_dir, worktree_id));
+    writer.append(&AgentInboxMessage {
+        message: message.to_string(),
+        timestamp: Local::now(),
+    })?;
+    Ok(())
+}
+
+/// Read new messages from an agent's inbox starting at byte offset.
+pub fn read_agent_inbox(
+    work_dir: &Path,
+    worktree_id: &str,
+    offset: u64,
+) -> Result<(Vec<AgentInboxMessage>, u64)> {
+    let path = agent_inbox_path(work_dir, worktree_id);
+    let mut reader = JsonlReader::<AgentInboxMessage>::with_offset(path, offset);
+    let messages = reader.poll()?;
+    Ok((messages, reader.offset()))
+}

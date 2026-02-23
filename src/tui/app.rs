@@ -893,7 +893,22 @@ impl App {
         let _ = tmux::set_pane_title(&pane_id, &window_name);
 
         // Build launch command but defer sending until the shell is ready
-        let cmd = agent.launch_cmd_with_prompt(prompt, true);
+        let cmd = if agent == AgentKind::ClaudeTui {
+            // ClaudeTui needs -d (project root) and --worktree-id for inbox polling
+            use crate::core::shell::shell_quote;
+            let exe = std::env::current_exe()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|_| "swarm".to_string());
+            format!(
+                "'{}' -d {} agent-tui --dangerously-skip-permissions --worktree-id {} {}",
+                exe,
+                shell_quote(&self.work_dir.to_string_lossy()),
+                shell_quote(&window_name),
+                shell_quote(prompt),
+            )
+        } else {
+            agent.launch_cmd_with_prompt(prompt, true)
+        };
 
         self.worktrees.push(Worktree {
             id: window_name.clone(),
@@ -1157,7 +1172,10 @@ impl App {
                     worktree, message, ..
                 } => {
                     if let Some(wt) = self.worktrees.iter().find(|w| w.id == worktree) {
-                        if let Some(ref agent) = wt.agent {
+                        if wt.agent_kind == AgentKind::ClaudeTui {
+                            // Write to per-agent inbox — the agent-tui polls this directly
+                            let _ = ipc::write_agent_inbox(&self.work_dir, &worktree, &message);
+                        } else if let Some(ref agent) = wt.agent {
                             let _ = tmux::send_keys_to_pane(&agent.pane_id, &message);
                         }
                     }

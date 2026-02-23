@@ -278,6 +278,10 @@ fn draw_status_bar(frame: &mut Frame, area: Rect, app: &TuiApp) {
             (s, theme::status_running())
         }
         SessionStatus::Idle => ("● idle".to_string(), theme::status_idle()),
+        SessionStatus::Waiting => {
+            let dot = if (app.tick_count / 8) % 2 == 0 { "○" } else { "●" };
+            (format!("{} waiting...", dot), theme::status_idle())
+        }
         SessionStatus::Done => {
             let s = if let Some(cost) = app.cost_usd {
                 format!("● done (${:.4})", cost)
@@ -302,7 +306,7 @@ fn draw_status_bar(frame: &mut Frame, area: Rect, app: &TuiApp) {
         String::new()
     };
 
-    let hint = if app.status == SessionStatus::Done || app.status == SessionStatus::Idle {
+    let hint = if app.status == SessionStatus::Done || app.status == SessionStatus::Idle || app.status == SessionStatus::Waiting {
         format!(" {}u/d:page i:input q:quit ", scroll_hint)
     } else {
         format!(" {}u/d:page q:quit ", scroll_hint)

@@ -19,6 +19,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
+use crate::core::ipc;
+
 /// Arguments for the agent-tui subcommand.
 pub struct AgentTuiArgs {
     pub prompt: String,
@@ -33,19 +35,13 @@ pub async fn run(args: AgentTuiArgs) -> Result<()> {
     let (followup_tx, followup_rx) = mpsc::unbounded_channel::<String>();
 
     // Set up event logger path
-    let event_log_path = if let Some(ref wt_id) = args.worktree_id {
-        args.work_dir
-            .join(".swarm")
-            .join("agents")
-            .join(wt_id)
-            .join("events.jsonl")
-    } else {
-        args.work_dir
-            .join(".swarm")
-            .join("agents")
-            .join("default")
-            .join("events.jsonl")
-    };
+    let wt_id = args.worktree_id.clone().unwrap_or_else(|| "default".to_string());
+    let event_log_path = args
+        .work_dir
+        .join(".swarm")
+        .join("agents")
+        .join(&wt_id)
+        .join("events.jsonl");
     let logger = EventLogger::new(event_log_path.clone());
 
     // Log start
@@ -81,7 +77,14 @@ pub async fn run(args: AgentTuiArgs) -> Result<()> {
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
     terminal.clear()?;
 
-    let result = event_loop(&mut terminal, &mut app, &followup_tx).await;
+    let result = event_loop(
+        &mut terminal,
+        &mut app,
+        &followup_tx,
+        &args.work_dir,
+        args.worktree_id.as_deref(),
+    )
+    .await;
 
     disable_raw_mode()?;
     stdout().execute(LeaveAlternateScreen)?;
@@ -96,7 +99,8 @@ pub async fn run(args: AgentTuiArgs) -> Result<()> {
     result
 }
 
-/// The SDK session runner — sends prompt, drains events, accepts follow-ups.
+/// The SDK session runner — sends prompt, drains events, then loops waiting for
+/// follow-up messages and resuming the session.
 async fn run_sdk_session(
     prompt: String,
     dangerously_skip: bool,
@@ -106,10 +110,12 @@ async fn run_sdk_session(
     logger: EventLogger,
 ) -> Result<()> {
     let client = ClaudeClient::new();
+
+    // Spawn initial session
     let opts = SessionOptions {
         dangerously_skip_permissions: dangerously_skip,
         include_partial_messages: true,
-        working_dir: Some(work_dir),
+        working_dir: Some(work_dir.clone()),
         ..Default::default()
     };
 
@@ -131,51 +137,96 @@ async fn run_sdk_session(
         return Ok(());
     }
 
-    // Event draining loop — also checks for follow-up messages
+    let mut current_session_id: Option<String> = None;
+
     loop {
-        tokio::select! {
-            event_result = session.next_event() => {
-                match event_result {
-                    Ok(Some(event)) => {
-                        let is_result = event.is_result();
-                        process_sdk_event(&event, &tx, &logger);
-                        if is_result {
-                            // Session complete — wait for follow-ups
-                            wait_for_followups(&mut session, &mut followup_rx, &tx, &logger).await;
-                            break;
-                        }
-                    }
-                    Ok(None) => break,
-                    Err(e) => {
-                        let msg = format!("SDK error: {}", e);
-                        logger.log_error(&msg);
-                        let _ = tx.send(SdkEvent::Error(msg));
-                        break;
-                    }
-                }
+        // Drain events from the current session until Result
+        let got_result = drain_session_events(&mut session, &tx, &logger, &mut current_session_id).await;
+
+        if !got_result {
+            // Session ended without a Result (unexpected EOF or error) — still wait for followups
+            if current_session_id.is_none() {
+                // No session to resume, we're done
+                break;
             }
         }
+
+        // Signal the TUI that we're now waiting for messages
+        if let Some(ref sid) = current_session_id {
+            let _ = tx.send(SdkEvent::SessionWaiting {
+                session_id: sid.clone(),
+            });
+        }
+
+        // Wait for a follow-up message (from user input or agent inbox)
+        let message = match followup_rx.recv().await {
+            Some(msg) => msg,
+            None => break, // Channel closed — TUI quit
+        };
+
+        // Resume the session with the captured session_id
+        let resume_opts = SessionOptions {
+            resume: current_session_id.clone(),
+            dangerously_skip_permissions: dangerously_skip,
+            include_partial_messages: true,
+            working_dir: Some(work_dir.clone()),
+            ..Default::default()
+        };
+
+        session = match client.spawn(resume_opts).await {
+            Ok(s) => s,
+            Err(e) => {
+                let msg = format!("Failed to resume session: {}", e);
+                logger.log_error(&msg);
+                let _ = tx.send(SdkEvent::Error(msg));
+                // Wait for next followup to try again
+                continue;
+            }
+        };
+
+        // Send the follow-up message
+        if let Err(e) = session.send_message(&message).await {
+            let msg = format!("Failed to send message: {}", e);
+            logger.log_error(&msg);
+            let _ = tx.send(SdkEvent::Error(msg));
+            continue;
+        }
+
+        // Loop back to drain events from the resumed session
     }
 
     Ok(())
 }
 
-/// After the first turn completes, wait for follow-up messages and continue the conversation.
-async fn wait_for_followups(
-    _session: &mut apiari_claude_sdk::Session,
-    followup_rx: &mut mpsc::UnboundedReceiver<String>,
-    _tx: &mpsc::UnboundedSender<SdkEvent>,
-    _logger: &EventLogger,
-) {
-    // If the session is finished (result received), we can't send more messages
-    // to *this* session. The Claude CLI result means the conversation ended.
-    // Multi-turn is handled within a single session before result is emitted.
-    // So we just drain any pending follow-ups and ignore them.
-    //
-    // For true multi-turn, the session stays alive (no result yet) and we'd
-    // need to handle this differently. For now, this is a placeholder.
-    while let Ok(_msg) = followup_rx.try_recv() {
-        // Session already finished, can't send follow-ups
+/// Drain events from a session until a Result event or EOF.
+/// Returns true if a Result event was received.
+async fn drain_session_events(
+    session: &mut apiari_claude_sdk::Session,
+    tx: &mpsc::UnboundedSender<SdkEvent>,
+    logger: &EventLogger,
+    session_id: &mut Option<String>,
+) -> bool {
+    loop {
+        match session.next_event().await {
+            Ok(Some(event)) => {
+                let is_result = event.is_result();
+                // Capture session_id from Result
+                if let Event::Result(ref result) = event {
+                    *session_id = Some(result.session_id.clone());
+                }
+                process_sdk_event(&event, tx, logger);
+                if is_result {
+                    return true;
+                }
+            }
+            Ok(None) => return false,
+            Err(e) => {
+                let msg = format!("SDK error: {}", e);
+                logger.log_error(&msg);
+                let _ = tx.send(SdkEvent::Error(msg));
+                return false;
+            }
+        }
     }
 }
 
@@ -281,13 +332,38 @@ async fn event_loop(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     app: &mut TuiApp,
     followup_tx: &mpsc::UnboundedSender<String>,
+    work_dir: &PathBuf,
+    worktree_id: Option<&str>,
 ) -> Result<()> {
+    // Track inbox offset for polling per-agent inbox
+    let mut inbox_offset: u64 = 0;
+    let mut inbox_poll_counter: u64 = 0;
+
     loop {
         terminal.draw(|frame| render::draw(frame, app))?;
 
         // Drain SDK events and advance animation tick
         app.drain_sdk_events();
         app.tick();
+
+        // Poll per-agent inbox every ~500ms (every 10 ticks at 50ms each)
+        inbox_poll_counter += 1;
+        if inbox_poll_counter % 10 == 0 {
+            if let Some(wt_id) = worktree_id {
+                if app.status == SessionStatus::Waiting {
+                    if let Ok((messages, new_offset)) =
+                        ipc::read_agent_inbox(work_dir, wt_id, inbox_offset)
+                    {
+                        inbox_offset = new_offset;
+                        for msg in messages {
+                            app.add_user_message(msg.message.clone());
+                            let _ = followup_tx.send(msg.message);
+                            app.auto_scroll = true;
+                        }
+                    }
+                }
+            }
+        }
 
         let poll_ms = 50;
 
@@ -306,6 +382,7 @@ async fn event_loop(
                         KeyCode::Char('i') => {
                             if app.status == SessionStatus::Done
                                 || app.status == SessionStatus::Idle
+                                || app.status == SessionStatus::Waiting
                             {
                                 app.input_mode = InputMode::Input;
                             }
