@@ -1147,10 +1147,31 @@ impl App {
                     ..
                 } => {
                     let agent_kind = AgentKind::from_str(&agent).unwrap_or(AgentKind::Claude);
-                    let repo_path = repo
-                        .and_then(|name| self.repos.iter().find(|r| git::repo_name(r) == name).cloned())
-                        .or_else(|| self.repos.first().cloned())
-                        .unwrap_or_else(|| self.work_dir.clone());
+                    let repo_path = match repo {
+                        Some(name) => {
+                            match self.repos.iter().find(|r| git::repo_name(r) == name).cloned() {
+                                Some(path) => path,
+                                None => {
+                                    let names: Vec<_> = self.repos.iter().map(|r| git::repo_name(r)).collect();
+                                    self.flash(format!(
+                                        "create failed: unknown repo '{}' (available: {})",
+                                        name,
+                                        names.join(", ")
+                                    ));
+                                    continue;
+                                }
+                            }
+                        }
+                        None if self.repos.len() > 1 => {
+                            let names: Vec<_> = self.repos.iter().map(|r| git::repo_name(r)).collect();
+                            self.flash(format!(
+                                "create failed: --repo required ({})",
+                                names.join(", ")
+                            ));
+                            continue;
+                        }
+                        None => self.repos.first().cloned().unwrap_or_else(|| self.work_dir.clone()),
+                    };
                     if let Err(e) = self.create_worktree_with_agent(&prompt, agent_kind, &repo_path, start_point.as_deref()) {
                         self.flash(format!("inbox create error: {}", e));
                     }
@@ -1185,48 +1206,64 @@ impl App {
 
     fn refresh_pr_statuses(&mut self) {
         let mut merged_ids = Vec::new();
+        let all_repos = self.repos.clone();
 
         for wt in &mut self.worktrees {
             if wt.branch.is_empty() {
                 continue;
             }
 
-            let output = Command::new("gh")
-                .args([
-                    "pr",
-                    "list",
-                    "--head",
-                    &wt.branch,
-                    "--state",
-                    "all",
-                    "--json",
-                    "number,title,state,url",
-                    "--limit",
-                    "1",
-                ])
-                .current_dir(&wt.repo_path)
-                .output();
+            // Build list of repos to search: wt.repo_path first, then others
+            let mut repos_to_try: Vec<&PathBuf> = vec![&wt.repo_path];
+            for repo in &all_repos {
+                if repo != &wt.repo_path {
+                    repos_to_try.push(repo);
+                }
+            }
 
-            if let Ok(output) = output {
-                if output.status.success() {
-                    let text = String::from_utf8_lossy(&output.stdout);
-                    if let Ok(prs) = serde_json::from_str::<Vec<serde_json::Value>>(text.trim()) {
-                        if let Some(pr) = prs.first() {
-                            let state = pr["state"].as_str().unwrap_or("").to_string();
-                            if state == "MERGED" && wt.pr.as_ref().map_or(true, |p| p.state != "MERGED") {
-                                merged_ids.push(wt.id.clone());
+            let mut found = false;
+            for repo_dir in repos_to_try {
+                let output = Command::new("gh")
+                    .args([
+                        "pr",
+                        "list",
+                        "--head",
+                        &wt.branch,
+                        "--state",
+                        "all",
+                        "--json",
+                        "number,title,state,url",
+                        "--limit",
+                        "1",
+                    ])
+                    .current_dir(repo_dir)
+                    .output();
+
+                if let Ok(output) = output {
+                    if output.status.success() {
+                        let text = String::from_utf8_lossy(&output.stdout);
+                        if let Ok(prs) = serde_json::from_str::<Vec<serde_json::Value>>(text.trim()) {
+                            if let Some(pr) = prs.first() {
+                                let state = pr["state"].as_str().unwrap_or("").to_string();
+                                if state == "MERGED" && wt.pr.as_ref().map_or(true, |p| p.state != "MERGED") {
+                                    merged_ids.push(wt.id.clone());
+                                }
+                                wt.pr = Some(PrInfo {
+                                    number: pr["number"].as_u64().unwrap_or(0),
+                                    title: pr["title"].as_str().unwrap_or("").to_string(),
+                                    state,
+                                    url: pr["url"].as_str().unwrap_or("").to_string(),
+                                });
+                                found = true;
+                                break;
                             }
-                            wt.pr = Some(PrInfo {
-                                number: pr["number"].as_u64().unwrap_or(0),
-                                title: pr["title"].as_str().unwrap_or("").to_string(),
-                                state,
-                                url: pr["url"].as_str().unwrap_or("").to_string(),
-                            });
-                        } else {
-                            wt.pr = None;
                         }
                     }
                 }
+            }
+
+            if !found {
+                wt.pr = None;
             }
         }
 
@@ -1452,7 +1489,7 @@ impl App {
 
     /// Rebalance tmux pane layout into a tiled grid.
     /// Sets `layout_dirty` so the tick handler retries if this attempt fails.
-    fn rebalance_layout(&mut self) {
+    pub fn rebalance_layout(&mut self) {
         self.layout_dirty = true;
         self.try_rebalance_layout();
     }

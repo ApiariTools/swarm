@@ -42,7 +42,11 @@ async fn event_loop(
         let poll_ms = 100;
 
         if event::poll(Duration::from_millis(poll_ms))? {
-            if let Event::Key(key) = event::read()? {
+            let ev = event::read()?;
+            if let Event::Resize(..) = ev {
+                app.rebalance_layout();
+            }
+            if let Event::Key(key) = ev {
                 // Ctrl+C always quits
                 if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
                     app.save_state();

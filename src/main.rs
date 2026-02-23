@@ -37,6 +37,9 @@ enum Commands {
         /// Agent type
         #[arg(long, default_value = "claude")]
         agent: Option<String>,
+        /// Repo name (required when multiple repos detected)
+        #[arg(long)]
+        repo: Option<String>,
     },
     /// Send a message to a worktree's agent via IPC
     Send {
@@ -98,8 +101,8 @@ async fn main() -> Result<()> {
     match cli.command {
         None => run_sidebar(work_dir, cli.agent).await,
         Some(Commands::Status { json }) => cmd_status(work_dir, json),
-        Some(Commands::Create { prompt, agent }) => {
-            cmd_create(work_dir, prompt, agent.unwrap_or_else(|| cli.agent.clone()))
+        Some(Commands::Create { prompt, agent, repo }) => {
+            cmd_create(work_dir, prompt, agent.unwrap_or_else(|| cli.agent.clone()), repo)
         }
         Some(Commands::Send { worktree, message }) => cmd_send(work_dir, worktree, message),
         Some(Commands::Close { worktree }) => cmd_close(work_dir, worktree),
@@ -164,6 +167,9 @@ async fn run_sidebar(work_dir: std::path::PathBuf, agent: String) -> Result<()> 
                 let _ = core::tmux::set_pane_style(pane_id, "bg=#302c26,fg=#dcdce1,nodim");
             }
             app.save_state();
+            // Enforce correct layout sizes (sidebar may have drifted if
+            // terminal was resized while detached, e.g. mobile SSH).
+            app.rebalance_layout();
             tui::run(&mut app).await?;
         } else {
             // In a different tmux session — create swarm session if needed, switch to it
@@ -176,6 +182,7 @@ async fn run_sidebar(work_dir: std::path::PathBuf, agent: String) -> Result<()> 
                 )?;
                 core::tmux::apply_session_style(&session_name)?;
             }
+            rebalance_session(&session_name);
             core::tmux::switch_client(&session_name)?;
         }
     } else {
@@ -185,6 +192,7 @@ async fn run_sidebar(work_dir: std::path::PathBuf, agent: String) -> Result<()> 
             core::tmux::create_session_with_cmd(&session_name, &work_dir.to_string_lossy(), &cmd)?;
             core::tmux::apply_session_style(&session_name)?;
         }
+        rebalance_session(&session_name);
         core::tmux::attach_session(&session_name)?;
     }
 
@@ -204,6 +212,50 @@ fn get_current_pane_id() -> Option<String> {
                 None
             }
         })
+}
+
+/// Rebalance the tmux layout for an existing swarm session.
+/// Reads state.json to find the sidebar and worktree panes, then applies
+/// the tiled layout with 38-char sidebar. Called before attach/switch so
+/// the layout is correct even if the terminal size changed while detached.
+fn rebalance_session(session_name: &str) {
+    let work_dir = std::env::current_dir().unwrap_or_default();
+    let state = match core::state::load_state(&work_dir) {
+        Ok(Some(s)) if s.session_name == *session_name => s,
+        _ => return,
+    };
+
+    let sidebar = match &state.sidebar_pane_id {
+        Some(id) => id.clone(),
+        None => return,
+    };
+
+    let live_panes: Vec<String> = core::tmux::list_panes(session_name)
+        .unwrap_or_default()
+        .iter()
+        .map(|p| p.pane_id.clone())
+        .collect();
+
+    let pane_groups: Vec<Vec<String>> = state
+        .worktrees
+        .iter()
+        .map(|wt| {
+            let mut panes = Vec::new();
+            if let Some(ref agent) = wt.agent {
+                if live_panes.contains(&agent.pane_id) {
+                    panes.push(agent.pane_id.clone());
+                }
+            }
+            for term in &wt.terminals {
+                if live_panes.contains(&term.pane_id) {
+                    panes.push(term.pane_id.clone());
+                }
+            }
+            panes
+        })
+        .collect();
+
+    let _ = core::tmux::apply_tiled_layout(session_name, &sidebar, 38, pane_groups);
 }
 
 /// Build the swarm command to send into a tmux pane.
@@ -317,14 +369,29 @@ fn worktree_status(wt: &core::state::WorktreeState, live_panes: &[String]) -> St
     }
 }
 
-fn cmd_create(work_dir: std::path::PathBuf, prompt: String, agent: String) -> Result<()> {
+fn cmd_create(work_dir: std::path::PathBuf, prompt: String, agent: String, repo: Option<String>) -> Result<()> {
+    // Validate --repo when multiple repos detected
+    let repo = if repo.is_some() {
+        repo
+    } else {
+        let repos = core::git::detect_repos(&work_dir)?;
+        if repos.len() > 1 {
+            let names: Vec<_> = repos.iter().map(|r| core::git::repo_name(r)).collect();
+            return Err(color_eyre::eyre::eyre!(
+                "multiple repos detected, --repo required: {}",
+                names.join(", ")
+            ));
+        }
+        None
+    };
+
     ensure_swarm_running(&work_dir, &agent)?;
 
     let msg = core::ipc::InboxMessage::Create {
         id: Uuid::new_v4().to_string(),
         prompt,
         agent,
-        repo: None,
+        repo,
         start_point: None,
         timestamp: Local::now(),
     };
