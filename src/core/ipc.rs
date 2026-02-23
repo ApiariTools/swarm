@@ -70,6 +70,12 @@ pub enum SwarmEvent {
         branch: String,
         timestamp: DateTime<Local>,
     },
+    CreateFailed {
+        error: String,
+        prompt: String,
+        repo: Option<String>,
+        timestamp: DateTime<Local>,
+    },
 }
 
 fn inbox_path(work_dir: &Path) -> std::path::PathBuf {

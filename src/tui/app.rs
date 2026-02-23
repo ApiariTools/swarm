@@ -1192,33 +1192,54 @@ impl App {
                     ..
                 } => {
                     let agent_kind = AgentKind::from_str(&agent).unwrap_or(AgentKind::ClaudeTui);
-                    let repo_path = match repo {
+                    let repo_path = match &repo {
                         Some(name) => {
-                            match self.repos.iter().find(|r| git::repo_name(r) == name).cloned() {
+                            match self.repos.iter().find(|r| git::repo_name(r) == *name).cloned() {
                                 Some(path) => path,
                                 None => {
                                     let names: Vec<_> = self.repos.iter().map(|r| git::repo_name(r)).collect();
-                                    self.flash(format!(
-                                        "create failed: unknown repo '{}' (available: {})",
+                                    let err = format!(
+                                        "unknown repo '{}' (available: {})",
                                         name,
                                         names.join(", ")
-                                    ));
+                                    );
+                                    self.flash(format!("create failed: {}", err));
+                                    let _ = ipc::emit_event(&self.work_dir, &ipc::SwarmEvent::CreateFailed {
+                                        error: err,
+                                        prompt,
+                                        repo,
+                                        timestamp: Local::now(),
+                                    });
                                     continue;
                                 }
                             }
                         }
                         None if self.repos.len() > 1 => {
                             let names: Vec<_> = self.repos.iter().map(|r| git::repo_name(r)).collect();
-                            self.flash(format!(
-                                "create failed: --repo required ({})",
+                            let err = format!(
+                                "--repo required ({})",
                                 names.join(", ")
-                            ));
+                            );
+                            self.flash(format!("create failed: {}", err));
+                            let _ = ipc::emit_event(&self.work_dir, &ipc::SwarmEvent::CreateFailed {
+                                error: err,
+                                prompt,
+                                repo,
+                                timestamp: Local::now(),
+                            });
                             continue;
                         }
                         None => self.repos.first().cloned().unwrap_or_else(|| self.work_dir.clone()),
                     };
                     if let Err(e) = self.create_worktree_with_agent(&prompt, agent_kind, &repo_path, start_point.as_deref()) {
-                        self.flash(format!("inbox create error: {}", e));
+                        let err = format!("{}", e);
+                        self.flash(format!("inbox create error: {}", err));
+                        let _ = ipc::emit_event(&self.work_dir, &ipc::SwarmEvent::CreateFailed {
+                            error: err,
+                            prompt,
+                            repo,
+                            timestamp: Local::now(),
+                        });
                     }
                 }
                 ipc::InboxMessage::Send {
