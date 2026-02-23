@@ -14,8 +14,8 @@ struct Cli {
     #[arg(short, long, global = true)]
     dir: Option<String>,
 
-    /// Agent to use: claude, codex, opencode
-    #[arg(short, long, default_value = "claude", global = true)]
+    /// Agent to use: claude-tui, claude, codex
+    #[arg(short, long, default_value = "claude-tui", global = true)]
     agent: String,
 
     #[command(subcommand)]
@@ -35,7 +35,7 @@ enum Commands {
         /// Task prompt
         prompt: String,
         /// Agent type
-        #[arg(long, default_value = "claude")]
+        #[arg(long, default_value = "claude-tui")]
         agent: Option<String>,
         /// Repo name (required when multiple repos detected)
         #[arg(long)]

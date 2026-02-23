@@ -82,7 +82,7 @@ impl AgentKind {
 
     /// All available agents.
     pub fn all() -> Vec<Self> {
-        vec![Self::Claude, Self::Codex, Self::ClaudeTui]
+        vec![Self::ClaudeTui, Self::Claude, Self::Codex]
     }
 }
 

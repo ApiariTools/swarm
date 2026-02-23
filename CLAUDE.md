@@ -42,7 +42,7 @@ src/
 ## Key Concepts
 
 - **Worktree** (`tui/app.rs:Worktree`): The primary unit of work. Each has an isolated git worktree, a branch (`swarm/<sanitized-prompt>-N`), an agent pane, optional terminal panes, PR tracking info, and an LLM-generated summary.
-- **AgentKind** (`core/agent.rs`): Currently `Claude` and `Codex`. Agents launch via their CLI in a tmux pane with `--dangerously-skip-permissions` for Claude.
+- **AgentKind** (`core/agent.rs`): Currently `ClaudeTui` (default), `Claude`, and `Codex`. Agents launch via their CLI in a tmux pane with `--dangerously-skip-permissions` for Claude.
 - **Sidebar**: The TUI runs in a narrow left pane (38 chars) using `main-vertical` tmux layout. Agent panes stack vertically to its right.
 - **IPC**: External commands write JSONL to `.swarm/inbox.jsonl`, sidebar reads on 500ms tick. Events emitted to `.swarm/events.jsonl`. CLI commands auto-start the sidebar if it's not already running.
 - **State**: Persisted to `.swarm/state.json` on every mutation. Restored on restart with orphan worktree discovery.
