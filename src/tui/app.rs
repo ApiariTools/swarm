@@ -2289,4 +2289,262 @@ mod tests {
         assert!(result.is_none());
     }
 
+    // --- IPC dispatch tests ---
+    //
+    // These test handle_inbox_message by constructing a minimal App
+    // without tmux or socket dependencies. Tests that require actual
+    // worktree creation (tmux + git) are deferred until CommandRunner
+    // is wired through App (see core/runner.rs).
+
+    /// Build a minimal App for testing (no tmux, no socket listener).
+    fn test_app(work_dir: PathBuf, repos: Vec<PathBuf>) -> App {
+        let (summary_tx, summary_rx) = mpsc::unbounded_channel();
+        let (_inbox_tx, inbox_rx) = mpsc::unbounded_channel();
+
+        App {
+            work_dir,
+            repos,
+            default_agent: AgentKind::ClaudeTui,
+            session_name: "test-session".to_string(),
+            worktrees: Vec::new(),
+            selected: 0,
+            mode: Mode::Normal,
+            input_buffer: String::new(),
+            input_cursor: 0,
+            input_label: String::new(),
+            agent_select_index: 0,
+            repo_select_index: 0,
+            pending_action: None,
+            confirm_message: String::new(),
+            status_message: None,
+            show_help: false,
+            tick_count: 0,
+            sidebar_pane_id: None,
+            list_scroll: Cell::new(0),
+            prev_selected: None,
+            layout_dirty: false,
+            last_refresh: Instant::now(),
+            last_pr_check: Instant::now(),
+            last_inbox_check: Instant::now(),
+            last_inbox_pos: 0,
+            summary_tx,
+            summary_rx,
+            inbox_rx,
+            _socket_handle: None,
+        }
+    }
+
+    fn make_test_worktree(id: &str, agent_kind: AgentKind) -> Worktree {
+        Worktree {
+            id: id.to_string(),
+            branch: format!("swarm/{}", id),
+            prompt: "test task".to_string(),
+            agent_kind,
+            repo_path: PathBuf::from("/tmp/repo"),
+            worktree_path: PathBuf::from("/tmp/wt"),
+            created_at: Local::now(),
+            agent: None,
+            terminals: vec![],
+            pr: None,
+            summary: None,
+            pending_prompt: None,
+            agent_session_status: None,
+        }
+    }
+
+    #[test]
+    fn test_ipc_create_unknown_repo_no_crash() {
+        let dir = tempfile::tempdir().unwrap();
+        let work_dir = dir.path().to_path_buf();
+        std::fs::create_dir_all(work_dir.join(".swarm")).unwrap();
+
+        let repo_a = work_dir.join("repo-a");
+        let repo_b = work_dir.join("repo-b");
+        let mut app = test_app(work_dir.clone(), vec![repo_a, repo_b]);
+
+        let msg = ipc::InboxMessage::Create {
+            id: "msg-1".to_string(),
+            prompt: "fix something".to_string(),
+            agent: "claude".to_string(),
+            repo: Some("nonexistent-repo".to_string()),
+            start_point: None,
+            timestamp: Local::now(),
+        };
+
+        // Should not panic
+        app.handle_inbox_message(msg);
+
+        // Should set a flash message about the error
+        let (flash, _) = app.status_message.as_ref().expect("should have flash message");
+        assert!(flash.contains("create failed"), "flash: {}", flash);
+        assert!(flash.contains("nonexistent-repo"), "flash: {}", flash);
+
+        // Should have emitted a CreateFailed event
+        let events_file = work_dir.join(".swarm").join("events.jsonl");
+        let content = std::fs::read_to_string(&events_file).unwrap();
+        assert!(content.contains("create_failed"));
+        assert!(content.contains("nonexistent-repo"));
+
+        // No worktrees added
+        assert!(app.worktrees.is_empty());
+    }
+
+    #[test]
+    fn test_ipc_create_missing_repo_with_multiple_repos() {
+        let dir = tempfile::tempdir().unwrap();
+        let work_dir = dir.path().to_path_buf();
+        std::fs::create_dir_all(work_dir.join(".swarm")).unwrap();
+
+        let repo_a = work_dir.join("alpha");
+        let repo_b = work_dir.join("beta");
+        let mut app = test_app(work_dir.clone(), vec![repo_a, repo_b]);
+
+        // Create without specifying --repo when multiple repos exist
+        let msg = ipc::InboxMessage::Create {
+            id: "msg-1".to_string(),
+            prompt: "fix something".to_string(),
+            agent: "claude".to_string(),
+            repo: None,
+            start_point: None,
+            timestamp: Local::now(),
+        };
+
+        app.handle_inbox_message(msg);
+
+        // Should fail with --repo required error
+        let (flash, _) = app.status_message.as_ref().expect("should have flash message");
+        assert!(flash.contains("create failed"), "flash: {}", flash);
+        assert!(flash.contains("--repo required"), "flash: {}", flash);
+
+        assert!(app.worktrees.is_empty());
+    }
+
+    #[test]
+    fn test_ipc_send_delivers_to_claude_tui_worktree() {
+        let dir = tempfile::tempdir().unwrap();
+        let work_dir = dir.path().to_path_buf();
+        std::fs::create_dir_all(work_dir.join(".swarm")).unwrap();
+
+        let mut app = test_app(work_dir.clone(), vec![]);
+        app.worktrees.push(make_test_worktree("hive-1", AgentKind::ClaudeTui));
+
+        let msg = ipc::InboxMessage::Send {
+            id: "msg-1".to_string(),
+            worktree: "hive-1".to_string(),
+            message: "please review the PR".to_string(),
+            timestamp: Local::now(),
+        };
+
+        app.handle_inbox_message(msg);
+
+        // For ClaudeTui agents, the message is written to the per-agent inbox
+        let (messages, _) = ipc::read_agent_inbox(&work_dir, "hive-1", 0).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].message, "please review the PR");
+    }
+
+    #[test]
+    fn test_ipc_send_unknown_worktree_handled() {
+        let dir = tempfile::tempdir().unwrap();
+        let work_dir = dir.path().to_path_buf();
+
+        let mut app = test_app(work_dir, vec![]);
+
+        let msg = ipc::InboxMessage::Send {
+            id: "msg-1".to_string(),
+            worktree: "nonexistent-99".to_string(),
+            message: "this goes nowhere".to_string(),
+            timestamp: Local::now(),
+        };
+
+        // Should not panic
+        app.handle_inbox_message(msg);
+        assert!(app.worktrees.is_empty());
+    }
+
+    #[test]
+    fn test_ipc_close_removes_worktree() {
+        let dir = tempfile::tempdir().unwrap();
+        let work_dir = dir.path().to_path_buf();
+        std::fs::create_dir_all(work_dir.join(".swarm")).unwrap();
+
+        let mut app = test_app(work_dir.clone(), vec![]);
+        app.worktrees.push(make_test_worktree("hive-1", AgentKind::Claude));
+        app.worktrees.push(make_test_worktree("hive-2", AgentKind::Claude));
+        assert_eq!(app.worktrees.len(), 2);
+
+        let msg = ipc::InboxMessage::Close {
+            id: "msg-1".to_string(),
+            worktree: "hive-1".to_string(),
+            timestamp: Local::now(),
+        };
+
+        app.handle_inbox_message(msg);
+
+        // hive-1 should be removed, hive-2 should remain
+        assert_eq!(app.worktrees.len(), 1);
+        assert_eq!(app.worktrees[0].id, "hive-2");
+
+        // Should have emitted a close event
+        let events_file = work_dir.join(".swarm").join("events.jsonl");
+        let content = std::fs::read_to_string(&events_file).unwrap();
+        assert!(content.contains("worktree_closed"));
+        assert!(content.contains("hive-1"));
+    }
+
+    #[test]
+    fn test_ipc_close_unknown_worktree_no_crash() {
+        let dir = tempfile::tempdir().unwrap();
+        let work_dir = dir.path().to_path_buf();
+
+        let mut app = test_app(work_dir, vec![]);
+        app.worktrees.push(make_test_worktree("hive-1", AgentKind::Claude));
+
+        let msg = ipc::InboxMessage::Close {
+            id: "msg-1".to_string(),
+            worktree: "nonexistent-99".to_string(),
+            timestamp: Local::now(),
+        };
+
+        // Should not panic, and should not remove the existing worktree
+        app.handle_inbox_message(msg);
+        assert_eq!(app.worktrees.len(), 1);
+        assert_eq!(app.worktrees[0].id, "hive-1");
+    }
+
+    #[test]
+    fn test_ipc_file_inbox_round_trip_dispatch() {
+        // End-to-end: write messages to inbox.jsonl, read them, dispatch them.
+        let dir = tempfile::tempdir().unwrap();
+        let work_dir = dir.path().to_path_buf();
+        std::fs::create_dir_all(work_dir.join(".swarm")).unwrap();
+
+        // Write a Send message to the inbox file
+        let msg = ipc::InboxMessage::Send {
+            id: "msg-1".to_string(),
+            worktree: "hive-1".to_string(),
+            message: "hello from file inbox".to_string(),
+            timestamp: Local::now(),
+        };
+        ipc::write_inbox(&work_dir, &msg).unwrap();
+
+        // Read from file inbox
+        let (messages, new_pos) = ipc::read_inbox(&work_dir, 0).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert!(new_pos > 0);
+
+        // Dispatch through App
+        let mut app = test_app(work_dir.clone(), vec![]);
+        app.worktrees.push(make_test_worktree("hive-1", AgentKind::ClaudeTui));
+
+        for m in messages {
+            app.handle_inbox_message(m);
+        }
+
+        // Verify the message was delivered to the agent inbox
+        let (agent_msgs, _) = ipc::read_agent_inbox(&work_dir, "hive-1", 0).unwrap();
+        assert_eq!(agent_msgs.len(), 1);
+        assert_eq!(agent_msgs[0].message, "hello from file inbox");
+    }
+
 }
