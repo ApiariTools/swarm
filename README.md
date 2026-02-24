@@ -82,10 +82,13 @@ Swarm also supports commands for scripting and inter-process communication:
 ```bash
 swarm status              # Show current state
 swarm status --json       # Machine-readable output
-swarm create "add auth"   # Create a new worktree with an agent
+swarm create --repo my-repo "add auth"   # Create a new worktree with an agent
 swarm send my-task "msg"  # Send a message to a running agent
 swarm merge my-task       # Merge a worktree's branch into base
 swarm close my-task       # Close and clean up a worktree
+
+# For long/multiline prompts, use --prompt-file instead of inline args:
+swarm create --repo my-repo --prompt-file /tmp/task.txt
 ```
 
 ## Multi-Repo Support
