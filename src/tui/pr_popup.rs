@@ -42,34 +42,33 @@ fn pr_popup_loop(
     loop {
         terminal.draw(|frame| draw_pr_popup(frame, args))?;
 
-        if event::poll(Duration::from_millis(100))? {
-            if let Event::Key(key) = event::read()? {
-                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c')
-                {
+        if event::poll(Duration::from_millis(100))?
+            && let Event::Key(key) = event::read()?
+        {
+            if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+                break;
+            }
+
+            match key.code {
+                KeyCode::Char('o') | KeyCode::Enter => {
+                    let _ = Command::new("open").arg(&args.url).spawn();
                     break;
                 }
-
-                match key.code {
-                    KeyCode::Char('o') | KeyCode::Enter => {
-                        let _ = Command::new("open").arg(&args.url).spawn();
-                        break;
-                    }
-                    KeyCode::Char('c') => {
-                        let _ = Command::new("pbcopy")
-                            .stdin(std::process::Stdio::piped())
-                            .spawn()
-                            .and_then(|mut child| {
-                                use std::io::Write;
-                                if let Some(ref mut stdin) = child.stdin {
-                                    stdin.write_all(args.url.as_bytes())?;
-                                }
-                                child.wait()
-                            });
-                        break;
-                    }
-                    KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('p') => break,
-                    _ => {}
+                KeyCode::Char('c') => {
+                    let _ = Command::new("pbcopy")
+                        .stdin(std::process::Stdio::piped())
+                        .spawn()
+                        .and_then(|mut child| {
+                            use std::io::Write;
+                            if let Some(ref mut stdin) = child.stdin {
+                                stdin.write_all(args.url.as_bytes())?;
+                            }
+                            child.wait()
+                        });
+                    break;
                 }
+                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('p') => break,
+                _ => {}
             }
         }
     }
@@ -88,9 +87,10 @@ fn draw_pr_popup(frame: &mut Frame, args: &PrPopupArgs) {
     let mut y = inner.y + 1;
 
     // PR number header
-    let header = Line::from(vec![
-        Span::styled(format!(" PR #{}", args.number), theme::title()),
-    ]);
+    let header = Line::from(vec![Span::styled(
+        format!(" PR #{}", args.number),
+        theme::title(),
+    )]);
     frame.render_widget(
         Paragraph::new(header),
         Rect::new(inner.x, y, inner.width, 1),
@@ -127,10 +127,8 @@ fn draw_pr_popup(frame: &mut Frame, args: &PrPopupArgs) {
     let url_width = inner.width.saturating_sub(2);
     let url_lines = wrapped_line_count(&args.url, url_width as usize).min(4) as u16;
     frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(&args.url, theme::accent()),
-        ]))
-        .wrap(Wrap { trim: false }),
+        Paragraph::new(Line::from(vec![Span::styled(&args.url, theme::accent())]))
+            .wrap(Wrap { trim: false }),
         Rect::new(inner.x + 1, y, url_width, url_lines),
     );
 
@@ -159,5 +157,5 @@ fn wrapped_line_count(s: &str, width: usize) -> usize {
     if len == 0 {
         return 1;
     }
-    (len + width - 1) / width
+    len.div_ceil(width)
 }

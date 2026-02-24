@@ -550,10 +550,10 @@ fn get_pane_indices(target: &str) -> Result<HashMap<String, u16>> {
     let mut map = HashMap::new();
     for line in text.lines() {
         let parts: Vec<&str> = line.split('\t').collect();
-        if parts.len() >= 2 {
-            if let Ok(idx) = parts[1].parse::<u16>() {
-                map.insert(parts[0].to_string(), idx);
-            }
+        if parts.len() >= 2
+            && let Ok(idx) = parts[1].parse::<u16>()
+        {
+            map.insert(parts[0].to_string(), idx);
         }
     }
     Ok(map)

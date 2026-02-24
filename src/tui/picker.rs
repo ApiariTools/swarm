@@ -95,123 +95,123 @@ fn picker_loop(
             continue;
         }
 
-        if event::poll(Duration::from_millis(100))? {
-            if let Event::Key(key) = event::read()? {
-                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-                    break;
-                }
+        if event::poll(Duration::from_millis(100))?
+            && let Event::Key(key) = event::read()?
+        {
+            if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+                break;
+            }
 
-                match picker.phase {
-                    Phase::RepoSelect => match key.code {
-                        KeyCode::Esc => break,
-                        KeyCode::Char('j') | KeyCode::Down => {
-                            picker.repo_index = (picker.repo_index + 1) % picker.repos.len();
-                        }
-                        KeyCode::Char('k') | KeyCode::Up => {
-                            picker.repo_index = if picker.repo_index == 0 {
-                                picker.repos.len() - 1
-                            } else {
-                                picker.repo_index - 1
-                            };
-                        }
-                        KeyCode::Enter => {
+            match picker.phase {
+                Phase::RepoSelect => match key.code {
+                    KeyCode::Esc => break,
+                    KeyCode::Char('j') | KeyCode::Down => {
+                        picker.repo_index = (picker.repo_index + 1) % picker.repos.len();
+                    }
+                    KeyCode::Char('k') | KeyCode::Up => {
+                        picker.repo_index = if picker.repo_index == 0 {
+                            picker.repos.len() - 1
+                        } else {
+                            picker.repo_index - 1
+                        };
+                    }
+                    KeyCode::Enter => {
+                        picker.phase = Phase::Input;
+                    }
+                    KeyCode::Char(c @ '1'..='9') => {
+                        let idx = (c as usize) - ('1' as usize);
+                        if idx < picker.repos.len() {
+                            picker.repo_index = idx;
                             picker.phase = Phase::Input;
                         }
-                        KeyCode::Char(c @ '1'..='9') => {
-                            let idx = (c as usize) - ('1' as usize);
-                            if idx < picker.repos.len() {
-                                picker.repo_index = idx;
-                                picker.phase = Phase::Input;
-                            }
-                        }
-                        _ => {}
-                    },
-                    Phase::Input => match key.code {
-                        KeyCode::Esc => {
-                            if picker.repos.len() > 1 {
-                                picker.phase = Phase::RepoSelect;
-                                picker.input_buffer.clear();
-                                picker.input_cursor = 0;
-                            } else {
-                                break;
-                            }
-                        }
-                        KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => {
-                            picker.input_buffer.insert(picker.input_cursor, '\n');
-                            picker.input_cursor += 1;
-                        }
-                        KeyCode::Enter => {
-                            if !picker.input_buffer.trim().is_empty() {
-                                picker.phase = Phase::AgentSelect;
-                            }
-                        }
-                        KeyCode::Backspace => {
-                            if picker.input_cursor > 0 {
-                                picker.input_cursor -= 1;
-                                picker.input_buffer.remove(picker.input_cursor);
-                            }
-                        }
-                        KeyCode::Char(c) => {
-                            picker.input_buffer.insert(picker.input_cursor, c);
-                            picker.input_cursor += 1;
-                        }
-                        KeyCode::Left => {
-                            if picker.input_cursor > 0 {
-                                picker.input_cursor -= 1;
-                            }
-                        }
-                        KeyCode::Right => {
-                            if picker.input_cursor < picker.input_buffer.len() {
-                                picker.input_cursor += 1;
-                            }
-                        }
-                        _ => {}
-                    },
-                    Phase::AgentSelect => match key.code {
-                        KeyCode::Esc => {
-                            picker.phase = Phase::Input;
-                        }
-                        KeyCode::Char('j') | KeyCode::Down => {
-                            picker.agent_index = (picker.agent_index + 1) % AgentKind::all().len();
-                        }
-                        KeyCode::Char('k') | KeyCode::Up => {
-                            let count = AgentKind::all().len();
-                            picker.agent_index = if picker.agent_index == 0 {
-                                count - 1
-                            } else {
-                                picker.agent_index - 1
-                            };
-                        }
-                        KeyCode::Enter => {
-                            picker.phase = Phase::Fetching;
-                        }
-                        KeyCode::Char('1') => {
-                            picker.agent_index = 0;
-                            picker.phase = Phase::Fetching;
-                        }
-                        KeyCode::Char('2') => {
-                            if AgentKind::all().len() > 1 {
-                                picker.agent_index = 1;
-                                picker.phase = Phase::Fetching;
-                            }
-                        }
-                        _ => {}
-                    },
-                    Phase::FetchConfirm => match key.code {
-                        KeyCode::Char('y') | KeyCode::Enter => {
-                            picker.start_point = Some("origin/main".to_string());
-                            submit_picker(picker)?;
+                    }
+                    _ => {}
+                },
+                Phase::Input => match key.code {
+                    KeyCode::Esc => {
+                        if picker.repos.len() > 1 {
+                            picker.phase = Phase::RepoSelect;
+                            picker.input_buffer.clear();
+                            picker.input_cursor = 0;
+                        } else {
                             break;
                         }
-                        KeyCode::Char('n') | KeyCode::Esc => {
-                            picker.start_point = None;
-                            submit_picker(picker)?;
-                            break;
+                    }
+                    KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => {
+                        picker.input_buffer.insert(picker.input_cursor, '\n');
+                        picker.input_cursor += 1;
+                    }
+                    KeyCode::Enter => {
+                        if !picker.input_buffer.trim().is_empty() {
+                            picker.phase = Phase::AgentSelect;
                         }
-                        _ => {}
-                    },
-                    Phase::Fetching => unreachable!(),
-                }
+                    }
+                    KeyCode::Backspace => {
+                        if picker.input_cursor > 0 {
+                            picker.input_cursor -= 1;
+                            picker.input_buffer.remove(picker.input_cursor);
+                        }
+                    }
+                    KeyCode::Char(c) => {
+                        picker.input_buffer.insert(picker.input_cursor, c);
+                        picker.input_cursor += 1;
+                    }
+                    KeyCode::Left => {
+                        if picker.input_cursor > 0 {
+                            picker.input_cursor -= 1;
+                        }
+                    }
+                    KeyCode::Right => {
+                        if picker.input_cursor < picker.input_buffer.len() {
+                            picker.input_cursor += 1;
+                        }
+                    }
+                    _ => {}
+                },
+                Phase::AgentSelect => match key.code {
+                    KeyCode::Esc => {
+                        picker.phase = Phase::Input;
+                    }
+                    KeyCode::Char('j') | KeyCode::Down => {
+                        picker.agent_index = (picker.agent_index + 1) % AgentKind::all().len();
+                    }
+                    KeyCode::Char('k') | KeyCode::Up => {
+                        let count = AgentKind::all().len();
+                        picker.agent_index = if picker.agent_index == 0 {
+                            count - 1
+                        } else {
+                            picker.agent_index - 1
+                        };
+                    }
+                    KeyCode::Enter => {
+                        picker.phase = Phase::Fetching;
+                    }
+                    KeyCode::Char('1') => {
+                        picker.agent_index = 0;
+                        picker.phase = Phase::Fetching;
+                    }
+                    KeyCode::Char('2') => {
+                        if AgentKind::all().len() > 1 {
+                            picker.agent_index = 1;
+                            picker.phase = Phase::Fetching;
+                        }
+                    }
+                    _ => {}
+                },
+                Phase::FetchConfirm => match key.code {
+                    KeyCode::Char('y') | KeyCode::Enter => {
+                        picker.start_point = Some("origin/main".to_string());
+                        submit_picker(picker)?;
+                        break;
+                    }
+                    KeyCode::Char('n') | KeyCode::Esc => {
+                        picker.start_point = None;
+                        submit_picker(picker)?;
+                        break;
+                    }
+                    _ => {}
+                },
+                Phase::Fetching => unreachable!(),
             }
         }
     }
@@ -398,7 +398,7 @@ fn draw_input_phase(frame: &mut Frame, area: Rect, picker: &Picker) {
     let mut pos = 0usize;
     for (i, line) in buf_lines.iter().enumerate() {
         let line_chars = line.chars().count();
-        if pos + line_chars >= picker.input_cursor && i <= buf_lines.len() - 1 {
+        if pos + line_chars >= picker.input_cursor && i < buf_lines.len() {
             cursor_line = i;
             cursor_col = picker.input_cursor - pos;
             break;

@@ -180,9 +180,8 @@ impl TuiApp {
                             Some(ConversationEntry::AssistantText { text: existing }) if existing == text
                         );
                         if !already_captured {
-                            self.entries.push(ConversationEntry::AssistantText {
-                                text: text.clone(),
-                            });
+                            self.entries
+                                .push(ConversationEntry::AssistantText { text: text.clone() });
                         }
                     }
                 }
@@ -265,7 +264,8 @@ impl TuiApp {
                 self.session_id = Some(session_id.clone());
                 self.status = SessionStatus::Waiting;
                 self.entries.push(ConversationEntry::Status {
-                    text: "Waiting for messages... (press i to type, or use `swarm send`)".to_string(),
+                    text: "Waiting for messages... (press i to type, or use `swarm send`)"
+                        .to_string(),
                 });
             }
             SdkEvent::Error(msg) => {
@@ -372,6 +372,10 @@ fn truncate_output(output: &str, max_lines: usize) -> String {
         output.to_string()
     } else {
         let kept: Vec<&str> = lines[..max_lines].to_vec();
-        format!("{}\n... ({} more lines)", kept.join("\n"), lines.len() - max_lines)
+        format!(
+            "{}\n... ({} more lines)",
+            kept.join("\n"),
+            lines.len() - max_lines
+        )
     }
 }

@@ -14,7 +14,10 @@ pub fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
 
     // Background
-    frame.render_widget(Block::default().style(Style::default().bg(theme::COMB)), area);
+    frame.render_widget(
+        Block::default().style(Style::default().bg(theme::COMB)),
+        area,
+    );
 
     if app.worktrees.is_empty() && app.mode == Mode::Normal {
         draw_welcome(frame, area, app);
@@ -37,7 +40,11 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
 fn draw_welcome(frame: &mut Frame, area: Rect, app: &App) {
     let multi_repo = app.repos.len() > 1;
-    let repo_list_height = if multi_repo { app.repos.len() as u16 + 1 } else { 0 };
+    let repo_list_height = if multi_repo {
+        app.repos.len() as u16 + 1
+    } else {
+        0
+    };
 
     // Center content horizontally in a 44-col block
     let content_width = 44u16.min(area.width);
@@ -54,44 +61,44 @@ fn draw_welcome(frame: &mut Frame, area: Rect, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(1),                      // top padding
-            Constraint::Length(3),                    // header
-            Constraint::Length(1),                    // spacer
-            Constraint::Length(1),                    // tagline
-            Constraint::Length(1),                    // repo info (single) or label (multi)
-            Constraint::Length(repo_list_height),     // repo list (0 if single)
-            Constraint::Length(1),                    // spacer
-            Constraint::Length(2),                    // error
-            Constraint::Length(1),                    // spacer
-            Constraint::Length(5),                    // keys
-            Constraint::Min(1),                      // bottom padding
+            Constraint::Min(1),                   // top padding
+            Constraint::Length(3),                // header
+            Constraint::Length(1),                // spacer
+            Constraint::Length(1),                // tagline
+            Constraint::Length(1),                // repo info (single) or label (multi)
+            Constraint::Length(repo_list_height), // repo list (0 if single)
+            Constraint::Length(1),                // spacer
+            Constraint::Length(2),                // error
+            Constraint::Length(1),                // spacer
+            Constraint::Length(5),                // keys
+            Constraint::Min(1),                   // bottom padding
         ])
         .split(center);
 
     // Logo with scattered particles
     let logo = vec![
-        Line::from(vec![
-            Span::styled("     \u{00b7}  \u{00b7}     \u{00b7}", theme::muted()),
-        ]),
+        Line::from(vec![Span::styled(
+            "     \u{00b7}  \u{00b7}     \u{00b7}",
+            theme::muted(),
+        )]),
         Line::from(vec![
             Span::styled("  \u{00b7}  ", theme::muted()),
             Span::styled("s w a r m", theme::logo()),
         ]),
-        Line::from(vec![
-            Span::styled("   \u{00b7}    \u{00b7}   \u{00b7}", theme::muted()),
-        ]),
+        Line::from(vec![Span::styled(
+            "   \u{00b7}    \u{00b7}   \u{00b7}",
+            theme::muted(),
+        )]),
     ];
     frame.render_widget(Paragraph::new(logo), chunks[1]);
 
     // Tagline
-    let tagline = Paragraph::new("run agents in parallel")
-        .style(theme::muted());
+    let tagline = Paragraph::new("run agents in parallel").style(theme::muted());
     frame.render_widget(tagline, chunks[3]);
 
     if multi_repo {
         // Label
-        let label = Paragraph::new(format!("{} repos", app.repos.len()))
-            .style(theme::accent());
+        let label = Paragraph::new(format!("{} repos", app.repos.len())).style(theme::accent());
         frame.render_widget(label, chunks[4]);
 
         // Repo list
@@ -106,8 +113,7 @@ fn draw_welcome(frame: &mut Frame, area: Rect, app: &App) {
         frame.render_widget(Paragraph::new(repo_lines), chunks[5]);
     } else {
         // Single repo name
-        let repo = Paragraph::new(app.repo_display_name())
-            .style(theme::accent());
+        let repo = Paragraph::new(app.repo_display_name()).style(theme::accent());
         frame.render_widget(repo, chunks[4]);
     }
 
@@ -148,7 +154,7 @@ fn draw_sidebar(frame: &mut Frame, area: Rect, app: &App) {
         .constraints([
             Constraint::Length(2), // header
             Constraint::Length(1), // divider
-            Constraint::Min(3),   // worktree list
+            Constraint::Min(3),    // worktree list
             Constraint::Length(1), // divider
             Constraint::Length(1), // status bar
         ])
@@ -169,7 +175,10 @@ fn draw_sidebar_header(frame: &mut Frame, area: Rect, app: &App) {
         Span::styled(format!(" ({})", count), theme::muted()),
         Span::styled("  ", Style::default()),
         Span::styled(
-            truncate_str(&app.repo_display_name(), (area.width as usize).saturating_sub(16)),
+            truncate_str(
+                &app.repo_display_name(),
+                (area.width as usize).saturating_sub(16),
+            ),
             theme::accent(),
         ),
     ]);
@@ -228,8 +237,7 @@ fn build_sidebar_items(app: &App) -> Vec<SidebarItem> {
 
 fn draw_worktree_list(frame: &mut Frame, area: Rect, app: &App) {
     if app.worktrees.is_empty() {
-        let empty = Paragraph::new(" no worktrees yet\n press n to start")
-            .style(theme::muted());
+        let empty = Paragraph::new(" no worktrees yet\n press n to start").style(theme::muted());
         frame.render_widget(empty, area);
         return;
     }
@@ -337,16 +345,15 @@ fn draw_repo_header(frame: &mut Frame, area: Rect, name: &str) {
 
 /// Bright sidebar colors for the left bar indicator.
 const SIDEBAR_COLORS: &[Color] = &[
-    Color::Rgb(180, 120, 60),  // warm brown
-    Color::Rgb(60, 120, 180),  // cool blue
-    Color::Rgb(60, 180, 60),   // forest green
-    Color::Rgb(140, 60, 180),  // purple
-    Color::Rgb(60, 180, 180),  // teal
-    Color::Rgb(180, 150, 60),  // amber
-    Color::Rgb(180, 60, 120),  // rose
-    Color::Rgb(100, 180, 60),  // olive
+    Color::Rgb(180, 120, 60), // warm brown
+    Color::Rgb(60, 120, 180), // cool blue
+    Color::Rgb(60, 180, 60),  // forest green
+    Color::Rgb(140, 60, 180), // purple
+    Color::Rgb(60, 180, 180), // teal
+    Color::Rgb(180, 150, 60), // amber
+    Color::Rgb(180, 60, 120), // rose
+    Color::Rgb(100, 180, 60), // olive
 ];
-
 
 fn draw_worktree_row(frame: &mut Frame, area: Rect, wt: &Worktree, selected: bool, idx: usize) {
     let status = wt.status();
@@ -372,7 +379,11 @@ fn draw_worktree_row(frame: &mut Frame, area: Rect, wt: &Worktree, selected: boo
 
     let row_chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Length(1), Constraint::Length(1)])
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
         .split(area);
 
     // Line 1: color bar + selector + status + name + indicator + PR
@@ -514,7 +525,7 @@ fn draw_input_overlay(frame: &mut Frame, area: Rect, app: &App) {
     let mut pos = 0usize;
     for (i, line) in buf_lines.iter().enumerate() {
         let line_chars = line.chars().count();
-        if pos + line_chars >= app.input_cursor && i <= buf_lines.len() - 1 {
+        if pos + line_chars >= app.input_cursor && i < buf_lines.len() {
             cursor_line = i;
             cursor_col = app.input_cursor - pos;
             break;
@@ -526,7 +537,11 @@ fn draw_input_overlay(frame: &mut Frame, area: Rect, app: &App) {
     let mut styled_lines: Vec<Line> = Vec::new();
     for (i, line_str) in buf_lines.iter().enumerate() {
         let prefix = if i == 0 { " > " } else { "   " };
-        let prefix_style = if i == 0 { theme::accent() } else { theme::text() };
+        let prefix_style = if i == 0 {
+            theme::accent()
+        } else {
+            theme::text()
+        };
 
         if i == cursor_line {
             let before: String = line_str.chars().take(cursor_col).collect();
@@ -655,10 +670,7 @@ fn draw_repo_select_overlay(frame: &mut Frame, area: Rect, app: &App) {
             ),
         ]);
 
-        frame.render_widget(
-            Paragraph::new(line),
-            Rect::new(inner.x, y, inner.width, 1),
-        );
+        frame.render_widget(Paragraph::new(line), Rect::new(inner.x, y, inner.width, 1));
     }
 }
 
@@ -701,10 +713,7 @@ fn draw_agent_select_overlay(frame: &mut Frame, area: Rect, app: &App) {
             ),
         ]);
 
-        frame.render_widget(
-            Paragraph::new(line),
-            Rect::new(inner.x, y, inner.width, 1),
-        );
+        frame.render_widget(Paragraph::new(line), Rect::new(inner.x, y, inner.width, 1));
     }
 }
 
@@ -768,10 +777,7 @@ fn draw_help_overlay(frame: &mut Frame, area: Rect) {
             Span::styled(*desc, theme::key_desc()),
         ]);
 
-        frame.render_widget(
-            Paragraph::new(line),
-            Rect::new(inner.x, y, inner.width, 1),
-        );
+        frame.render_widget(Paragraph::new(line), Rect::new(inner.x, y, inner.width, 1));
     }
 }
 

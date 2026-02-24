@@ -9,12 +9,14 @@ use std::process::Output;
 /// **Note**: This trait is defined but not yet wired into App. Doing so
 /// requires threading the runner through App, create_worktree_with_agent,
 /// and all the tmux/git call sites -- a refactor deferred to a follow-up PR.
+#[allow(dead_code)]
 #[cfg_attr(test, mockall::automock)]
 pub trait CommandRunner: Send + Sync {
     fn run(&self, cmd: &str, args: &[String], cwd: &Path) -> std::io::Result<Output>;
 }
 
 /// Runs commands via std::process::Command (the real implementation).
+#[allow(dead_code)]
 pub struct RealCommandRunner;
 
 impl CommandRunner for RealCommandRunner {
@@ -39,10 +41,7 @@ mod tests {
             .run("echo", &args, Path::new("/tmp"))
             .expect("echo should succeed");
         assert!(output.status.success());
-        assert_eq!(
-            String::from_utf8_lossy(&output.stdout).trim(),
-            "hello"
-        );
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "hello");
     }
 
     #[test]
@@ -59,9 +58,7 @@ mod tests {
             });
 
         let args = vec!["status".to_string()];
-        let output = mock
-            .run("git", &args, Path::new("/tmp"))
-            .unwrap();
+        let output = mock.run("git", &args, Path::new("/tmp")).unwrap();
         assert!(output.status.success());
         assert!(String::from_utf8_lossy(&output.stdout).contains("main"));
     }
