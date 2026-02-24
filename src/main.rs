@@ -118,10 +118,10 @@ async fn main() -> Result<()> {
             prompt_file,
             agent.unwrap_or_else(|| cli.agent.clone()),
             repo,
-        ),
-        Some(Commands::Send { worktree, message }) => cmd_send(work_dir, worktree, message),
-        Some(Commands::Close { worktree }) => cmd_close(work_dir, worktree),
-        Some(Commands::Merge { worktree }) => cmd_merge(work_dir, worktree),
+        ).await,
+        Some(Commands::Send { worktree, message }) => cmd_send(work_dir, worktree, message).await,
+        Some(Commands::Close { worktree }) => cmd_close(work_dir, worktree).await,
+        Some(Commands::Merge { worktree }) => cmd_merge(work_dir, worktree).await,
         Some(Commands::Pick) => {
             let repos = core::git::detect_repos(&work_dir)?;
             tui::picker::run_picker(work_dir, repos)
@@ -414,7 +414,7 @@ fn resolve_prompt(prompt: Option<String>, prompt_file: Option<String>) -> Result
     }
 }
 
-fn cmd_create(
+async fn cmd_create(
     work_dir: std::path::PathBuf,
     prompt: Option<String>,
     prompt_file: Option<String>,
@@ -448,41 +448,41 @@ fn cmd_create(
         start_point: None,
         timestamp: Local::now(),
     };
-    core::ipc::write_inbox(&work_dir, &msg)?;
+    core::ipc::send_inbox(&work_dir, &msg).await?;
     println!("queued create");
     Ok(())
 }
 
-fn cmd_send(work_dir: std::path::PathBuf, worktree: String, message: String) -> Result<()> {
+async fn cmd_send(work_dir: std::path::PathBuf, worktree: String, message: String) -> Result<()> {
     let msg = core::ipc::InboxMessage::Send {
         id: Uuid::new_v4().to_string(),
         worktree,
         message,
         timestamp: Local::now(),
     };
-    core::ipc::write_inbox(&work_dir, &msg)?;
+    core::ipc::send_inbox(&work_dir, &msg).await?;
     println!("queued send");
     Ok(())
 }
 
-fn cmd_close(work_dir: std::path::PathBuf, worktree: String) -> Result<()> {
+async fn cmd_close(work_dir: std::path::PathBuf, worktree: String) -> Result<()> {
     let msg = core::ipc::InboxMessage::Close {
         id: Uuid::new_v4().to_string(),
         worktree,
         timestamp: Local::now(),
     };
-    core::ipc::write_inbox(&work_dir, &msg)?;
+    core::ipc::send_inbox(&work_dir, &msg).await?;
     println!("queued close");
     Ok(())
 }
 
-fn cmd_merge(work_dir: std::path::PathBuf, worktree: String) -> Result<()> {
+async fn cmd_merge(work_dir: std::path::PathBuf, worktree: String) -> Result<()> {
     let msg = core::ipc::InboxMessage::Merge {
         id: Uuid::new_v4().to_string(),
         worktree,
         timestamp: Local::now(),
     };
-    core::ipc::write_inbox(&work_dir, &msg)?;
+    core::ipc::send_inbox(&work_dir, &msg).await?;
     println!("queued merge");
     Ok(())
 }

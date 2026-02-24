@@ -3,6 +3,7 @@ use chrono::{DateTime, Local};
 use color_eyre::Result;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
 /// Inbox message — external commands sent to the sidebar.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -107,6 +108,119 @@ pub fn emit_event(work_dir: &Path, event: &SwarmEvent) -> Result<()> {
     let writer = JsonlWriter::<SwarmEvent>::new(events_path(work_dir));
     writer.append(event)?;
     Ok(())
+}
+
+// ── Unix Domain Socket IPC ────────────────────────────────
+
+/// Path to the swarm socket file.
+pub fn socket_path(work_dir: &Path) -> std::path::PathBuf {
+    work_dir.join(".swarm").join("swarm.sock")
+}
+
+/// Acknowledgment sent by the socket server after processing a message.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InboxAck {
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Try sending a message via the Unix domain socket.
+///
+/// Returns:
+/// - `Ok(true)` — message delivered and acknowledged
+/// - `Ok(false)` — socket unavailable (caller should fall back to JSONL)
+/// - `Err(...)` — real error (connection succeeded but something broke)
+pub async fn send_via_socket(work_dir: &Path, msg: &InboxMessage) -> Result<bool> {
+    let sock = socket_path(work_dir);
+    if !sock.exists() {
+        return Ok(false);
+    }
+
+    let stream = match tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        tokio::net::UnixStream::connect(&sock),
+    )
+    .await
+    {
+        Ok(Ok(stream)) => stream,
+        Ok(Err(_)) | Err(_) => return Ok(false), // connect failed or timed out
+    };
+
+    let (read_half, mut write_half) = stream.into_split();
+
+    // Send JSON line + shutdown write half
+    let mut line = serde_json::to_string(msg)?;
+    line.push('\n');
+    write_half.write_all(line.as_bytes()).await?;
+    write_half.shutdown().await?;
+
+    // Read ack with timeout
+    let mut reader = tokio::io::BufReader::new(read_half);
+    let mut ack_line = String::new();
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        reader.read_line(&mut ack_line),
+    )
+    .await
+    {
+        Ok(Ok(0)) => {
+            // Server closed without ack — treat as delivered (best effort)
+            Ok(true)
+        }
+        Ok(Ok(_)) => {
+            let ack: InboxAck = serde_json::from_str(ack_line.trim())?;
+            if ack.ok {
+                Ok(true)
+            } else {
+                Err(color_eyre::eyre::eyre!(
+                    "server nack: {}",
+                    ack.error.unwrap_or_default()
+                ))
+            }
+        }
+        Ok(Err(e)) => Err(e.into()),
+        Err(_) => {
+            // Timeout reading ack — assume delivered
+            Ok(true)
+        }
+    }
+}
+
+/// Send an inbox message: try socket first, fall back to JSONL file.
+pub async fn send_inbox(work_dir: &Path, msg: &InboxMessage) -> Result<()> {
+    match send_via_socket(work_dir, msg).await {
+        Ok(true) => Ok(()),
+        Ok(false) => {
+            // Socket unavailable — fall back to file
+            write_inbox(work_dir, msg)
+        }
+        Err(e) => {
+            // Socket error — log and fall back to file
+            eprintln!("[swarm] socket send failed, falling back to file: {}", e);
+            write_inbox(work_dir, msg)
+        }
+    }
+}
+
+/// Remove a stale socket file (left over from a crashed TUI).
+/// Tries to connect; if it fails, the socket is stale and gets removed.
+pub fn cleanup_stale_socket(work_dir: &Path) {
+    let sock = socket_path(work_dir);
+    if !sock.exists() {
+        return;
+    }
+
+    // Try a blocking connect to see if anyone is listening
+    match std::os::unix::net::UnixStream::connect(&sock) {
+        Ok(_) => {
+            // Someone is listening — not stale
+        }
+        Err(_) => {
+            // No one listening — remove stale socket
+            let _ = std::fs::remove_file(&sock);
+        }
+    }
 }
 
 // ── Per-Agent Inbox ───────────────────────────────────────

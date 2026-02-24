@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use crate::core::shell::sanitize;
-use crate::core::{agent::AgentKind, git, ipc, merge, state, tmux};
+use crate::core::{agent::AgentKind, git, ipc, merge, socket_listener, state, tmux};
 use chrono::{DateTime, Local};
 use color_eyre::Result;
 use std::cell::Cell;
@@ -225,6 +225,8 @@ pub struct App {
     last_inbox_pos: u64,
     summary_tx: mpsc::UnboundedSender<(String, String)>,
     summary_rx: mpsc::UnboundedReceiver<(String, String)>,
+    inbox_rx: mpsc::UnboundedReceiver<ipc::InboxMessage>,
+    _socket_handle: Option<socket_listener::SocketListenerHandle>,
 }
 
 impl App {
@@ -240,6 +242,16 @@ impl App {
         let session_name = format!("swarm-{}", dir_name);
 
         let (summary_tx, summary_rx) = mpsc::unbounded_channel();
+
+        // Start socket listener (before restore so we're ready for messages)
+        let (inbox_rx, socket_handle) = match socket_listener::start(&work_dir) {
+            Ok((rx, handle)) => (rx, Some(handle)),
+            Err(e) => {
+                eprintln!("[swarm] failed to start socket listener: {}", e);
+                let (_tx, rx) = mpsc::unbounded_channel();
+                (rx, None)
+            }
+        };
 
         let mut app = Self {
             work_dir,
@@ -269,10 +281,15 @@ impl App {
             last_inbox_pos: 0,
             summary_tx,
             summary_rx,
+            inbox_rx,
+            _socket_handle: socket_handle,
         };
 
         // Restore previous session
         app.restore_state();
+
+        // Drain any pending file inbox messages that arrived before socket was ready
+        app.drain_file_inbox();
 
         Ok(app)
     }
@@ -1149,7 +1166,101 @@ impl App {
 
     // ── IPC: Process Inbox ─────────────────────────────────
 
-    fn process_inbox(&mut self) {
+    /// Handle a single inbox message (dispatches Create/Send/Close/Merge).
+    fn handle_inbox_message(&mut self, msg: ipc::InboxMessage) {
+        match msg {
+            ipc::InboxMessage::Create {
+                prompt,
+                agent,
+                repo,
+                start_point,
+                ..
+            } => {
+                let agent_kind = AgentKind::from_str(&agent).unwrap_or(AgentKind::ClaudeTui);
+                let repo_path = match &repo {
+                    Some(name) => {
+                        match self.repos.iter().find(|r| git::repo_name(r) == *name).cloned() {
+                            Some(path) => path,
+                            None => {
+                                let names: Vec<_> = self.repos.iter().map(|r| git::repo_name(r)).collect();
+                                let err = format!(
+                                    "unknown repo '{}' (available: {})",
+                                    name,
+                                    names.join(", ")
+                                );
+                                self.flash(format!("create failed: {}", err));
+                                let _ = ipc::emit_event(&self.work_dir, &ipc::SwarmEvent::CreateFailed {
+                                    error: err,
+                                    prompt,
+                                    repo,
+                                    timestamp: Local::now(),
+                                });
+                                return;
+                            }
+                        }
+                    }
+                    None if self.repos.len() > 1 => {
+                        let names: Vec<_> = self.repos.iter().map(|r| git::repo_name(r)).collect();
+                        let err = format!(
+                            "--repo required ({})",
+                            names.join(", ")
+                        );
+                        self.flash(format!("create failed: {}", err));
+                        let _ = ipc::emit_event(&self.work_dir, &ipc::SwarmEvent::CreateFailed {
+                            error: err,
+                            prompt,
+                            repo,
+                            timestamp: Local::now(),
+                        });
+                        return;
+                    }
+                    None => self.repos.first().cloned().unwrap_or_else(|| self.work_dir.clone()),
+                };
+                if let Err(e) = self.create_worktree_with_agent(&prompt, agent_kind, &repo_path, start_point.as_deref()) {
+                    let err = format!("{}", e);
+                    self.flash(format!("inbox create error: {}", err));
+                    let _ = ipc::emit_event(&self.work_dir, &ipc::SwarmEvent::CreateFailed {
+                        error: err,
+                        prompt,
+                        repo,
+                        timestamp: Local::now(),
+                    });
+                }
+            }
+            ipc::InboxMessage::Send {
+                worktree, message, ..
+            } => {
+                if let Some(wt) = self.worktrees.iter().find(|w| w.id == worktree) {
+                    if wt.agent_kind == AgentKind::ClaudeTui {
+                        // Write to per-agent inbox — the agent-tui polls this directly
+                        let _ = ipc::write_agent_inbox(&self.work_dir, &worktree, &message);
+                    } else if let Some(ref agent) = wt.agent {
+                        let _ = tmux::send_keys_to_pane(&agent.pane_id, &message);
+                    }
+                }
+            }
+            ipc::InboxMessage::Close { worktree, .. } => {
+                if let Some(idx) = self.worktrees.iter().position(|w| w.id == worktree) {
+                    let _ = self.close_worktree(idx);
+                }
+            }
+            ipc::InboxMessage::Merge { worktree, .. } => {
+                if let Some(idx) = self.worktrees.iter().position(|w| w.id == worktree) {
+                    let _ = self.merge_worktree(idx);
+                }
+            }
+        }
+    }
+
+    /// Drain all pending messages from the Unix domain socket channel.
+    fn drain_socket_inbox(&mut self) {
+        while let Ok(msg) = self.inbox_rx.try_recv() {
+            self.handle_inbox_message(msg);
+        }
+    }
+
+    /// Drain all pending messages from the JSONL file inbox.
+    fn drain_file_inbox(&mut self) {
         let (messages, new_pos) = match ipc::read_inbox(&self.work_dir, self.last_inbox_pos) {
             Ok(result) => result,
             Err(_) => return,
@@ -1161,7 +1272,6 @@ impl App {
         self.last_inbox_pos = new_pos;
 
         // Compact the inbox once processed data exceeds 64 KB.
-        // Keeps only unprocessed bytes (from last_inbox_pos onward).
         let inbox_path = self.work_dir.join(".swarm").join("inbox.jsonl");
         if self.last_inbox_pos > 64 * 1024 {
             if let Ok(contents) = std::fs::read(&inbox_path) {
@@ -1183,88 +1293,7 @@ impl App {
         }
 
         for msg in messages {
-            match msg {
-                ipc::InboxMessage::Create {
-                    prompt,
-                    agent,
-                    repo,
-                    start_point,
-                    ..
-                } => {
-                    let agent_kind = AgentKind::from_str(&agent).unwrap_or(AgentKind::ClaudeTui);
-                    let repo_path = match &repo {
-                        Some(name) => {
-                            match self.repos.iter().find(|r| git::repo_name(r) == *name).cloned() {
-                                Some(path) => path,
-                                None => {
-                                    let names: Vec<_> = self.repos.iter().map(|r| git::repo_name(r)).collect();
-                                    let err = format!(
-                                        "unknown repo '{}' (available: {})",
-                                        name,
-                                        names.join(", ")
-                                    );
-                                    self.flash(format!("create failed: {}", err));
-                                    let _ = ipc::emit_event(&self.work_dir, &ipc::SwarmEvent::CreateFailed {
-                                        error: err,
-                                        prompt,
-                                        repo,
-                                        timestamp: Local::now(),
-                                    });
-                                    continue;
-                                }
-                            }
-                        }
-                        None if self.repos.len() > 1 => {
-                            let names: Vec<_> = self.repos.iter().map(|r| git::repo_name(r)).collect();
-                            let err = format!(
-                                "--repo required ({})",
-                                names.join(", ")
-                            );
-                            self.flash(format!("create failed: {}", err));
-                            let _ = ipc::emit_event(&self.work_dir, &ipc::SwarmEvent::CreateFailed {
-                                error: err,
-                                prompt,
-                                repo,
-                                timestamp: Local::now(),
-                            });
-                            continue;
-                        }
-                        None => self.repos.first().cloned().unwrap_or_else(|| self.work_dir.clone()),
-                    };
-                    if let Err(e) = self.create_worktree_with_agent(&prompt, agent_kind, &repo_path, start_point.as_deref()) {
-                        let err = format!("{}", e);
-                        self.flash(format!("inbox create error: {}", err));
-                        let _ = ipc::emit_event(&self.work_dir, &ipc::SwarmEvent::CreateFailed {
-                            error: err,
-                            prompt,
-                            repo,
-                            timestamp: Local::now(),
-                        });
-                    }
-                }
-                ipc::InboxMessage::Send {
-                    worktree, message, ..
-                } => {
-                    if let Some(wt) = self.worktrees.iter().find(|w| w.id == worktree) {
-                        if wt.agent_kind == AgentKind::ClaudeTui {
-                            // Write to per-agent inbox — the agent-tui polls this directly
-                            let _ = ipc::write_agent_inbox(&self.work_dir, &worktree, &message);
-                        } else if let Some(ref agent) = wt.agent {
-                            let _ = tmux::send_keys_to_pane(&agent.pane_id, &message);
-                        }
-                    }
-                }
-                ipc::InboxMessage::Close { worktree, .. } => {
-                    if let Some(idx) = self.worktrees.iter().position(|w| w.id == worktree) {
-                        let _ = self.close_worktree(idx);
-                    }
-                }
-                ipc::InboxMessage::Merge { worktree, .. } => {
-                    if let Some(idx) = self.worktrees.iter().position(|w| w.id == worktree) {
-                        let _ = self.merge_worktree(idx);
-                    }
-                }
-            }
+            self.handle_inbox_message(msg);
         }
     }
 
@@ -1390,6 +1419,9 @@ impl App {
         self.collect_summaries();
         self.deliver_pending_prompts();
 
+        // Drain socket inbox every tick (instant, non-blocking)
+        self.drain_socket_inbox();
+
         // Retry layout rebalance if a previous attempt failed
         if self.layout_dirty {
             self.try_rebalance_layout();
@@ -1398,9 +1430,9 @@ impl App {
             }
         }
 
-        // Process inbox every 500ms
-        if self.last_inbox_check.elapsed().as_millis() >= 500 {
-            self.process_inbox();
+        // Poll file inbox every 2s (fallback only, socket is primary)
+        if self.last_inbox_check.elapsed().as_secs() >= 2 {
+            self.drain_file_inbox();
             self.last_inbox_check = Instant::now();
         }
 

@@ -4,5 +4,6 @@ pub mod ipc;
 pub mod merge;
 pub mod runner;
 pub mod shell;
+pub mod socket_listener;
 pub mod state;
 pub mod tmux;

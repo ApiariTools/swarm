@@ -292,7 +292,8 @@ fn submit_picker(picker: &Picker) -> Result<()> {
         start_point: picker.start_point.clone(),
         timestamp: Local::now(),
     };
-    ipc::write_inbox(&picker.work_dir, &msg)?;
+    // Picker runs inside a tokio runtime (spawned from main), so use block_on
+    tokio::runtime::Handle::current().block_on(ipc::send_inbox(&picker.work_dir, &msg))?;
     Ok(())
 }
 
