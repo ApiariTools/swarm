@@ -1357,16 +1357,16 @@ impl App {
             }
         }
 
-        // Run PR lookups for workers that just became waiting
+        // Run PR lookups for workers that just became waiting.
+        // Always re-check — even if a PR was already found by the 30s poll —
+        // because the PR may have been merged since the last check.
         if !newly_waiting.is_empty() {
             let mut any_merged = Vec::new();
             for idx in &newly_waiting {
                 let wt = &mut self.worktrees[*idx];
-                if wt.pr.is_none() {
-                    eprintln!("[swarm] Agent waiting — immediate PR lookup for {}", wt.id);
-                    if lookup_pr_for_worktree(wt, &all_repos) {
-                        any_merged.push(wt.id.clone());
-                    }
+                eprintln!("[swarm] Agent waiting — immediate PR lookup for {}", wt.id);
+                if lookup_pr_for_worktree(wt, &all_repos) {
+                    any_merged.push(wt.id.clone());
                 }
             }
             needs_save = true;
@@ -2545,6 +2545,117 @@ mod tests {
         let (agent_msgs, _) = ipc::read_agent_inbox(&work_dir, "hive-1", 0).unwrap();
         assert_eq!(agent_msgs.len(), 1);
         assert_eq!(agent_msgs[0].message, "hello from file inbox");
+    }
+
+    // --- poll_agent_statuses tests ---
+
+    #[test]
+    fn test_poll_agent_statuses_detects_waiting_transition() {
+        let dir = tempfile::tempdir().unwrap();
+        let work_dir = dir.path().to_path_buf();
+        let status_dir = work_dir.join(".swarm").join("agent-status");
+        std::fs::create_dir_all(&status_dir).unwrap();
+
+        let mut app = test_app(work_dir, vec![]);
+        app.worktrees.push(make_test_worktree("hive-1", AgentKind::ClaudeTui));
+        assert!(app.worktrees[0].agent_session_status.is_none());
+
+        // Write "running" status
+        std::fs::write(status_dir.join("hive-1"), "running\n").unwrap();
+        app.poll_agent_statuses();
+        assert_eq!(app.worktrees[0].agent_session_status.as_deref(), Some("running"));
+
+        // Transition to "waiting"
+        std::fs::write(status_dir.join("hive-1"), "waiting\n").unwrap();
+        app.poll_agent_statuses();
+        assert_eq!(app.worktrees[0].agent_session_status.as_deref(), Some("waiting"));
+    }
+
+    #[test]
+    fn test_poll_agent_statuses_no_crash_missing_status_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let work_dir = dir.path().to_path_buf();
+        // Don't create .swarm/agent-status — should handle gracefully
+
+        let mut app = test_app(work_dir, vec![]);
+        app.worktrees.push(make_test_worktree("hive-1", AgentKind::ClaudeTui));
+
+        // Should not panic
+        app.poll_agent_statuses();
+        assert!(app.worktrees[0].agent_session_status.is_none());
+    }
+
+    #[test]
+    fn test_poll_agent_statuses_re_checks_pr_on_waiting_even_if_pr_exists() {
+        // Verifies that when an agent transitions to "waiting", the PR
+        // lookup fires even if a PR was already known. Before the fix,
+        // the `wt.pr.is_none()` guard would skip this.
+        let dir = tempfile::tempdir().unwrap();
+        let work_dir = dir.path().to_path_buf();
+        let status_dir = work_dir.join(".swarm").join("agent-status");
+        std::fs::create_dir_all(&status_dir).unwrap();
+
+        let mut app = test_app(work_dir, vec![]);
+        let mut wt = make_test_worktree("hive-1", AgentKind::ClaudeTui);
+        // Pre-populate with an OPEN PR (simulating 30s poll found it)
+        wt.pr = Some(PrInfo {
+            number: 42,
+            title: "Add feature".to_string(),
+            state: "OPEN".to_string(),
+            url: "https://github.com/org/repo/pull/42".to_string(),
+        });
+        wt.agent_session_status = Some("running".to_string());
+        app.worktrees.push(wt);
+
+        // Agent transitions to "waiting" (e.g., after PR was merged)
+        std::fs::write(status_dir.join("hive-1"), "waiting\n").unwrap();
+        app.poll_agent_statuses();
+
+        // Status should be updated to "waiting"
+        assert_eq!(app.worktrees[0].agent_session_status.as_deref(), Some("waiting"));
+
+        // The PR lookup was attempted. Since there's no real git/gh in
+        // the tempdir, lookup_pr_for_worktree will clear the PR (all
+        // strategies fail). This proves the lookup ran — before the fix,
+        // pr.is_some() would have skipped the lookup and the PR would
+        // remain unchanged.
+        assert!(
+            app.worktrees[0].pr.is_none(),
+            "PR should be cleared by lookup attempt (proves lookup ran despite existing PR)"
+        );
+    }
+
+    #[test]
+    fn test_poll_agent_statuses_no_lookup_when_not_newly_waiting() {
+        // If the agent was already "waiting" and stays "waiting", no
+        // PR lookup should fire (no transition).
+        let dir = tempfile::tempdir().unwrap();
+        let work_dir = dir.path().to_path_buf();
+        let status_dir = work_dir.join(".swarm").join("agent-status");
+        std::fs::create_dir_all(&status_dir).unwrap();
+
+        let mut app = test_app(work_dir, vec![]);
+        let mut wt = make_test_worktree("hive-1", AgentKind::ClaudeTui);
+        wt.pr = Some(PrInfo {
+            number: 42,
+            title: "Add feature".to_string(),
+            state: "OPEN".to_string(),
+            url: "https://github.com/org/repo/pull/42".to_string(),
+        });
+        // Already "waiting" from a previous poll
+        wt.agent_session_status = Some("waiting".to_string());
+        app.worktrees.push(wt);
+
+        // Status file still says "waiting" — no transition
+        std::fs::write(status_dir.join("hive-1"), "waiting\n").unwrap();
+        app.poll_agent_statuses();
+
+        // PR should remain unchanged (no lookup attempted)
+        assert!(
+            app.worktrees[0].pr.is_some(),
+            "PR should remain untouched when no status transition occurred"
+        );
+        assert_eq!(app.worktrees[0].pr.as_ref().unwrap().state, "OPEN");
     }
 
 }
