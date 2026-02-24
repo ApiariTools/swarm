@@ -262,7 +262,6 @@ pub fn read_agent_inbox(
     Ok((messages, reader.offset()))
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -282,7 +281,12 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
         let restored: InboxMessage = serde_json::from_str(&json).unwrap();
         match restored {
-            InboxMessage::Create { prompt, agent, repo, .. } => {
+            InboxMessage::Create {
+                prompt,
+                agent,
+                repo,
+                ..
+            } => {
                 assert_eq!(prompt, "fix the login bug");
                 assert_eq!(agent, "claude");
                 assert_eq!(repo, Some("swarm".to_string()));
@@ -302,7 +306,9 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
         let restored: InboxMessage = serde_json::from_str(&json).unwrap();
         match restored {
-            InboxMessage::Send { worktree, message, .. } => {
+            InboxMessage::Send {
+                worktree, message, ..
+            } => {
                 assert_eq!(worktree, "hive-1");
                 assert_eq!(message, "please review the PR");
             }
@@ -350,7 +356,12 @@ mod tests {
         let json = r#"{"action":"create","id":"x","prompt":"test","timestamp":"2025-01-01T00:00:00-05:00"}"#;
         let msg: InboxMessage = serde_json::from_str(json).unwrap();
         match msg {
-            InboxMessage::Create { agent, repo, start_point, .. } => {
+            InboxMessage::Create {
+                agent,
+                repo,
+                start_point,
+                ..
+            } => {
                 assert_eq!(agent, "claude-tui");
                 assert!(repo.is_none());
                 assert!(start_point.is_none());

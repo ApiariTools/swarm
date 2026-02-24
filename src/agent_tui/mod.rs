@@ -2,20 +2,20 @@ pub mod app;
 pub mod events;
 pub mod render;
 
-use app::{InputMode, SdkEvent, SessionStatus, TuiApp};
 use apiari_claude_sdk::streaming::AssembledEvent;
 use apiari_claude_sdk::types::ContentBlock;
 use apiari_claude_sdk::{ClaudeClient, Event, SessionOptions};
+use app::{InputMode, SdkEvent, SessionStatus, TuiApp};
 use color_eyre::Result;
+use crossterm::ExecutableCommand;
 use crossterm::event::{self, KeyCode, KeyModifiers};
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use crossterm::ExecutableCommand;
 use events::EventLogger;
 use ratatui::prelude::*;
 use std::io::stdout;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -35,7 +35,10 @@ pub async fn run(args: AgentTuiArgs) -> Result<()> {
     let (followup_tx, followup_rx) = mpsc::unbounded_channel::<String>();
 
     // Set up event logger path
-    let wt_id = args.worktree_id.clone().unwrap_or_else(|| "default".to_string());
+    let wt_id = args
+        .worktree_id
+        .clone()
+        .unwrap_or_else(|| "default".to_string());
     let event_log_path = args
         .work_dir
         .join(".swarm")
@@ -54,9 +57,15 @@ pub async fn run(args: AgentTuiArgs) -> Result<()> {
     let bg_logger = EventLogger::new(event_log_path);
 
     tokio::spawn(async move {
-        if let Err(e) =
-            run_sdk_session(prompt, dangerously_skip, work_dir, sdk_tx, followup_rx, bg_logger)
-                .await
+        if let Err(e) = run_sdk_session(
+            prompt,
+            dangerously_skip,
+            work_dir,
+            sdk_tx,
+            followup_rx,
+            bg_logger,
+        )
+        .await
         {
             eprintln!("SDK session error: {}", e);
         }
@@ -141,7 +150,8 @@ async fn run_sdk_session(
 
     loop {
         // Drain events from the current session until Result
-        let got_result = drain_session_events(&mut session, &tx, &logger, &mut current_session_id).await;
+        let got_result =
+            drain_session_events(&mut session, &tx, &logger, &mut current_session_id).await;
 
         if !got_result {
             // Session ended without a Result (unexpected EOF or error) — still wait for followups
@@ -231,11 +241,7 @@ async fn drain_session_events(
 }
 
 /// Convert an SDK Event into TUI SdkEvents and forward them.
-fn process_sdk_event(
-    event: &Event,
-    tx: &mpsc::UnboundedSender<SdkEvent>,
-    logger: &EventLogger,
-) {
+fn process_sdk_event(event: &Event, tx: &mpsc::UnboundedSender<SdkEvent>, logger: &EventLogger) {
     match event {
         Event::System(sys) => {
             let model = sys
@@ -269,11 +275,7 @@ fn process_sdk_event(
                                             .unwrap_or_else(|| v.to_string())
                                     })
                                     .unwrap_or_default();
-                                logger.log_tool_result(
-                                    "",
-                                    &output,
-                                    is_error.unwrap_or(false),
-                                );
+                                logger.log_tool_result("", &output, is_error.unwrap_or(false));
                             }
                             ContentBlock::Text { text } => {
                                 logger.log_text(text);
@@ -297,8 +299,8 @@ fn process_sdk_event(
             for block in &message.message.content {
                 match block {
                     ContentBlock::ToolUse { name, input, .. } => {
-                        let input_str = serde_json::to_string(input)
-                            .unwrap_or_else(|_| input.to_string());
+                        let input_str =
+                            serde_json::to_string(input).unwrap_or_else(|_| input.to_string());
                         logger.log_tool_use(name, &input_str);
                     }
                     ContentBlock::Text { text } => {
@@ -332,7 +334,7 @@ async fn event_loop(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     app: &mut TuiApp,
     followup_tx: &mpsc::UnboundedSender<String>,
-    work_dir: &PathBuf,
+    work_dir: &Path,
     worktree_id: Option<&str>,
 ) -> Result<()> {
     // Track inbox offset for polling per-agent inbox
@@ -364,78 +366,72 @@ async fn event_loop(
 
         // Poll per-agent inbox every ~500ms (every 10 ticks at 50ms each)
         inbox_poll_counter += 1;
-        if inbox_poll_counter % 10 == 0 {
-            if let Some(wt_id) = worktree_id {
-                if app.status == SessionStatus::Waiting {
-                    if let Ok((messages, new_offset)) =
-                        ipc::read_agent_inbox(work_dir, wt_id, inbox_offset)
-                    {
-                        inbox_offset = new_offset;
-                        for msg in messages {
-                            app.add_user_message(msg.message.clone());
-                            let _ = followup_tx.send(msg.message);
-                            app.auto_scroll = true;
-                        }
-                    }
-                }
+        if inbox_poll_counter.is_multiple_of(10)
+            && let Some(wt_id) = worktree_id
+            && app.status == SessionStatus::Waiting
+            && let Ok((messages, new_offset)) = ipc::read_agent_inbox(work_dir, wt_id, inbox_offset)
+        {
+            inbox_offset = new_offset;
+            for msg in messages {
+                app.add_user_message(msg.message.clone());
+                let _ = followup_tx.send(msg.message);
+                app.auto_scroll = true;
             }
         }
 
         let poll_ms = 50;
 
-        if event::poll(Duration::from_millis(poll_ms))? {
-            if let event::Event::Key(key) = event::read()? {
-                // Ctrl+C always quits
-                if key.modifiers.contains(KeyModifiers::CONTROL)
-                    && key.code == KeyCode::Char('c')
-                {
-                    break;
-                }
+        if event::poll(Duration::from_millis(poll_ms))?
+            && let event::Event::Key(key) = event::read()?
+        {
+            // Ctrl+C always quits
+            if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+                break;
+            }
 
-                match app.input_mode {
-                    InputMode::Normal => match key.code {
-                        KeyCode::Char('q') => break,
-                        KeyCode::Char('i') => {
-                            if app.status == SessionStatus::Done
-                                || app.status == SessionStatus::Idle
-                                || app.status == SessionStatus::Waiting
-                            {
-                                app.input_mode = InputMode::Input;
-                            }
+            match app.input_mode {
+                InputMode::Normal => match key.code {
+                    KeyCode::Char('q') => break,
+                    KeyCode::Char('i') => {
+                        if app.status == SessionStatus::Done
+                            || app.status == SessionStatus::Idle
+                            || app.status == SessionStatus::Waiting
+                        {
+                            app.input_mode = InputMode::Input;
                         }
-                        KeyCode::PageUp | KeyCode::Char('u') => {
-                            app.scroll_up(app.viewport_height.saturating_sub(2));
+                    }
+                    KeyCode::PageUp | KeyCode::Char('u') => {
+                        app.scroll_up(app.viewport_height.saturating_sub(2));
+                    }
+                    KeyCode::PageDown | KeyCode::Char('d') => {
+                        app.scroll_down(app.viewport_height.saturating_sub(2));
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => app.scroll_up(3),
+                    KeyCode::Down | KeyCode::Char('j') => app.scroll_down(3),
+                    KeyCode::Char('G') | KeyCode::End => app.scroll_to_bottom(),
+                    _ => {}
+                },
+                InputMode::Input => match key.code {
+                    KeyCode::Esc => {
+                        app.input_mode = InputMode::Normal;
+                        app.input_buffer.clear();
+                        app.input_cursor = 0;
+                    }
+                    KeyCode::Enter => {
+                        let text = app.take_input();
+                        if !text.trim().is_empty() {
+                            app.add_user_message(text.clone());
+                            let _ = followup_tx.send(text);
+                            app.auto_scroll = true;
                         }
-                        KeyCode::PageDown | KeyCode::Char('d') => {
-                            app.scroll_down(app.viewport_height.saturating_sub(2));
-                        }
-                        KeyCode::Up | KeyCode::Char('k') => app.scroll_up(3),
-                        KeyCode::Down | KeyCode::Char('j') => app.scroll_down(3),
-                        KeyCode::Char('G') | KeyCode::End => app.scroll_to_bottom(),
-                        _ => {}
-                    },
-                    InputMode::Input => match key.code {
-                        KeyCode::Esc => {
-                            app.input_mode = InputMode::Normal;
-                            app.input_buffer.clear();
-                            app.input_cursor = 0;
-                        }
-                        KeyCode::Enter => {
-                            let text = app.take_input();
-                            if !text.trim().is_empty() {
-                                app.add_user_message(text.clone());
-                                let _ = followup_tx.send(text);
-                                app.auto_scroll = true;
-                            }
-                            app.input_mode = InputMode::Normal;
-                        }
-                        KeyCode::Backspace => app.input_backspace(),
-                        KeyCode::Left => app.input_cursor_left(),
-                        KeyCode::Right => app.input_cursor_right(),
-                        KeyCode::Char(c) => app.input_char(c),
-                        _ => {}
-                    },
-                }
+                        app.input_mode = InputMode::Normal;
+                    }
+                    KeyCode::Backspace => app.input_backspace(),
+                    KeyCode::Left => app.input_cursor_left(),
+                    KeyCode::Right => app.input_cursor_right(),
+                    KeyCode::Char(c) => app.input_char(c),
+                    _ => {}
+                },
             }
         }
     }

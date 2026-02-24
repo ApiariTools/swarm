@@ -112,13 +112,16 @@ async fn main() -> Result<()> {
             prompt_file,
             agent,
             repo,
-        }) => cmd_create(
-            work_dir,
-            prompt,
-            prompt_file,
-            agent.unwrap_or_else(|| cli.agent.clone()),
-            repo,
-        ).await,
+        }) => {
+            cmd_create(
+                work_dir,
+                prompt,
+                prompt_file,
+                agent.unwrap_or_else(|| cli.agent.clone()),
+                repo,
+            )
+            .await
+        }
         Some(Commands::Send { worktree, message }) => cmd_send(work_dir, worktree, message).await,
         Some(Commands::Close { worktree }) => cmd_close(work_dir, worktree).await,
         Some(Commands::Merge { worktree }) => cmd_merge(work_dir, worktree).await,
@@ -257,10 +260,10 @@ fn rebalance_session(session_name: &str) {
         .iter()
         .map(|wt| {
             let mut panes = Vec::new();
-            if let Some(ref agent) = wt.agent {
-                if live_panes.contains(&agent.pane_id) {
-                    panes.push(agent.pane_id.clone());
-                }
+            if let Some(ref agent) = wt.agent
+                && live_panes.contains(&agent.pane_id)
+            {
+                panes.push(agent.pane_id.clone());
             }
             for term in &wt.terminals {
                 if live_panes.contains(&term.pane_id) {
@@ -374,10 +377,7 @@ fn worktree_status(wt: &core::state::WorktreeState, live_panes: &[String]) -> St
         .agent
         .as_ref()
         .is_some_and(|a| live_panes.contains(&a.pane_id));
-    let term_alive = wt
-        .terminals
-        .iter()
-        .any(|t| live_panes.contains(&t.pane_id));
+    let term_alive = wt.terminals.iter().any(|t| live_panes.contains(&t.pane_id));
     if agent_alive || term_alive {
         "running".to_string()
     } else {
@@ -401,10 +401,7 @@ fn resolve_prompt(prompt: Option<String>, prompt_file: Option<String>) -> Result
                     path.display()
                 ));
             }
-            eprintln!(
-                "[swarm] loaded prompt from file ({} bytes)",
-                content.len()
-            );
+            eprintln!("[swarm] loaded prompt from file ({} bytes)", content.len());
             Ok(content)
         }
         (Some(prompt), None) => Ok(prompt),

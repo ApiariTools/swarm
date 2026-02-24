@@ -1,10 +1,10 @@
 use crate::agent_tui::app::{ConversationEntry, InputMode, SessionStatus, TuiApp};
 use crate::tui::theme;
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Padding, Paragraph, Wrap};
-use ratatui::Frame;
 use std::time::Duration;
 
 /// Draw the entire agent TUI.
@@ -15,8 +15,12 @@ pub fn draw(frame: &mut Frame, app: &mut TuiApp) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1), // title bar
-            Constraint::Min(1),   // conversation area
-            Constraint::Length(if app.input_mode == InputMode::Input { 3 } else { 0 }), // input area
+            Constraint::Min(1),    // conversation area
+            Constraint::Length(if app.input_mode == InputMode::Input {
+                3
+            } else {
+                0
+            }), // input area
             Constraint::Length(1), // status bar
         ])
         .split(area);
@@ -33,9 +37,7 @@ pub fn draw(frame: &mut Frame, app: &mut TuiApp) {
 }
 
 fn draw_title_bar(frame: &mut Frame, area: Rect) {
-    let title = Line::from(vec![
-        Span::styled("  Claude TUI Agent", theme::title()),
-    ]);
+    let title = Line::from(vec![Span::styled("  Claude TUI Agent", theme::title())]);
     frame.render_widget(Paragraph::new(title), area);
 }
 
@@ -63,11 +65,8 @@ fn draw_conversation(frame: &mut Frame, area: Rect, app: &TuiApp) {
             }
             ConversationEntry::AssistantText { text } => {
                 // Merge consecutive assistant text blocks under one header
-                let prev_was_assistant = i > 0
-                    && matches!(
-                        app.entries[i - 1],
-                        ConversationEntry::AssistantText { .. }
-                    );
+                let prev_was_assistant =
+                    i > 0 && matches!(app.entries[i - 1], ConversationEntry::AssistantText { .. });
                 if !prev_was_assistant {
                     lines.push(Line::from(""));
                     lines.push(Line::from(Span::styled(
@@ -130,10 +129,7 @@ fn draw_conversation(frame: &mut Frame, area: Rect, app: &TuiApp) {
                         Style::default().fg(theme::WAX),
                     )));
                     for line in out.lines().take(10) {
-                        lines.push(Line::from(Span::styled(
-                            format!("  │ {}", line),
-                            out_style,
-                        )));
+                        lines.push(Line::from(Span::styled(format!("  │ {}", line), out_style)));
                     }
                     if out.lines().count() > 10 {
                         lines.push(Line::from(Span::styled(
@@ -231,10 +227,7 @@ fn draw_input(frame: &mut Frame, area: Rect, app: &TuiApp) {
     frame.render_widget(input_text, area);
 
     // Place cursor
-    frame.set_cursor_position((
-        area.x + 2 + app.input_cursor as u16,
-        area.y + 1,
-    ));
+    frame.set_cursor_position((area.x + 2 + app.input_cursor as u16, area.y + 1));
 }
 
 fn draw_status_bar(frame: &mut Frame, area: Rect, app: &TuiApp) {
@@ -279,7 +272,11 @@ fn draw_status_bar(frame: &mut Frame, area: Rect, app: &TuiApp) {
         }
         SessionStatus::Idle => ("● idle".to_string(), theme::status_idle()),
         SessionStatus::Waiting => {
-            let dot = if (app.tick_count / 8) % 2 == 0 { "○" } else { "●" };
+            let dot = if (app.tick_count / 8).is_multiple_of(2) {
+                "○"
+            } else {
+                "●"
+            };
             (format!("{} waiting...", dot), theme::status_idle())
         }
         SessionStatus::Done => {
@@ -306,7 +303,10 @@ fn draw_status_bar(frame: &mut Frame, area: Rect, app: &TuiApp) {
         String::new()
     };
 
-    let hint = if app.status == SessionStatus::Done || app.status == SessionStatus::Idle || app.status == SessionStatus::Waiting {
+    let hint = if app.status == SessionStatus::Done
+        || app.status == SessionStatus::Idle
+        || app.status == SessionStatus::Waiting
+    {
         format!(" {}u/d:page i:input q:quit ", scroll_hint)
     } else {
         format!(" {}u/d:page q:quit ", scroll_hint)

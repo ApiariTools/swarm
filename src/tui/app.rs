@@ -55,7 +55,7 @@ impl PrInfo {
     /// Returns true when this PR just transitioned to MERGED relative to `prev`.
     /// Used to decide whether to auto-close the worktree.
     pub fn is_newly_merged(&self, prev: Option<&PrInfo>) -> bool {
-        self.state == "MERGED" && prev.map_or(true, |p| p.state != "MERGED")
+        self.state == "MERGED" && prev.is_none_or(|p| p.state != "MERGED")
     }
 }
 
@@ -102,7 +102,11 @@ impl Worktree {
                 .collect(),
             summary: self.summary.clone(),
             pr: self.pr.clone(),
-            status: if self.agent.as_ref().is_some_and(|p| matches!(p.status, super::app::PaneStatus::Running)) {
+            status: if self
+                .agent
+                .as_ref()
+                .is_some_and(|p| matches!(p.status, super::app::PaneStatus::Running))
+            {
                 "running".to_string()
             } else {
                 "done".to_string()
@@ -322,10 +326,10 @@ impl App {
                 for ws in &saved.worktrees {
                     let mut wt = Worktree::from_state(ws);
 
-                    if let Some(ref mut agent) = wt.agent {
-                        if !live_pane_ids.contains(&agent.pane_id) {
-                            agent.status = PaneStatus::Done;
-                        }
+                    if let Some(ref mut agent) = wt.agent
+                        && !live_pane_ids.contains(&agent.pane_id)
+                    {
+                        agent.status = PaneStatus::Done;
                     }
                     for term in &mut wt.terminals {
                         if !live_pane_ids.contains(&term.pane_id) {
@@ -489,14 +493,18 @@ impl App {
         let wt = &self.worktrees[idx];
 
         // If there's a live agent pane, jump to it
-        if let Some(ref agent) = wt.agent {
-            if agent.status == PaneStatus::Running {
-                let _ = tmux::select_pane(&agent.pane_id);
-                return;
-            }
+        if let Some(ref agent) = wt.agent
+            && agent.status == PaneStatus::Running
+        {
+            let _ = tmux::select_pane(&agent.pane_id);
+            return;
         }
         // If there's a live terminal pane, jump to it
-        if let Some(term) = wt.terminals.iter().find(|t| t.status == PaneStatus::Running) {
+        if let Some(term) = wt
+            .terminals
+            .iter()
+            .find(|t| t.status == PaneStatus::Running)
+        {
             let _ = tmux::select_pane(&term.pane_id);
             return;
         }
@@ -557,7 +565,15 @@ impl App {
 
         // Set pane title to truncated prompt so it matches the sidebar
         let pane_title = if prompt.len() > 60 {
-            format!("{}…", &prompt[..prompt.char_indices().take_while(|&(i, _)| i < 60).last().map(|(i, c)| i + c.len_utf8()).unwrap_or(60)])
+            format!(
+                "{}…",
+                &prompt[..prompt
+                    .char_indices()
+                    .take_while(|&(i, _)| i < 60)
+                    .last()
+                    .map(|(i, c)| i + c.len_utf8())
+                    .unwrap_or(60)]
+            )
         } else {
             prompt.clone()
         };
@@ -605,13 +621,7 @@ impl App {
         let dir_str = self.work_dir.to_string_lossy();
         let cmd = format!("'{}' -d '{}' pick", exe, dir_str);
 
-        if let Err(e) = tmux::display_popup(
-            &self.session_name,
-            "60%",
-            "50%",
-            " new task ",
-            &cmd,
-        ) {
+        if let Err(e) = tmux::display_popup(&self.session_name, "60%", "50%", " new task ", &cmd) {
             self.flash(format!("error: {}", e));
         }
     }
@@ -833,7 +843,10 @@ impl App {
         let agents = AgentKind::all();
         let agent = agents[self.agent_select_index].clone();
         let prompt = self.input_buffer.clone();
-        let repo_path = self.repos.get(self.repo_select_index).cloned()
+        let repo_path = self
+            .repos
+            .get(self.repo_select_index)
+            .cloned()
             .unwrap_or_else(|| self.work_dir.clone());
 
         self.mode = Mode::Normal;
@@ -845,7 +858,13 @@ impl App {
         }
     }
 
-    fn create_worktree_with_agent(&mut self, prompt: &str, agent: AgentKind, repo_path: &std::path::Path, start_point: Option<&str>) -> Result<()> {
+    fn create_worktree_with_agent(
+        &mut self,
+        prompt: &str,
+        agent: AgentKind,
+        repo_path: &std::path::Path,
+        start_point: Option<&str>,
+    ) -> Result<()> {
         self.ensure_session()?;
 
         let repo_path = repo_path.to_path_buf();
@@ -898,11 +917,7 @@ impl App {
                 .sidebar_pane_id
                 .clone()
                 .unwrap_or_else(|| "%0".to_string());
-            tmux::split_pane_horizontal(
-                &split_from,
-                &worktree_dir.to_string_lossy(),
-                70,
-            )?
+            tmux::split_pane_horizontal(&split_from, &worktree_dir.to_string_lossy(), 70)?
         } else {
             // Subsequent agents: split vertical from last live agent pane
             let last_agent_pane = self
@@ -921,15 +936,20 @@ impl App {
                         .clone()
                         .unwrap_or_else(|| "%0".to_string())
                 });
-            tmux::split_pane_vertical(
-                &last_agent_pane,
-                &worktree_dir.to_string_lossy(),
-            )?
+            tmux::split_pane_vertical(&last_agent_pane, &worktree_dir.to_string_lossy())?
         };
 
         // Set pane title to truncated prompt so it matches the sidebar
         let pane_title = if prompt.len() > 60 {
-            format!("{}…", &prompt[..prompt.char_indices().take_while(|&(i, _)| i < 60).last().map(|(i, c)| i + c.len_utf8()).unwrap_or(60)])
+            format!(
+                "{}…",
+                &prompt[..prompt
+                    .char_indices()
+                    .take_while(|&(i, _)| i < 60)
+                    .last()
+                    .map(|(i, c)| i + c.len_utf8())
+                    .unwrap_or(60)]
+            )
         } else {
             prompt.to_string()
         };
@@ -1179,52 +1199,73 @@ impl App {
                 let agent_kind = AgentKind::from_str(&agent).unwrap_or(AgentKind::ClaudeTui);
                 let repo_path = match &repo {
                     Some(name) => {
-                        match self.repos.iter().find(|r| git::repo_name(r) == *name).cloned() {
+                        match self
+                            .repos
+                            .iter()
+                            .find(|r| git::repo_name(r) == *name)
+                            .cloned()
+                        {
                             Some(path) => path,
                             None => {
-                                let names: Vec<_> = self.repos.iter().map(|r| git::repo_name(r)).collect();
+                                let names: Vec<_> =
+                                    self.repos.iter().map(|r| git::repo_name(r)).collect();
                                 let err = format!(
                                     "unknown repo '{}' (available: {})",
                                     name,
                                     names.join(", ")
                                 );
                                 self.flash(format!("create failed: {}", err));
-                                let _ = ipc::emit_event(&self.work_dir, &ipc::SwarmEvent::CreateFailed {
-                                    error: err,
-                                    prompt,
-                                    repo,
-                                    timestamp: Local::now(),
-                                });
+                                let _ = ipc::emit_event(
+                                    &self.work_dir,
+                                    &ipc::SwarmEvent::CreateFailed {
+                                        error: err,
+                                        prompt,
+                                        repo,
+                                        timestamp: Local::now(),
+                                    },
+                                );
                                 return;
                             }
                         }
                     }
                     None if self.repos.len() > 1 => {
                         let names: Vec<_> = self.repos.iter().map(|r| git::repo_name(r)).collect();
-                        let err = format!(
-                            "--repo required ({})",
-                            names.join(", ")
-                        );
+                        let err = format!("--repo required ({})", names.join(", "));
                         self.flash(format!("create failed: {}", err));
-                        let _ = ipc::emit_event(&self.work_dir, &ipc::SwarmEvent::CreateFailed {
+                        let _ = ipc::emit_event(
+                            &self.work_dir,
+                            &ipc::SwarmEvent::CreateFailed {
+                                error: err,
+                                prompt,
+                                repo,
+                                timestamp: Local::now(),
+                            },
+                        );
+                        return;
+                    }
+                    None => self
+                        .repos
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| self.work_dir.clone()),
+                };
+                if let Err(e) = self.create_worktree_with_agent(
+                    &prompt,
+                    agent_kind,
+                    &repo_path,
+                    start_point.as_deref(),
+                ) {
+                    let err = format!("{}", e);
+                    self.flash(format!("inbox create error: {}", err));
+                    let _ = ipc::emit_event(
+                        &self.work_dir,
+                        &ipc::SwarmEvent::CreateFailed {
                             error: err,
                             prompt,
                             repo,
                             timestamp: Local::now(),
-                        });
-                        return;
-                    }
-                    None => self.repos.first().cloned().unwrap_or_else(|| self.work_dir.clone()),
-                };
-                if let Err(e) = self.create_worktree_with_agent(&prompt, agent_kind, &repo_path, start_point.as_deref()) {
-                    let err = format!("{}", e);
-                    self.flash(format!("inbox create error: {}", err));
-                    let _ = ipc::emit_event(&self.work_dir, &ipc::SwarmEvent::CreateFailed {
-                        error: err,
-                        prompt,
-                        repo,
-                        timestamp: Local::now(),
-                    });
+                        },
+                    );
                 }
             }
             ipc::InboxMessage::Send {
@@ -1273,17 +1314,17 @@ impl App {
 
         // Compact the inbox once processed data exceeds 64 KB.
         let inbox_path = self.work_dir.join(".swarm").join("inbox.jsonl");
-        if self.last_inbox_pos > 64 * 1024 {
-            if let Ok(contents) = std::fs::read(&inbox_path) {
-                let pos = self.last_inbox_pos as usize;
-                let remaining = if pos < contents.len() {
-                    &contents[pos..]
-                } else {
-                    &[]
-                };
-                let _ = std::fs::write(&inbox_path, remaining);
-                self.last_inbox_pos = 0;
-            }
+        if self.last_inbox_pos > 64 * 1024
+            && let Ok(contents) = std::fs::read(&inbox_path)
+        {
+            let pos = self.last_inbox_pos as usize;
+            let remaining = if pos < contents.len() {
+                &contents[pos..]
+            } else {
+                &[]
+            };
+            let _ = std::fs::write(&inbox_path, remaining);
+            self.last_inbox_pos = 0;
         }
 
         if messages.is_empty() {
@@ -1340,7 +1381,11 @@ impl App {
                 .ok()
                 .and_then(|s| {
                     let trimmed = s.trim().to_string();
-                    if trimmed.is_empty() { None } else { Some(trimmed) }
+                    if trimmed.is_empty() {
+                        None
+                    } else {
+                        Some(trimmed)
+                    }
                 });
 
             let was_waiting = wt.agent_session_status.as_deref() == Some("waiting");
@@ -1478,11 +1523,12 @@ impl App {
 
         let mut any_done = false;
         for wt in &mut self.worktrees {
-            if let Some(ref mut agent) = wt.agent {
-                if agent.status == PaneStatus::Running && !live_pane_ids.contains(&agent.pane_id) {
-                    agent.status = PaneStatus::Done;
-                    any_done = true;
-                }
+            if let Some(ref mut agent) = wt.agent
+                && agent.status == PaneStatus::Running
+                && !live_pane_ids.contains(&agent.pane_id)
+            {
+                agent.status = PaneStatus::Done;
+                any_done = true;
             }
             for term in &mut wt.terminals {
                 if term.status == PaneStatus::Running && !live_pane_ids.contains(&term.pane_id) {
@@ -1494,16 +1540,16 @@ impl App {
         // Emit agent_done events
         if any_done {
             for wt in &self.worktrees {
-                if let Some(ref agent) = wt.agent {
-                    if agent.status == PaneStatus::Done {
-                        let _ = ipc::emit_event(
-                            &self.work_dir,
-                            &ipc::SwarmEvent::AgentDone {
-                                worktree: wt.id.clone(),
-                                timestamp: Local::now(),
-                            },
-                        );
-                    }
+                if let Some(ref agent) = wt.agent
+                    && agent.status == PaneStatus::Done
+                {
+                    let _ = ipc::emit_event(
+                        &self.work_dir,
+                        &ipc::SwarmEvent::AgentDone {
+                            worktree: wt.id.clone(),
+                            timestamp: Local::now(),
+                        },
+                    );
                 }
             }
         }
@@ -1532,10 +1578,10 @@ impl App {
     fn apply_worktree_color(&self, idx: usize) {
         let color = self.worktree_border_color(idx);
         if let Some(wt) = self.worktrees.get(idx) {
-            if let Some(ref agent) = wt.agent {
-                if agent.status == PaneStatus::Running {
-                    let _ = tmux::set_pane_color(&agent.pane_id, color);
-                }
+            if let Some(ref agent) = wt.agent
+                && agent.status == PaneStatus::Running
+            {
+                let _ = tmux::set_pane_color(&agent.pane_id, color);
             }
             for term in &wt.terminals {
                 if term.status == PaneStatus::Running {
@@ -1573,8 +1619,16 @@ impl App {
 
         for idx in indices_to_update {
             let is_selected = idx == selected;
-            let fg = if is_selected { PANE_FG_SELECTED } else { PANE_FG_DIMMED };
-            let bg = if is_selected { PANE_BG_SELECTED } else { PANE_BG_DIMMED };
+            let fg = if is_selected {
+                PANE_FG_SELECTED
+            } else {
+                PANE_FG_DIMMED
+            };
+            let bg = if is_selected {
+                PANE_BG_SELECTED
+            } else {
+                PANE_BG_DIMMED
+            };
             // Use dim/nodim attribute so colorized terminal output is also affected
             let style = if is_selected {
                 format!("bg={},fg={},nodim", bg, fg)
@@ -1583,11 +1637,11 @@ impl App {
             };
 
             if let Some(wt) = self.worktrees.get(idx) {
-                if let Some(ref agent) = wt.agent {
-                    if agent.status == PaneStatus::Running {
-                        let _ = tmux::set_pane_style(&agent.pane_id, &style);
-                        let _ = tmux::set_pane_selected(&agent.pane_id, is_selected);
-                    }
+                if let Some(ref agent) = wt.agent
+                    && agent.status == PaneStatus::Running
+                {
+                    let _ = tmux::set_pane_style(&agent.pane_id, &style);
+                    let _ = tmux::set_pane_selected(&agent.pane_id, is_selected);
                 }
                 for term in &wt.terminals {
                     if term.status == PaneStatus::Running {
@@ -1622,10 +1676,10 @@ impl App {
             .iter()
             .map(|wt| {
                 let mut panes = Vec::new();
-                if let Some(ref agent) = wt.agent {
-                    if agent.status == PaneStatus::Running {
-                        panes.push(agent.pane_id.clone());
-                    }
+                if let Some(ref agent) = wt.agent
+                    && agent.status == PaneStatus::Running
+                {
+                    panes.push(agent.pane_id.clone());
                 }
                 for term in &wt.terminals {
                     if term.status == PaneStatus::Running {
@@ -1645,7 +1699,11 @@ impl App {
         let max = self
             .worktrees
             .iter()
-            .filter_map(|w| w.id.rsplit('-').next().and_then(|n| n.parse::<usize>().ok()))
+            .filter_map(|w| {
+                w.id.rsplit('-')
+                    .next()
+                    .and_then(|n| n.parse::<usize>().ok())
+            })
             .max()
             .unwrap_or(0);
         max + 1
@@ -1702,11 +1760,18 @@ fn lookup_pr_for_worktree(wt: &mut Worktree, all_repos: &[PathBuf]) -> bool {
         .ok()
         .and_then(|o| {
             let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            if !s.is_empty() && s != wt.branch { Some(s) } else { None }
+            if !s.is_empty() && s != wt.branch {
+                Some(s)
+            } else {
+                None
+            }
         });
 
     if let Some(ref actual) = actual_branch {
-        eprintln!("[swarm] Branch fallback for {}: assigned '{}', actual '{}'", wt.id, wt.branch, actual);
+        eprintln!(
+            "[swarm] Branch fallback for {}: assigned '{}', actual '{}'",
+            wt.id, wt.branch, actual
+        );
         if let Some(newly_merged) = try_pr_lookup(wt, actual, &repo_refs, Some(actual)) {
             return newly_merged;
         }
@@ -1739,39 +1804,56 @@ fn try_pr_lookup(
     for repo_dir in repos_to_try {
         let output = Command::new("gh")
             .args([
-                "pr", "list", "--head", branch, "--state", "all",
-                "--json", "number,title,state,url", "--limit", "1",
+                "pr",
+                "list",
+                "--head",
+                branch,
+                "--state",
+                "all",
+                "--json",
+                "number,title,state,url",
+                "--limit",
+                "1",
             ])
             .current_dir(repo_dir)
             .output();
 
-        if let Ok(output) = output {
-            if output.status.success() {
-                let text = String::from_utf8_lossy(&output.stdout);
-                if let Ok(prs) = serde_json::from_str::<Vec<serde_json::Value>>(text.trim()) {
-                    if let Some(pr) = prs.first() {
-                        let new_pr = PrInfo {
-                            number: pr["number"].as_u64().unwrap_or(0),
-                            title: pr["title"].as_str().unwrap_or("").to_string(),
-                            state: pr["state"].as_str().unwrap_or("").to_string(),
-                            url: pr["url"].as_str().unwrap_or("").to_string(),
-                        };
-                        let newly_merged = new_pr.is_newly_merged(wt.pr.as_ref());
-                        let is_new = wt.pr.is_none();
-                        let state_changed = wt.pr.as_ref().is_some_and(|old| old.state != new_pr.state);
-                        if is_new {
-                            if let Some(label) = fallback_label {
-                                eprintln!("[swarm] PR detected (via actual branch '{label}'): #{} \"{}\" ({}) {}", new_pr.number, new_pr.title, new_pr.state, new_pr.url);
-                            } else {
-                                eprintln!("[swarm] PR detected: #{} \"{}\" ({}) {}", new_pr.number, new_pr.title, new_pr.state, new_pr.url);
-                            }
-                        } else if state_changed {
-                            eprintln!("[swarm] PR updated: #{} state -> {} {}", new_pr.number, new_pr.state, new_pr.url);
-                        }
-                        wt.pr = Some(new_pr);
-                        return Some(newly_merged);
+        if let Ok(output) = output
+            && output.status.success()
+        {
+            let text = String::from_utf8_lossy(&output.stdout);
+            if let Ok(prs) = serde_json::from_str::<Vec<serde_json::Value>>(text.trim())
+                && let Some(pr) = prs.first()
+            {
+                let new_pr = PrInfo {
+                    number: pr["number"].as_u64().unwrap_or(0),
+                    title: pr["title"].as_str().unwrap_or("").to_string(),
+                    state: pr["state"].as_str().unwrap_or("").to_string(),
+                    url: pr["url"].as_str().unwrap_or("").to_string(),
+                };
+                let newly_merged = new_pr.is_newly_merged(wt.pr.as_ref());
+                let is_new = wt.pr.is_none();
+                let state_changed = wt.pr.as_ref().is_some_and(|old| old.state != new_pr.state);
+                if is_new {
+                    if let Some(label) = fallback_label {
+                        eprintln!(
+                            "[swarm] PR detected (via actual branch '{label}'): #{} \"{}\" ({}) {}",
+                            new_pr.number, new_pr.title, new_pr.state, new_pr.url
+                        );
+                    } else {
+                        eprintln!(
+                            "[swarm] PR detected: #{} \"{}\" ({}) {}",
+                            new_pr.number, new_pr.title, new_pr.state, new_pr.url
+                        );
                     }
+                } else if state_changed {
+                    eprintln!(
+                        "[swarm] PR updated: #{} state -> {} {}",
+                        new_pr.number, new_pr.state, new_pr.url
+                    );
                 }
+                wt.pr = Some(new_pr);
+                return Some(newly_merged);
             }
         }
     }
@@ -1815,41 +1897,49 @@ fn try_pr_lookup_by_worktree_branches(
     for repo_dir in repos_to_try {
         let output = Command::new("gh")
             .args([
-                "pr", "list", "--state", "all",
-                "--json", "number,title,state,url,headRefName",
-                "--limit", "20",
+                "pr",
+                "list",
+                "--state",
+                "all",
+                "--json",
+                "number,title,state,url,headRefName",
+                "--limit",
+                "20",
             ])
             .current_dir(repo_dir)
             .output();
 
-        if let Ok(output) = output {
-            if output.status.success() {
-                let text = String::from_utf8_lossy(&output.stdout);
-                if let Ok(prs) = serde_json::from_str::<Vec<serde_json::Value>>(text.trim()) {
-                    // 3. Match using the pure function
-                    if let Some(pr) = match_pr_by_local_branches(&branch_refs, &prs) {
-                        let head_ref = pr["headRefName"].as_str().unwrap_or("").to_string();
-                        let new_pr = PrInfo {
-                            number: pr["number"].as_u64().unwrap_or(0),
-                            title: pr["title"].as_str().unwrap_or("").to_string(),
-                            state: pr["state"].as_str().unwrap_or("").to_string(),
-                            url: pr["url"].as_str().unwrap_or("").to_string(),
-                        };
-                        let newly_merged = new_pr.is_newly_merged(wt.pr.as_ref());
-                        let is_new = wt.pr.is_none();
-                        let state_changed = wt.pr.as_ref().is_some_and(|old| old.state != new_pr.state);
-                        if is_new {
-                            eprintln!(
-                                "[swarm] PR detected (via worktree branch '{head_ref}'): #{} \"{}\" ({}) {}",
-                                new_pr.number, new_pr.title, new_pr.state, new_pr.url
-                            );
-                        } else if state_changed {
-                            eprintln!("[swarm] PR updated: #{} state -> {} {}", new_pr.number, new_pr.state, new_pr.url);
-                        }
-                        wt.pr = Some(new_pr);
-                        return Some(newly_merged);
-                    }
+        if let Ok(output) = output
+            && output.status.success()
+        {
+            let text = String::from_utf8_lossy(&output.stdout);
+            if let Ok(prs) = serde_json::from_str::<Vec<serde_json::Value>>(text.trim())
+                // 3. Match using the pure function
+                && let Some(pr) = match_pr_by_local_branches(&branch_refs, &prs)
+            {
+                let head_ref = pr["headRefName"].as_str().unwrap_or("").to_string();
+                let new_pr = PrInfo {
+                    number: pr["number"].as_u64().unwrap_or(0),
+                    title: pr["title"].as_str().unwrap_or("").to_string(),
+                    state: pr["state"].as_str().unwrap_or("").to_string(),
+                    url: pr["url"].as_str().unwrap_or("").to_string(),
+                };
+                let newly_merged = new_pr.is_newly_merged(wt.pr.as_ref());
+                let is_new = wt.pr.is_none();
+                let state_changed = wt.pr.as_ref().is_some_and(|old| old.state != new_pr.state);
+                if is_new {
+                    eprintln!(
+                        "[swarm] PR detected (via worktree branch '{head_ref}'): #{} \"{}\" ({}) {}",
+                        new_pr.number, new_pr.title, new_pr.state, new_pr.url
+                    );
+                } else if state_changed {
+                    eprintln!(
+                        "[swarm] PR updated: #{} state -> {} {}",
+                        new_pr.number, new_pr.state, new_pr.url
+                    );
                 }
+                wt.pr = Some(new_pr);
+                return Some(newly_merged);
             }
         }
     }
@@ -1921,7 +2011,11 @@ pub fn read_agent_status(status_dir: &std::path::Path, id: &str) -> Option<Strin
         .ok()
         .and_then(|s| {
             let trimmed = s.trim().to_string();
-            if trimmed.is_empty() { None } else { Some(trimmed) }
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
         })
 }
 
@@ -2151,7 +2245,8 @@ mod tests {
     fn strategy3_skips_empty_head_ref() {
         let prs: Vec<serde_json::Value> = serde_json::from_str(
             r#"[{"number": 1, "title": "t", "state": "OPEN", "url": "u", "headRefName": ""}]"#,
-        ).unwrap();
+        )
+        .unwrap();
         let branches = vec!["", "main"];
         let result = match_pr_by_local_branches(&branches, &prs);
         assert!(result.is_none());
@@ -2159,9 +2254,9 @@ mod tests {
 
     #[test]
     fn strategy3_skips_missing_head_ref() {
-        let prs: Vec<serde_json::Value> = serde_json::from_str(
-            r#"[{"number": 1, "title": "t", "state": "OPEN", "url": "u"}]"#,
-        ).unwrap();
+        let prs: Vec<serde_json::Value> =
+            serde_json::from_str(r#"[{"number": 1, "title": "t", "state": "OPEN", "url": "u"}]"#)
+                .unwrap();
         let branches = vec!["main"];
         let result = match_pr_by_local_branches(&branches, &prs);
         assert!(result.is_none());
@@ -2182,8 +2277,14 @@ mod tests {
         // sanitize truncates to 40 chars, then we append -1
         assert!(name.starts_with("swarm/"));
         let without_prefix = &name["swarm/".len()..];
-        let without_suffix = without_prefix.strip_suffix("-1").expect("should end with -1");
-        assert!(without_suffix.len() <= 40, "sanitized part should be <= 40 chars, got {}", without_suffix.len());
+        let without_suffix = without_prefix
+            .strip_suffix("-1")
+            .expect("should end with -1");
+        assert!(
+            without_suffix.len() <= 40,
+            "sanitized part should be <= 40 chars, got {}",
+            without_suffix.len()
+        );
     }
 
     #[test]
@@ -2225,8 +2326,12 @@ mod tests {
     #[test]
     fn test_agent_status_waiting_parsed() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("worker-1"), "waiting
-").unwrap();
+        std::fs::write(
+            dir.path().join("worker-1"),
+            "waiting
+",
+        )
+        .unwrap();
         let result = read_agent_status(dir.path(), "worker-1");
         assert_eq!(result.as_deref(), Some("waiting"));
     }
@@ -2234,8 +2339,12 @@ mod tests {
     #[test]
     fn test_agent_status_running_parsed() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("worker-1"), "running
-").unwrap();
+        std::fs::write(
+            dir.path().join("worker-1"),
+            "running
+",
+        )
+        .unwrap();
         let result = read_agent_status(dir.path(), "worker-1");
         assert_eq!(result.as_deref(), Some("running"));
     }
@@ -2243,8 +2352,12 @@ mod tests {
     #[test]
     fn test_agent_status_unknown_value_handled() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("worker-1"), "some-unknown-state
-").unwrap();
+        std::fs::write(
+            dir.path().join("worker-1"),
+            "some-unknown-state
+",
+        )
+        .unwrap();
         let result = read_agent_status(dir.path(), "worker-1");
         // Gracefully returns whatever is in the file, trimmed
         assert_eq!(result.as_deref(), Some("some-unknown-state"));
@@ -2253,8 +2366,12 @@ mod tests {
     #[test]
     fn test_agent_status_empty_file_returns_none() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("worker-1"), "  
-").unwrap();
+        std::fs::write(
+            dir.path().join("worker-1"),
+            "  
+",
+        )
+        .unwrap();
         let result = read_agent_status(dir.path(), "worker-1");
         assert!(result.is_none());
     }
@@ -2375,7 +2492,10 @@ mod tests {
         app.handle_inbox_message(msg);
 
         // Should set a flash message about the error
-        let (flash, _) = app.status_message.as_ref().expect("should have flash message");
+        let (flash, _) = app
+            .status_message
+            .as_ref()
+            .expect("should have flash message");
         assert!(flash.contains("create failed"), "flash: {}", flash);
         assert!(flash.contains("nonexistent-repo"), "flash: {}", flash);
 
@@ -2412,7 +2532,10 @@ mod tests {
         app.handle_inbox_message(msg);
 
         // Should fail with --repo required error
-        let (flash, _) = app.status_message.as_ref().expect("should have flash message");
+        let (flash, _) = app
+            .status_message
+            .as_ref()
+            .expect("should have flash message");
         assert!(flash.contains("create failed"), "flash: {}", flash);
         assert!(flash.contains("--repo required"), "flash: {}", flash);
 
@@ -2426,7 +2549,8 @@ mod tests {
         std::fs::create_dir_all(work_dir.join(".swarm")).unwrap();
 
         let mut app = test_app(work_dir.clone(), vec![]);
-        app.worktrees.push(make_test_worktree("hive-1", AgentKind::ClaudeTui));
+        app.worktrees
+            .push(make_test_worktree("hive-1", AgentKind::ClaudeTui));
 
         let msg = ipc::InboxMessage::Send {
             id: "msg-1".to_string(),
@@ -2469,8 +2593,10 @@ mod tests {
         std::fs::create_dir_all(work_dir.join(".swarm")).unwrap();
 
         let mut app = test_app(work_dir.clone(), vec![]);
-        app.worktrees.push(make_test_worktree("hive-1", AgentKind::Claude));
-        app.worktrees.push(make_test_worktree("hive-2", AgentKind::Claude));
+        app.worktrees
+            .push(make_test_worktree("hive-1", AgentKind::Claude));
+        app.worktrees
+            .push(make_test_worktree("hive-2", AgentKind::Claude));
         assert_eq!(app.worktrees.len(), 2);
 
         let msg = ipc::InboxMessage::Close {
@@ -2498,7 +2624,8 @@ mod tests {
         let work_dir = dir.path().to_path_buf();
 
         let mut app = test_app(work_dir, vec![]);
-        app.worktrees.push(make_test_worktree("hive-1", AgentKind::Claude));
+        app.worktrees
+            .push(make_test_worktree("hive-1", AgentKind::Claude));
 
         let msg = ipc::InboxMessage::Close {
             id: "msg-1".to_string(),
@@ -2535,7 +2662,8 @@ mod tests {
 
         // Dispatch through App
         let mut app = test_app(work_dir.clone(), vec![]);
-        app.worktrees.push(make_test_worktree("hive-1", AgentKind::ClaudeTui));
+        app.worktrees
+            .push(make_test_worktree("hive-1", AgentKind::ClaudeTui));
 
         for m in messages {
             app.handle_inbox_message(m);
@@ -2557,18 +2685,25 @@ mod tests {
         std::fs::create_dir_all(&status_dir).unwrap();
 
         let mut app = test_app(work_dir, vec![]);
-        app.worktrees.push(make_test_worktree("hive-1", AgentKind::ClaudeTui));
+        app.worktrees
+            .push(make_test_worktree("hive-1", AgentKind::ClaudeTui));
         assert!(app.worktrees[0].agent_session_status.is_none());
 
         // Write "running" status
         std::fs::write(status_dir.join("hive-1"), "running\n").unwrap();
         app.poll_agent_statuses();
-        assert_eq!(app.worktrees[0].agent_session_status.as_deref(), Some("running"));
+        assert_eq!(
+            app.worktrees[0].agent_session_status.as_deref(),
+            Some("running")
+        );
 
         // Transition to "waiting"
         std::fs::write(status_dir.join("hive-1"), "waiting\n").unwrap();
         app.poll_agent_statuses();
-        assert_eq!(app.worktrees[0].agent_session_status.as_deref(), Some("waiting"));
+        assert_eq!(
+            app.worktrees[0].agent_session_status.as_deref(),
+            Some("waiting")
+        );
     }
 
     #[test]
@@ -2578,7 +2713,8 @@ mod tests {
         // Don't create .swarm/agent-status — should handle gracefully
 
         let mut app = test_app(work_dir, vec![]);
-        app.worktrees.push(make_test_worktree("hive-1", AgentKind::ClaudeTui));
+        app.worktrees
+            .push(make_test_worktree("hive-1", AgentKind::ClaudeTui));
 
         // Should not panic
         app.poll_agent_statuses();
@@ -2612,7 +2748,10 @@ mod tests {
         app.poll_agent_statuses();
 
         // Status should be updated to "waiting"
-        assert_eq!(app.worktrees[0].agent_session_status.as_deref(), Some("waiting"));
+        assert_eq!(
+            app.worktrees[0].agent_session_status.as_deref(),
+            Some("waiting")
+        );
 
         // The PR lookup was attempted. Since there's no real git/gh in
         // the tempdir, lookup_pr_for_worktree will clear the PR (all
@@ -2657,5 +2796,4 @@ mod tests {
         );
         assert_eq!(app.worktrees[0].pr.as_ref().unwrap().state, "OPEN");
     }
-
 }
