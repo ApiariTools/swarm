@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Check & Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout swarm
+        uses: actions/checkout@v4
+        with:
+          path: swarm
+
+      - name: Checkout apiari-common
+        uses: actions/checkout@v4
+        with:
+          repository: ApiariTools/apiari-common
+          path: common
+
+      - name: Checkout apiari-claude-sdk
+        uses: actions/checkout@v4
+        with:
+          repository: ApiariTools/apiari-claude-sdk
+          path: claude-sdk
+
+      - name: Create workspace root
+        run: |
+          cat > Cargo.toml << 'TOML'
+          [workspace]
+          resolver = "3"
+          members = ["swarm", "common", "claude-sdk"]
+
+          [workspace.package]
+          edition = "2024"
+          license = "MIT"
+
+          [workspace.dependencies]
+          serde = { version = "1", features = ["derive"] }
+          serde_json = "1"
+          tokio = { version = "1", features = ["full"] }
+          clap = { version = "4", features = ["derive"] }
+          color-eyre = "0.6"
+          chrono = { version = "0.4", features = ["serde"] }
+          uuid = { version = "1", features = ["v4"] }
+          thiserror = "2"
+          tracing = "0.1"
+          libc = "0.2"
+          ratatui = "0.29"
+          crossterm = "0.28"
+          apiari-common = { path = "common" }
+          apiari-claude-sdk = { path = "claude-sdk" }
+          TOML
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt -p swarm --check
+
+      - name: Clippy
+        run: cargo clippy -p swarm -- -D warnings
+
+      - name: Test
+        run: cargo test -p swarm
