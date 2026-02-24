@@ -1793,10 +1793,10 @@ fn lookup_pr_for_worktree(wt: &mut Worktree, all_repos: &[PathBuf]) -> bool {
     // found via strategy 3 (local branch matching) and then merged — strategy 3
     // only matches OPEN PRs, so it misses the merged PR. A direct `gh pr view`
     // catches the state transition and allows auto-close to fire.
-    if let Some(ref known_pr) = wt.pr {
-        if let Some(newly_merged) = try_pr_lookup_by_number(wt, known_pr.number, &repo_refs) {
-            return newly_merged;
-        }
+    if let Some(ref known_pr) = wt.pr
+        && let Some(newly_merged) = try_pr_lookup_by_number(wt, known_pr.number, &repo_refs)
+    {
+        return newly_merged;
     }
 
     wt.pr = None;
