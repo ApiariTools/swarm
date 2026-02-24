@@ -1,25 +1,25 @@
 [package]
 name = "swarm"
 version = "0.1.0"
-edition = "2024"
+edition.workspace = true
 description = "Run agents in parallel. Worktrees + tmux + vibes."
-license = "MIT"
-repository = "https://github.com/apiari/swarm"
+license.workspace = true
+repository = "https://github.com/ApiariTools/swarm"
 
 [dependencies]
 apiari-common.workspace = true
 apiari-claude-sdk.workspace = true
-ratatui = "0.29"
-crossterm = "0.28"
-color-eyre = "0.6"
-tokio = { version = "1", features = ["full"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+ratatui.workspace = true
+crossterm.workspace = true
+color-eyre.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 toml = "0.8"
 dirs = "6"
-chrono = { version = "0.4", features = ["serde"] }
-uuid = { version = "1", features = ["v4"] }
-clap = { version = "4", features = ["derive"] }
+chrono.workspace = true
+uuid.workspace = true
+clap.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
