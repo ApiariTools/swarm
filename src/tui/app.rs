@@ -1788,6 +1788,17 @@ fn lookup_pr_for_worktree(wt: &mut Worktree, all_repos: &[PathBuf]) -> bool {
         return newly_merged;
     }
 
+    // Strategy 4: If we already know the PR from a previous lookup, check its
+    // current state directly by number. This handles the case where a PR was
+    // found via strategy 3 (local branch matching) and then merged — strategy 3
+    // only matches OPEN PRs, so it misses the merged PR. A direct `gh pr view`
+    // catches the state transition and allows auto-close to fire.
+    if let Some(ref known_pr) = wt.pr
+        && let Some(newly_merged) = try_pr_lookup_by_number(wt, known_pr.number, &repo_refs)
+    {
+        return newly_merged;
+    }
+
     wt.pr = None;
     false
 }
@@ -1959,6 +1970,54 @@ fn match_pr_by_local_branches<'a>(
         let state = pr["state"].as_str().unwrap_or("");
         if !head_ref.is_empty() && state == "OPEN" && local_branches.contains(&head_ref) {
             return Some(pr);
+        }
+    }
+    None
+}
+
+/// Direct PR lookup by number via `gh pr view`. Used as a fallback when
+/// branch-based strategies fail to find a previously-known PR (e.g. after
+/// the PR is merged and strategy 3's OPEN-only filter skips it).
+fn try_pr_lookup_by_number(
+    wt: &mut Worktree,
+    pr_number: u64,
+    repos_to_try: &[&PathBuf],
+) -> Option<bool> {
+    for repo_dir in repos_to_try {
+        let output = Command::new("gh")
+            .args([
+                "pr",
+                "view",
+                &pr_number.to_string(),
+                "--json",
+                "number,title,state,url",
+            ])
+            .current_dir(repo_dir)
+            .output();
+
+        if let Ok(output) = output
+            && output.status.success()
+        {
+            let text = String::from_utf8_lossy(&output.stdout);
+            // gh pr view returns a single object, not an array
+            if let Ok(pr) = serde_json::from_str::<serde_json::Value>(text.trim()) {
+                let new_pr = PrInfo {
+                    number: pr["number"].as_u64().unwrap_or(0),
+                    title: pr["title"].as_str().unwrap_or("").to_string(),
+                    state: pr["state"].as_str().unwrap_or("").to_string(),
+                    url: pr["url"].as_str().unwrap_or("").to_string(),
+                };
+                let newly_merged = new_pr.is_newly_merged(wt.pr.as_ref());
+                let state_changed = wt.pr.as_ref().is_some_and(|old| old.state != new_pr.state);
+                if state_changed {
+                    eprintln!(
+                        "[swarm] PR #{} state -> {} (direct lookup)",
+                        new_pr.number, new_pr.state
+                    );
+                }
+                wt.pr = Some(new_pr);
+                return Some(newly_merged);
+            }
         }
     }
     None
