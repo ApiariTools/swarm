@@ -1857,6 +1857,8 @@ fn try_pr_lookup_by_worktree_branches(
 }
 
 /// Pure matching: find the first PR whose `headRefName` is in `local_branches`.
+/// Only matches OPEN PRs — merged/closed PRs on stale local branches are
+/// false positives that would trigger spurious auto-close.
 /// No subprocess calls — suitable for unit testing.
 fn match_pr_by_local_branches<'a>(
     local_branches: &[&str],
@@ -1864,7 +1866,8 @@ fn match_pr_by_local_branches<'a>(
 ) -> Option<&'a serde_json::Value> {
     for pr in prs {
         let head_ref = pr["headRefName"].as_str().unwrap_or("");
-        if !head_ref.is_empty() && local_branches.contains(&head_ref) {
+        let state = pr["state"].as_str().unwrap_or("");
+        if !head_ref.is_empty() && state == "OPEN" && local_branches.contains(&head_ref) {
             return Some(pr);
         }
     }
@@ -2124,35 +2127,24 @@ mod tests {
     }
 
     #[test]
-    fn strategy3_detects_merged_pr() {
+    fn strategy3_skips_merged_pr() {
         let prs = sample_prs();
-        // Only refactor-auth is local — matches PR #44 which is MERGED
+        // Only refactor-auth is local — PR #44 is MERGED, should be skipped
         let branches = vec!["refactor-auth"];
         let result = match_pr_by_local_branches(&branches, &prs);
-        let pr = result.expect("should find merged PR #44");
-        assert_eq!(pr["number"].as_u64().unwrap(), 44);
-        assert_eq!(pr["state"].as_str().unwrap(), "MERGED");
+        assert!(result.is_none(), "should not match merged PRs");
     }
 
     #[test]
-    fn strategy3_merged_pr_triggers_newly_merged() {
+    fn strategy3_only_matches_open_prs() {
+        // Verify strategy 3 only matches OPEN PRs, not MERGED/CLOSED
         let prs = sample_prs();
-        let branches = vec!["refactor-auth"];
-        let pr_val = match_pr_by_local_branches(&branches, &prs).unwrap();
-        let pr_info = PrInfo {
-            number: pr_val["number"].as_u64().unwrap(),
-            title: pr_val["title"].as_str().unwrap().to_string(),
-            state: pr_val["state"].as_str().unwrap().to_string(),
-            url: pr_val["url"].as_str().unwrap().to_string(),
-        };
-        // No previous PR — newly merged should be true
-        assert!(pr_info.is_newly_merged(None));
-        // Previous was OPEN — newly merged should be true
-        let prev_open = make_pr("OPEN");
-        assert!(pr_info.is_newly_merged(Some(&prev_open)));
-        // Previous was already MERGED — not newly merged
-        let prev_merged = make_pr("MERGED");
-        assert!(!pr_info.is_newly_merged(Some(&prev_merged)));
+        // add-readme is OPEN, refactor-auth is MERGED
+        let branches = vec!["add-readme", "refactor-auth"];
+        let result = match_pr_by_local_branches(&branches, &prs);
+        let pr = result.expect("should find OPEN PR #42");
+        assert_eq!(pr["number"].as_u64().unwrap(), 42);
+        assert_eq!(pr["state"].as_str().unwrap(), "OPEN");
     }
 
     #[test]
