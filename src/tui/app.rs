@@ -5,7 +5,8 @@ use crate::core::{agent::AgentKind, git, ipc, merge, socket_listener, state, tmu
 use chrono::{DateTime, Local};
 use color_eyre::Result;
 use std::cell::Cell;
-use std::path::PathBuf;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 use tokio::sync::mpsc;
@@ -1871,6 +1872,48 @@ fn try_pr_lookup(
     None
 }
 
+/// Returns the set of branch names currently checked out in OTHER worktrees
+/// (i.e., not in `this_worktree_path`). Used to avoid cross-contaminating
+/// PR detection when `git branch --list` returns branches from all worktrees.
+fn branches_in_other_worktrees(this_worktree_path: &Path) -> HashSet<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(this_worktree_path)
+        .args(["worktree", "list", "--porcelain"])
+        .output();
+
+    let mut result = HashSet::new();
+    let Ok(output) = output else { return result };
+    if !output.status.success() {
+        return result;
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut current_path: Option<PathBuf> = None;
+    let mut current_branch: Option<String> = None;
+
+    for line in text.lines() {
+        if let Some(path) = line.strip_prefix("worktree ") {
+            // New worktree block — save previous
+            if let (Some(path), Some(branch)) = (current_path.take(), current_branch.take()) {
+                if path != this_worktree_path {
+                    result.insert(branch);
+                }
+            }
+            current_path = Some(PathBuf::from(path));
+        } else if let Some(branch) = line.strip_prefix("branch refs/heads/") {
+            current_branch = Some(branch.to_string());
+        }
+    }
+    // Handle last block
+    if let (Some(path), Some(branch)) = (current_path, current_branch) {
+        if path != this_worktree_path {
+            result.insert(branch);
+        }
+    }
+    result
+}
+
 /// Strategy 3: get ALL local branches in the worktree, query recent PRs
 /// (`--state all`) for the repo in ONE call, and match any PR whose
 /// `headRefName` is in the local branch list. O(1) API calls, covers the
@@ -1896,6 +1939,14 @@ fn try_pr_lookup_by_worktree_branches(
         .lines()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty() && !skip_branches.iter().any(|skip| skip == s))
+        .collect();
+
+    // Filter out branches checked out in other worktrees to avoid
+    // cross-contaminating PR detection.
+    let other_wt_branches = branches_in_other_worktrees(&wt.worktree_path);
+    let local_branches: Vec<String> = local_branches
+        .into_iter()
+        .filter(|b| !other_wt_branches.contains(b))
         .collect();
 
     if local_branches.is_empty() {
