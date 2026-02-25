@@ -1895,10 +1895,10 @@ fn branches_in_other_worktrees(this_worktree_path: &Path) -> HashSet<String> {
     for line in text.lines() {
         if let Some(path) = line.strip_prefix("worktree ") {
             // New worktree block — save previous
-            if let (Some(path), Some(branch)) = (current_path.take(), current_branch.take()) {
-                if path != this_worktree_path {
-                    result.insert(branch);
-                }
+            if let (Some(path), Some(branch)) = (current_path.take(), current_branch.take())
+                && path != this_worktree_path
+            {
+                result.insert(branch);
             }
             current_path = Some(PathBuf::from(path));
         } else if let Some(branch) = line.strip_prefix("branch refs/heads/") {
@@ -1906,10 +1906,10 @@ fn branches_in_other_worktrees(this_worktree_path: &Path) -> HashSet<String> {
         }
     }
     // Handle last block
-    if let (Some(path), Some(branch)) = (current_path, current_branch) {
-        if path != this_worktree_path {
-            result.insert(branch);
-        }
+    if let (Some(path), Some(branch)) = (current_path, current_branch)
+        && path != this_worktree_path
+    {
+        result.insert(branch);
     }
     result
 }
