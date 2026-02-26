@@ -5,7 +5,7 @@ use crate::core::{agent::AgentKind, git, ipc, merge, socket_listener, state, tmu
 use chrono::{DateTime, Local};
 use color_eyre::Result;
 use std::cell::Cell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
@@ -1997,7 +1997,28 @@ fn try_pr_lookup_by_worktree_branches(
 
     let branch_refs: Vec<&str> = local_branches.iter().map(|s| s.as_str()).collect();
 
-    // 2. Query all recent PRs for each repo (one API call per repo)
+    // 2a. Get local branch tip commit SHAs (one git call, no network)
+    let branch_tips: HashMap<String, String> = Command::new("git")
+        .arg("-C")
+        .arg(&wt.worktree_path)
+        .args(["for-each-ref", "--format=%(refname:short) %(objectname:short)", "refs/heads/"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .filter_map(|line| {
+                    let mut parts = line.splitn(2, ' ');
+                    let branch = parts.next()?.to_string();
+                    let sha = parts.next()?.to_string();
+                    Some((branch, sha))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // 2b. Query all recent PRs for each repo (one API call per repo)
     for repo_dir in repos_to_try {
         let output = Command::new("gh")
             .args([
@@ -2006,7 +2027,7 @@ fn try_pr_lookup_by_worktree_branches(
                 "--state",
                 "all",
                 "--json",
-                "number,title,state,url,headRefName",
+                "number,title,state,url,headRefName,headRefOid,updatedAt",
                 "--limit",
                 "20",
             ])
@@ -2018,8 +2039,8 @@ fn try_pr_lookup_by_worktree_branches(
         {
             let text = String::from_utf8_lossy(&output.stdout);
             if let Ok(prs) = serde_json::from_str::<Vec<serde_json::Value>>(text.trim())
-                // 3. Match using the pure function
-                && let Some(pr) = match_pr_by_local_branches(&branch_refs, &prs)
+                // 3. Match using the pure function with commit-aware heuristics
+                && let Some(pr) = match_pr_by_local_branches(&branch_refs, &prs, &branch_tips)
             {
                 let head_ref = pr["headRefName"].as_str().unwrap_or("").to_string();
                 let new_pr = PrInfo {
@@ -2050,29 +2071,50 @@ fn try_pr_lookup_by_worktree_branches(
     None
 }
 
-/// Pure matching: find the OPEN PR whose `headRefName` is in `local_branches`
-/// with the highest PR number.  When a worker opens multiple PRs from the same
-/// worktree (e.g. goes off-task then corrects), we want the newest one.
+/// Pure matching: find the best OPEN PR whose `headRefName` is in
+/// `local_branches`.  Uses layered heuristics to pick the most relevant PR
+/// when a worker opens multiple PRs from the same worktree:
+///
+///   1. **Commit match** — PR whose `headRefOid` prefix-matches the local
+///      branch tip (actively pushed, not stale).
+///   2. **Most recently updated** — `updatedAt` timestamp from GitHub.
+///   3. **Highest PR number** — monotonically increasing, so newest PR wins.
+///
+/// `branch_tips` maps branch name → short commit SHA (from `git for-each-ref`).
 /// Only matches OPEN PRs — merged/closed PRs on stale local branches are
 /// false positives that would trigger spurious auto-close.
 /// No subprocess calls — suitable for unit testing.
 fn match_pr_by_local_branches<'a>(
     local_branches: &[&str],
     prs: &'a [serde_json::Value],
+    branch_tips: &HashMap<String, String>,
 ) -> Option<&'a serde_json::Value> {
     let mut best: Option<&serde_json::Value> = None;
-    let mut best_number: u64 = 0;
+    let mut best_score: (bool, &str, u64) = (false, "", 0);
+    // Score tuple: (commit_matches, updatedAt, number) — compared lexicographically.
+
     for pr in prs {
         let head_ref = pr["headRefName"].as_str().unwrap_or("");
         let state = pr["state"].as_str().unwrap_or("");
         let number = pr["number"].as_u64().unwrap_or(0);
-        if !head_ref.is_empty()
-            && state == "OPEN"
-            && local_branches.contains(&head_ref)
-            && number > best_number
-        {
+        if head_ref.is_empty() || state != "OPEN" || !local_branches.contains(&head_ref) {
+            continue;
+        }
+
+        // Heuristic 1: does the PR's head commit match the local branch tip?
+        let head_oid = pr["headRefOid"].as_str().unwrap_or("");
+        let commit_matches = !head_oid.is_empty()
+            && branch_tips
+                .get(head_ref)
+                .is_some_and(|local_sha| head_oid.starts_with(local_sha.as_str()) || local_sha.starts_with(head_oid));
+
+        // Heuristic 2: most recently updated on GitHub
+        let updated_at = pr["updatedAt"].as_str().unwrap_or("");
+
+        let score = (commit_matches, updated_at, number);
+        if score > best_score {
             best = Some(pr);
-            best_number = number;
+            best_score = score;
         }
     }
     best
@@ -2336,11 +2378,15 @@ mod tests {
         ]"#).unwrap()
     }
 
+    fn no_tips() -> HashMap<String, String> {
+        HashMap::new()
+    }
+
     #[test]
     fn strategy3_finds_pr_by_local_branch() {
         let prs = sample_prs();
         let branches = vec!["main", "fix/login-bug"];
-        let result = match_pr_by_local_branches(&branches, &prs);
+        let result = match_pr_by_local_branches(&branches, &prs, &no_tips());
         let pr = result.expect("should find PR #43");
         assert_eq!(pr["number"].as_u64().unwrap(), 43);
         assert_eq!(pr["title"].as_str().unwrap(), "Fix bug");
@@ -2351,7 +2397,7 @@ mod tests {
     fn strategy3_returns_none_when_no_branch_matches() {
         let prs = sample_prs();
         let branches = vec!["main", "develop", "feature/unrelated"];
-        let result = match_pr_by_local_branches(&branches, &prs);
+        let result = match_pr_by_local_branches(&branches, &prs, &no_tips());
         assert!(result.is_none());
     }
 
@@ -2359,7 +2405,7 @@ mod tests {
     fn strategy3_handles_empty_branch_list() {
         let prs = sample_prs();
         let branches: Vec<&str> = vec![];
-        let result = match_pr_by_local_branches(&branches, &prs);
+        let result = match_pr_by_local_branches(&branches, &prs, &no_tips());
         assert!(result.is_none());
     }
 
@@ -2367,7 +2413,7 @@ mod tests {
     fn strategy3_handles_empty_pr_list() {
         let prs: Vec<serde_json::Value> = vec![];
         let branches = vec!["add-readme", "fix/login-bug"];
-        let result = match_pr_by_local_branches(&branches, &prs);
+        let result = match_pr_by_local_branches(&branches, &prs, &no_tips());
         assert!(result.is_none());
     }
 
@@ -2376,7 +2422,7 @@ mod tests {
         let prs = sample_prs();
         // Both add-readme and refactor-auth are local — refactor-auth is MERGED so only #42 matches
         let branches = vec!["add-readme", "refactor-auth"];
-        let result = match_pr_by_local_branches(&branches, &prs);
+        let result = match_pr_by_local_branches(&branches, &prs, &no_tips());
         let pr = result.expect("should find PR #42");
         assert_eq!(pr["number"].as_u64().unwrap(), 42);
         assert_eq!(pr["headRefName"].as_str().unwrap(), "add-readme");
@@ -2391,10 +2437,40 @@ mod tests {
             {"number": 100, "title": "Old PR", "state": "MERGED", "url": "https://github.com/org/repo/pull/100", "headRefName": "swarm/old-1"}
         ]"#).unwrap();
         let branches = vec!["swarm/off-task-1", "swarm/real-task-1", "swarm/old-1"];
-        let result = match_pr_by_local_branches(&branches, &prs);
+        let result = match_pr_by_local_branches(&branches, &prs, &no_tips());
         let pr = result.expect("should find PR #355");
         assert_eq!(pr["number"].as_u64().unwrap(), 355);
         assert_eq!(pr["title"].as_str().unwrap(), "Actual work");
+    }
+
+    #[test]
+    fn strategy3_commit_match_beats_higher_number() {
+        // PR #354 has a commit that matches local branch tip — should win over #355
+        let prs: Vec<serde_json::Value> = serde_json::from_str(r#"[
+            {"number": 354, "title": "Correct PR", "state": "OPEN", "url": "https://github.com/org/repo/pull/354", "headRefName": "swarm/task-a", "headRefOid": "abc1234def"},
+            {"number": 355, "title": "Stale PR", "state": "OPEN", "url": "https://github.com/org/repo/pull/355", "headRefName": "swarm/task-b", "headRefOid": "fff9999aaa"}
+        ]"#).unwrap();
+        let branches = vec!["swarm/task-a", "swarm/task-b"];
+        let tips: HashMap<String, String> = [
+            ("swarm/task-a".into(), "abc1234".into()), // matches PR #354's headRefOid prefix
+            ("swarm/task-b".into(), "0000000".into()), // does NOT match PR #355
+        ].into();
+        let result = match_pr_by_local_branches(&branches, &prs, &tips);
+        let pr = result.expect("should find PR #354 via commit match");
+        assert_eq!(pr["number"].as_u64().unwrap(), 354);
+    }
+
+    #[test]
+    fn strategy3_updated_at_breaks_tie_when_no_commit_info() {
+        // Neither PR has commit info, but #354 was updated more recently
+        let prs: Vec<serde_json::Value> = serde_json::from_str(r#"[
+            {"number": 355, "title": "Older update", "state": "OPEN", "url": "u/355", "headRefName": "swarm/b", "updatedAt": "2026-02-25T10:00:00Z"},
+            {"number": 354, "title": "Newer update", "state": "OPEN", "url": "u/354", "headRefName": "swarm/a", "updatedAt": "2026-02-26T10:00:00Z"}
+        ]"#).unwrap();
+        let branches = vec!["swarm/a", "swarm/b"];
+        let result = match_pr_by_local_branches(&branches, &prs, &no_tips());
+        let pr = result.expect("should find PR #354 via updatedAt");
+        assert_eq!(pr["number"].as_u64().unwrap(), 354);
     }
 
     #[test]
@@ -2402,7 +2478,7 @@ mod tests {
         let prs = sample_prs();
         // Only refactor-auth is local — PR #44 is MERGED, should be skipped
         let branches = vec!["refactor-auth"];
-        let result = match_pr_by_local_branches(&branches, &prs);
+        let result = match_pr_by_local_branches(&branches, &prs, &no_tips());
         assert!(result.is_none(), "should not match merged PRs");
     }
 
@@ -2412,7 +2488,7 @@ mod tests {
         let prs = sample_prs();
         // add-readme is OPEN, refactor-auth is MERGED
         let branches = vec!["add-readme", "refactor-auth"];
-        let result = match_pr_by_local_branches(&branches, &prs);
+        let result = match_pr_by_local_branches(&branches, &prs, &no_tips());
         let pr = result.expect("should find OPEN PR #42");
         assert_eq!(pr["number"].as_u64().unwrap(), 42);
         assert_eq!(pr["state"].as_str().unwrap(), "OPEN");
@@ -2425,7 +2501,7 @@ mod tests {
         )
         .unwrap();
         let branches = vec!["", "main"];
-        let result = match_pr_by_local_branches(&branches, &prs);
+        let result = match_pr_by_local_branches(&branches, &prs, &no_tips());
         assert!(result.is_none());
     }
 
@@ -2435,7 +2511,7 @@ mod tests {
             serde_json::from_str(r#"[{"number": 1, "title": "t", "state": "OPEN", "url": "u"}]"#)
                 .unwrap();
         let branches = vec!["main"];
-        let result = match_pr_by_local_branches(&branches, &prs);
+        let result = match_pr_by_local_branches(&branches, &prs, &no_tips());
         assert!(result.is_none());
     }
 
