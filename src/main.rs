@@ -185,6 +185,7 @@ async fn run_sidebar(work_dir: std::path::PathBuf, agent: String) -> Result<()> 
                 // Keep sidebar bright even when window-style defaults to dimmed
                 let _ = core::tmux::set_pane_style(pane_id, "bg=#302c26,fg=#dcdce1,nodim");
             }
+            app.relaunch_dead_agents();
             app.save_state();
             // Enforce correct layout sizes (sidebar may have drifted if
             // terminal was resized while detached, e.g. mobile SSH).

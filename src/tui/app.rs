@@ -581,7 +581,26 @@ impl App {
         let _ = tmux::set_pane_title(&pane_id, &pane_title);
 
         // Build launch command but defer sending until the shell is ready
-        let cmd = agent.launch_cmd_with_prompt(&prompt, true);
+        let cmd = if agent == AgentKind::ClaudeTui {
+            use crate::core::shell::shell_quote;
+            let exe = std::env::current_exe()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|_| "swarm".to_string());
+            let mut base = format!(
+                "'{}' -d {} agent-tui --dangerously-skip-permissions --worktree-id {}",
+                exe,
+                shell_quote(&self.work_dir.to_string_lossy()),
+                shell_quote(&wt_id),
+            );
+            if !prompt.is_empty() {
+                let prompt_file = format!("/tmp/swarm-prompt-{}.txt", wt_id);
+                let _ = std::fs::write(&prompt_file, &prompt);
+                base.push_str(&format!(" --prompt-file {}", shell_quote(&prompt_file)));
+            }
+            base
+        } else {
+            agent.launch_cmd_with_prompt(&prompt, true)
+        };
 
         self.worktrees[idx].agent = Some(TrackedPane {
             pane_id: pane_id.clone(),
@@ -611,6 +630,29 @@ impl App {
 
         self.flash(format!("{} relaunched", agent.label()));
         Ok(())
+    }
+
+    /// Relaunch agents for worktrees that were restored with dead panes.
+    pub fn relaunch_dead_agents(&mut self) {
+        let indices: Vec<usize> = self
+            .worktrees
+            .iter()
+            .enumerate()
+            .filter(|(_, wt)| {
+                let agent_dead = match &wt.agent {
+                    None => true,
+                    Some(a) => a.status == PaneStatus::Done,
+                };
+                agent_dead && wt.worktree_path.exists()
+            })
+            .map(|(i, _)| i)
+            .collect();
+
+        for idx in indices {
+            if let Err(e) = self.relaunch_agent(idx) {
+                eprintln!("[swarm] failed to relaunch {}: {e}", self.worktrees[idx].id);
+            }
+        }
     }
 
     // ── New Worktree Flow ─────────────────────────────────
