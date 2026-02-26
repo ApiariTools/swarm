@@ -2050,7 +2050,9 @@ fn try_pr_lookup_by_worktree_branches(
     None
 }
 
-/// Pure matching: find the first PR whose `headRefName` is in `local_branches`.
+/// Pure matching: find the OPEN PR whose `headRefName` is in `local_branches`
+/// with the highest PR number.  When a worker opens multiple PRs from the same
+/// worktree (e.g. goes off-task then corrects), we want the newest one.
 /// Only matches OPEN PRs — merged/closed PRs on stale local branches are
 /// false positives that would trigger spurious auto-close.
 /// No subprocess calls — suitable for unit testing.
@@ -2058,14 +2060,22 @@ fn match_pr_by_local_branches<'a>(
     local_branches: &[&str],
     prs: &'a [serde_json::Value],
 ) -> Option<&'a serde_json::Value> {
+    let mut best: Option<&serde_json::Value> = None;
+    let mut best_number: u64 = 0;
     for pr in prs {
         let head_ref = pr["headRefName"].as_str().unwrap_or("");
         let state = pr["state"].as_str().unwrap_or("");
-        if !head_ref.is_empty() && state == "OPEN" && local_branches.contains(&head_ref) {
-            return Some(pr);
+        let number = pr["number"].as_u64().unwrap_or(0);
+        if !head_ref.is_empty()
+            && state == "OPEN"
+            && local_branches.contains(&head_ref)
+            && number > best_number
+        {
+            best = Some(pr);
+            best_number = number;
         }
     }
-    None
+    best
 }
 
 /// Direct PR lookup by number via `gh pr view`. Used as a fallback when
@@ -2362,14 +2372,29 @@ mod tests {
     }
 
     #[test]
-    fn strategy3_multiple_branches_picks_first_matching_pr() {
+    fn strategy3_multiple_branches_picks_only_open_pr() {
         let prs = sample_prs();
-        // Both add-readme and refactor-auth are local — should return first PR match (42)
+        // Both add-readme and refactor-auth are local — refactor-auth is MERGED so only #42 matches
         let branches = vec!["add-readme", "refactor-auth"];
         let result = match_pr_by_local_branches(&branches, &prs);
         let pr = result.expect("should find PR #42");
         assert_eq!(pr["number"].as_u64().unwrap(), 42);
         assert_eq!(pr["headRefName"].as_str().unwrap(), "add-readme");
+    }
+
+    #[test]
+    fn strategy3_prefers_highest_pr_number() {
+        // When multiple OPEN PRs match local branches, pick the highest number
+        let prs: Vec<serde_json::Value> = serde_json::from_str(r#"[
+            {"number": 354, "title": "Off-task PR", "state": "OPEN", "url": "https://github.com/org/repo/pull/354", "headRefName": "swarm/off-task-1"},
+            {"number": 355, "title": "Actual work", "state": "OPEN", "url": "https://github.com/org/repo/pull/355", "headRefName": "swarm/real-task-1"},
+            {"number": 100, "title": "Old PR", "state": "MERGED", "url": "https://github.com/org/repo/pull/100", "headRefName": "swarm/old-1"}
+        ]"#).unwrap();
+        let branches = vec!["swarm/off-task-1", "swarm/real-task-1", "swarm/old-1"];
+        let result = match_pr_by_local_branches(&branches, &prs);
+        let pr = result.expect("should find PR #355");
+        assert_eq!(pr["number"].as_u64().unwrap(), 355);
+        assert_eq!(pr["title"].as_str().unwrap(), "Actual work");
     }
 
     #[test]
