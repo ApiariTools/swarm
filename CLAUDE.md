@@ -190,3 +190,6 @@ The TUI polls `inbox.jsonl` every 500ms and processes queued messages. IPC comma
 - Multi-repo: if the working dir contains multiple child git repos, swarm detects and offers a picker
 - Auto-trusts `mise` if repo has `.mise.toml` or `mise.toml`
 - Release binary uses LTO + strip for small size
+
+## Merge Policy
+- NEVER run `gh pr merge` — open PRs, let CI run, then stop. Merging is the human's job.

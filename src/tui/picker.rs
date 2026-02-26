@@ -292,8 +292,33 @@ fn submit_picker(picker: &Picker) -> Result<()> {
         start_point: picker.start_point.clone(),
         timestamp: Local::now(),
     };
-    // Picker runs inside a tokio runtime (spawned from main), so use block_on
-    tokio::runtime::Handle::current().block_on(ipc::send_inbox(&picker.work_dir, &msg))?;
+    // Send synchronously — block_on deadlocks because we're on the tokio main thread.
+    use std::io::{BufRead, Write};
+    let sock_path = picker.work_dir.join(".swarm/swarm.sock");
+    let sent = if sock_path.exists() {
+        match std::os::unix::net::UnixStream::connect(&sock_path) {
+            Ok(mut stream) => {
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+                let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(2)));
+                let mut line = serde_json::to_string(&msg)?;
+                line.push('\n');
+                stream.write_all(line.as_bytes())?;
+                stream.shutdown(std::net::Shutdown::Write)?;
+                // Read ack
+                let mut reader = std::io::BufReader::new(&stream);
+                let mut ack = String::new();
+                let _ = reader.read_line(&mut ack);
+                true
+            }
+            Err(_) => false,
+        }
+    } else {
+        false
+    };
+    if !sent {
+        // Fallback to file
+        ipc::write_inbox(&picker.work_dir, &msg)?;
+    }
     Ok(())
 }
 
