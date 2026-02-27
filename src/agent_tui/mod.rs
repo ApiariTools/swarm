@@ -8,7 +8,7 @@ use apiari_claude_sdk::{ClaudeClient, Event, SessionOptions};
 use app::{InputMode, SdkEvent, SessionStatus, TuiApp};
 use color_eyre::Result;
 use crossterm::ExecutableCommand;
-use crossterm::event::{self, KeyCode, KeyModifiers};
+use crossterm::event::{self, KeyCode, KeyModifiers, MouseEventKind, EnableMouseCapture, DisableMouseCapture};
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
@@ -47,8 +47,41 @@ pub async fn run(args: AgentTuiArgs) -> Result<()> {
         .join("events.jsonl");
     let logger = EventLogger::new(event_log_path.clone());
 
-    // Log start
-    logger.log_start(&args.prompt, None);
+    // Check for a previous session to restore
+    let previous = events::read_last_session(&event_log_path);
+
+    // Create app state
+    let mut app = TuiApp::new(sdk_rx);
+
+    let resume_session_id = if let Some(prev) = previous {
+        // Restore previous session state
+        app.entries = prev.entries;
+        app.session_id = Some(prev.session_id.clone());
+        app.turn_count = prev.turns;
+        app.cost_usd = prev.cost_usd;
+        app.tool_count = prev.tool_count;
+        app.model = prev.model;
+        app.status = SessionStatus::Waiting;
+        app.entries.push(app::ConversationEntry::Status {
+            text: "Restored previous session — press i to send a follow-up".to_string(),
+        });
+        // Write agent-status file immediately so the sidebar sees "waiting"
+        if let Some(ref wt) = args.worktree_id {
+            let status_dir = args.work_dir.join(".swarm").join("agent-status");
+            let _ = std::fs::create_dir_all(&status_dir);
+            let _ = std::fs::write(status_dir.join(wt), "waiting");
+        }
+        Some(prev.session_id)
+    } else {
+        // Fresh session — log start and add initial user prompt
+        logger.log_start(&args.prompt, None);
+        app.entries.push(app::ConversationEntry::User {
+            text: args.prompt.clone(),
+        });
+        None
+    };
+
+    let is_restored = resume_session_id.is_some();
 
     // Spawn the SDK session in a background task
     let prompt = args.prompt.clone();
@@ -61,26 +94,20 @@ pub async fn run(args: AgentTuiArgs) -> Result<()> {
             prompt,
             dangerously_skip,
             work_dir,
-            sdk_tx,
+            sdk_tx.clone(),
             followup_rx,
             bg_logger,
+            resume_session_id,
         )
         .await
         {
-            eprintln!("SDK session error: {}", e);
+            let _ = sdk_tx.send(SdkEvent::Error(format!("SDK session error: {}", e)));
         }
-    });
-
-    // Create app state
-    let mut app = TuiApp::new(sdk_rx);
-
-    // Add the initial user prompt as the first entry
-    app.entries.push(app::ConversationEntry::User {
-        text: args.prompt.clone(),
     });
 
     // Run the TUI
     stdout().execute(EnterAlternateScreen)?;
+    stdout().execute(EnableMouseCapture)?;
     enable_raw_mode()?;
 
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
@@ -92,24 +119,22 @@ pub async fn run(args: AgentTuiArgs) -> Result<()> {
         &followup_tx,
         &args.work_dir,
         args.worktree_id.as_deref(),
+        is_restored,
     )
     .await;
 
     disable_raw_mode()?;
+    stdout().execute(DisableMouseCapture)?;
     stdout().execute(LeaveAlternateScreen)?;
-
-    // Log completion
-    logger.log_complete(
-        app.turn_count as u64,
-        app.cost_usd,
-        app.session_id.as_deref(),
-    );
 
     result
 }
 
 /// The SDK session runner — sends prompt, drains events, then loops waiting for
 /// follow-up messages and resuming the session.
+///
+/// If `resume_session_id` is `Some`, skip the initial spawn+prompt and jump
+/// straight to the follow-up wait loop (restoring a previous session).
 async fn run_sdk_session(
     prompt: String,
     dangerously_skip: bool,
@@ -117,48 +142,46 @@ async fn run_sdk_session(
     tx: mpsc::UnboundedSender<SdkEvent>,
     mut followup_rx: mpsc::UnboundedReceiver<String>,
     logger: EventLogger,
+    resume_session_id: Option<String>,
 ) -> Result<()> {
     let client = ClaudeClient::new();
 
-    // Spawn initial session
-    let opts = SessionOptions {
-        dangerously_skip_permissions: dangerously_skip,
-        include_partial_messages: true,
-        working_dir: Some(work_dir.clone()),
-        ..Default::default()
-    };
+    let mut current_session_id: Option<String> = resume_session_id.clone();
 
-    let mut session = match client.spawn(opts).await {
-        Ok(s) => s,
-        Err(e) => {
-            let msg = format!("Failed to start Claude: {}", e);
+    // If we're restoring a previous session, skip the initial spawn+prompt
+    if resume_session_id.is_none() {
+        // Spawn initial session
+        let opts = SessionOptions {
+            dangerously_skip_permissions: dangerously_skip,
+            include_partial_messages: true,
+            working_dir: Some(work_dir.clone()),
+            ..Default::default()
+        };
+
+        let mut session = match client.spawn(opts).await {
+            Ok(s) => s,
+            Err(e) => {
+                let msg = format!("Failed to start Claude: {}", e);
+                logger.log_error(&msg);
+                let _ = tx.send(SdkEvent::Error(msg));
+                return Ok(());
+            }
+        };
+
+        // Send the initial prompt
+        if let Err(e) = session.send_message(&prompt).await {
+            let msg = format!("Failed to send prompt: {}", e);
             logger.log_error(&msg);
             let _ = tx.send(SdkEvent::Error(msg));
             return Ok(());
         }
-    };
 
-    // Send the initial prompt
-    if let Err(e) = session.send_message(&prompt).await {
-        let msg = format!("Failed to send prompt: {}", e);
-        logger.log_error(&msg);
-        let _ = tx.send(SdkEvent::Error(msg));
-        return Ok(());
-    }
-
-    let mut current_session_id: Option<String> = None;
-
-    loop {
-        // Drain events from the current session until Result
+        // Drain events from the initial session until Result
         let got_result =
             drain_session_events(&mut session, &tx, &logger, &mut current_session_id).await;
 
-        if !got_result {
-            // Session ended without a Result (unexpected EOF or error) — still wait for followups
-            if current_session_id.is_none() {
-                // No session to resume, we're done
-                break;
-            }
+        if !got_result && current_session_id.is_none() {
+            return Ok(());
         }
 
         // Signal the TUI that we're now waiting for messages
@@ -167,12 +190,18 @@ async fn run_sdk_session(
                 session_id: sid.clone(),
             });
         }
+    }
 
+    // Follow-up wait loop — shared by both fresh and restored sessions
+    loop {
         // Wait for a follow-up message (from user input or agent inbox)
         let message = match followup_rx.recv().await {
             Some(msg) => msg,
             None => break, // Channel closed — TUI quit
         };
+
+        // Log the follow-up message
+        logger.log_user_message(&message);
 
         // Resume the session with the captured session_id
         let resume_opts = SessionOptions {
@@ -183,13 +212,12 @@ async fn run_sdk_session(
             ..Default::default()
         };
 
-        session = match client.spawn(resume_opts).await {
+        let mut session = match client.spawn(resume_opts).await {
             Ok(s) => s,
             Err(e) => {
                 let msg = format!("Failed to resume session: {}", e);
                 logger.log_error(&msg);
                 let _ = tx.send(SdkEvent::Error(msg));
-                // Wait for next followup to try again
                 continue;
             }
         };
@@ -202,7 +230,20 @@ async fn run_sdk_session(
             continue;
         }
 
-        // Loop back to drain events from the resumed session
+        // Drain events from the resumed session
+        let got_result =
+            drain_session_events(&mut session, &tx, &logger, &mut current_session_id).await;
+
+        if !got_result && current_session_id.is_none() {
+            break;
+        }
+
+        // Signal the TUI that we're now waiting for messages
+        if let Some(ref sid) = current_session_id {
+            let _ = tx.send(SdkEvent::SessionWaiting {
+                session_id: sid.clone(),
+            });
+        }
     }
 
     Ok(())
@@ -313,7 +354,7 @@ fn process_sdk_event(event: &Event, tx: &mpsc::UnboundedSender<SdkEvent>, logger
             let _ = tx.send(SdkEvent::TurnComplete);
         }
         Event::Result(result) => {
-            logger.log_complete(
+            logger.log_session_result(
                 result.num_turns,
                 result.total_cost_usd,
                 Some(&result.session_id),
@@ -336,9 +377,26 @@ async fn event_loop(
     followup_tx: &mpsc::UnboundedSender<String>,
     work_dir: &Path,
     worktree_id: Option<&str>,
+    is_restored: bool,
 ) -> Result<()> {
-    // Track inbox offset for polling per-agent inbox
-    let mut inbox_offset: u64 = 0;
+    // Track inbox offset for polling per-agent inbox.
+    // On restore, skip to end of inbox to avoid re-processing old messages.
+    let mut inbox_offset: u64 = if is_restored {
+        if let Some(wt_id) = worktree_id {
+            let inbox_path = work_dir
+                .join(".swarm")
+                .join("agents")
+                .join(wt_id)
+                .join("inbox.jsonl");
+            std::fs::metadata(&inbox_path)
+                .map(|m| m.len())
+                .unwrap_or(0)
+        } else {
+            0
+        }
+    } else {
+        0
+    };
     let mut inbox_poll_counter: u64 = 0;
     let mut prev_status = app.status.clone();
 
@@ -381,57 +439,68 @@ async fn event_loop(
 
         let poll_ms = 50;
 
-        if event::poll(Duration::from_millis(poll_ms))?
-            && let event::Event::Key(key) = event::read()?
-        {
-            // Ctrl+C always quits
-            if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-                break;
-            }
+        if event::poll(Duration::from_millis(poll_ms))? {
+            match event::read()? {
+                event::Event::Key(key) => {
+                    // Ctrl+C always quits
+                    if key.modifiers.contains(KeyModifiers::CONTROL)
+                        && key.code == KeyCode::Char('c')
+                    {
+                        break;
+                    }
 
-            match app.input_mode {
-                InputMode::Normal => match key.code {
-                    KeyCode::Char('q') => break,
-                    KeyCode::Char('i') => {
-                        if app.status == SessionStatus::Done
-                            || app.status == SessionStatus::Idle
-                            || app.status == SessionStatus::Waiting
-                        {
-                            app.input_mode = InputMode::Input;
-                        }
+                    match app.input_mode {
+                        InputMode::Normal => match key.code {
+                            KeyCode::Char('q') => break,
+                            KeyCode::Char('i') => {
+                                if app.status == SessionStatus::Done
+                                    || app.status == SessionStatus::Idle
+                                    || app.status == SessionStatus::Waiting
+                                {
+                                    app.input_mode = InputMode::Input;
+                                }
+                            }
+                            KeyCode::PageUp | KeyCode::Char('u') => {
+                                app.scroll_up(app.viewport_height as u32 / 2);
+                            }
+                            KeyCode::PageDown | KeyCode::Char('d') => {
+                                app.scroll_down(app.viewport_height as u32 / 2);
+                            }
+                            KeyCode::Up | KeyCode::Char('k') => app.scroll_up(1),
+                            KeyCode::Down | KeyCode::Char('j') => app.scroll_down(1),
+                            KeyCode::Char('G') | KeyCode::End => app.scroll_to_bottom(),
+                            KeyCode::Char('c') => app.toggle_all_tools(),
+                            _ => {}
+                        },
+                        InputMode::Input => match key.code {
+                            KeyCode::Esc => {
+                                app.input_mode = InputMode::Normal;
+                                app.input_buffer.clear();
+                                app.input_cursor = 0;
+                            }
+                            KeyCode::Enter => {
+                                let text = app.take_input();
+                                if !text.trim().is_empty() {
+                                    app.add_user_message(text.clone());
+                                    let _ = followup_tx.send(text);
+                                    app.auto_scroll = true;
+                                }
+                                app.input_mode = InputMode::Normal;
+                            }
+                            KeyCode::Backspace => app.input_backspace(),
+                            KeyCode::Left => app.input_cursor_left(),
+                            KeyCode::Right => app.input_cursor_right(),
+                            KeyCode::Char(c) => app.input_char(c),
+                            _ => {}
+                        },
                     }
-                    KeyCode::PageUp | KeyCode::Char('u') => {
-                        app.scroll_up(app.viewport_height.saturating_sub(2));
-                    }
-                    KeyCode::PageDown | KeyCode::Char('d') => {
-                        app.scroll_down(app.viewport_height.saturating_sub(2));
-                    }
-                    KeyCode::Up | KeyCode::Char('k') => app.scroll_up(3),
-                    KeyCode::Down | KeyCode::Char('j') => app.scroll_down(3),
-                    KeyCode::Char('G') | KeyCode::End => app.scroll_to_bottom(),
+                }
+                event::Event::Mouse(mouse) => match mouse.kind {
+                    MouseEventKind::ScrollUp => app.scroll_up(3),
+                    MouseEventKind::ScrollDown => app.scroll_down(3),
                     _ => {}
                 },
-                InputMode::Input => match key.code {
-                    KeyCode::Esc => {
-                        app.input_mode = InputMode::Normal;
-                        app.input_buffer.clear();
-                        app.input_cursor = 0;
-                    }
-                    KeyCode::Enter => {
-                        let text = app.take_input();
-                        if !text.trim().is_empty() {
-                            app.add_user_message(text.clone());
-                            let _ = followup_tx.send(text);
-                            app.auto_scroll = true;
-                        }
-                        app.input_mode = InputMode::Normal;
-                    }
-                    KeyCode::Backspace => app.input_backspace(),
-                    KeyCode::Left => app.input_cursor_left(),
-                    KeyCode::Right => app.input_cursor_right(),
-                    KeyCode::Char(c) => app.input_char(c),
-                    _ => {}
-                },
+                _ => {}
             }
         }
     }

@@ -373,7 +373,7 @@ pub fn apply_session_style(session: &str) -> Result<()> {
             "-t",
             session,
             "window-style",
-            "bg=#141210,fg=#3a3835,dim",
+            "bg=#1e1b18,fg=#5a5550",
         ])
         .output();
     // Active pane (sidebar, or whichever has tmux focus) stays bright
@@ -383,7 +383,7 @@ pub fn apply_session_style(session: &str) -> Result<()> {
             "-t",
             session,
             "window-active-style",
-            "bg=#302c26,fg=#dcdce1,nodim",
+            "bg=#302c26,fg=#dcdce1",
         ])
         .output();
     // Padded borders for visible gaps between panes
@@ -419,7 +419,7 @@ pub fn apply_session_style(session: &str) -> Result<()> {
         "\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}",
         "#[default]",
         ",",
-        " #[fg=#{@color}]\u{2588}\u{2588}#[default]#[fg=#5a5550] #{pane_title} #[default]}",
+        "#[fg=#{@color},dim]\u{2501}\u{2501} #{pane_title} #[default]}",
         "}",
     );
     let _ = Command::new("tmux")
@@ -438,7 +438,7 @@ pub fn apply_session_style(session: &str) -> Result<()> {
             "-t",
             session,
             "pane-border-style",
-            "fg=#3c3830,bg=#282520",
+            "fg=#4a4540,bg=#1e1b18",
         ])
         .output();
     // Active pane border color (HONEY amber)

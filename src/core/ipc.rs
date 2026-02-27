@@ -1,3 +1,5 @@
+use crate::core::state::WorkerPhase;
+use crate::swarm_log;
 use apiari_common::ipc::{JsonlReader, JsonlWriter};
 use chrono::{DateTime, Local};
 use color_eyre::Result;
@@ -77,6 +79,41 @@ pub enum SwarmEvent {
         repo: Option<String>,
         timestamp: DateTime<Local>,
     },
+    PhaseChanged {
+        worktree: String,
+        from: WorkerPhase,
+        to: WorkerPhase,
+        timestamp: DateTime<Local>,
+    },
+    PrDetected {
+        worktree: String,
+        pr_url: String,
+        pr_title: String,
+        pr_number: u64,
+        timestamp: DateTime<Local>,
+    },
+}
+
+/// A single transition log entry (human-readable audit trail).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransitionEntry {
+    pub worktree: String,
+    pub from: WorkerPhase,
+    pub to: WorkerPhase,
+    pub timestamp: DateTime<Local>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+fn transitions_path(work_dir: &Path) -> std::path::PathBuf {
+    work_dir.join(".swarm").join("transitions.jsonl")
+}
+
+/// Append a transition entry to `.swarm/transitions.jsonl`.
+pub fn log_transition(work_dir: &Path, entry: &TransitionEntry) -> Result<()> {
+    let writer = JsonlWriter::<TransitionEntry>::new(transitions_path(work_dir));
+    writer.append(entry)?;
+    Ok(())
 }
 
 fn inbox_path(work_dir: &Path) -> std::path::PathBuf {
@@ -197,7 +234,7 @@ pub async fn send_inbox(work_dir: &Path, msg: &InboxMessage) -> Result<()> {
         }
         Err(e) => {
             // Socket error — log and fall back to file
-            eprintln!("[swarm] socket send failed, falling back to file: {}", e);
+            swarm_log!("[swarm] socket send failed, falling back to file: {}", e);
             write_inbox(work_dir, msg)
         }
     }
@@ -548,5 +585,117 @@ mod tests {
         assert_eq!(msgs1[0].message, "msg for worker 1");
         assert_eq!(msgs2.len(), 1);
         assert_eq!(msgs2[0].message, "msg for worker 2");
+    }
+
+    // ── PhaseChanged / PrDetected / TransitionEntry tests ──
+
+    #[test]
+    fn test_phase_changed_event_round_trips() {
+        let event = SwarmEvent::PhaseChanged {
+            worktree: "hive-1".to_string(),
+            from: WorkerPhase::Starting,
+            to: WorkerPhase::Running,
+            timestamp: Local::now(),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"event\":\"phase_changed\""));
+        assert!(json.contains("\"from\":\"starting\""));
+        assert!(json.contains("\"to\":\"running\""));
+
+        let restored: SwarmEvent = serde_json::from_str(&json).unwrap();
+        match restored {
+            SwarmEvent::PhaseChanged {
+                worktree, from, to, ..
+            } => {
+                assert_eq!(worktree, "hive-1");
+                assert_eq!(from, WorkerPhase::Starting);
+                assert_eq!(to, WorkerPhase::Running);
+            }
+            _ => panic!("expected PhaseChanged"),
+        }
+    }
+
+    #[test]
+    fn test_pr_detected_event_round_trips() {
+        let event = SwarmEvent::PrDetected {
+            worktree: "hive-2".to_string(),
+            pr_url: "https://github.com/org/repo/pull/42".to_string(),
+            pr_title: "Fix auth".to_string(),
+            pr_number: 42,
+            timestamp: Local::now(),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"event\":\"pr_detected\""));
+
+        let restored: SwarmEvent = serde_json::from_str(&json).unwrap();
+        match restored {
+            SwarmEvent::PrDetected {
+                worktree,
+                pr_url,
+                pr_number,
+                ..
+            } => {
+                assert_eq!(worktree, "hive-2");
+                assert_eq!(pr_url, "https://github.com/org/repo/pull/42");
+                assert_eq!(pr_number, 42);
+            }
+            _ => panic!("expected PrDetected"),
+        }
+    }
+
+    #[test]
+    fn test_transition_entry_round_trips() {
+        let entry = TransitionEntry {
+            worktree: "hive-1".to_string(),
+            from: WorkerPhase::Creating,
+            to: WorkerPhase::Starting,
+            timestamp: Local::now(),
+            reason: Some("pane created".to_string()),
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        let restored: TransitionEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.worktree, "hive-1");
+        assert_eq!(restored.from, WorkerPhase::Creating);
+        assert_eq!(restored.to, WorkerPhase::Starting);
+        assert_eq!(restored.reason.as_deref(), Some("pane created"));
+    }
+
+    #[test]
+    fn test_transition_entry_without_reason() {
+        let entry = TransitionEntry {
+            worktree: "hive-1".to_string(),
+            from: WorkerPhase::Running,
+            to: WorkerPhase::Waiting,
+            timestamp: Local::now(),
+            reason: None,
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        // reason should be skipped in serialization
+        assert!(!json.contains("reason"));
+
+        let restored: TransitionEntry = serde_json::from_str(&json).unwrap();
+        assert!(restored.reason.is_none());
+    }
+
+    #[test]
+    fn test_log_transition_writes_to_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let work_dir = dir.path();
+
+        let entry = TransitionEntry {
+            worktree: "hive-1".to_string(),
+            from: WorkerPhase::Creating,
+            to: WorkerPhase::Starting,
+            timestamp: Local::now(),
+            reason: Some("test".to_string()),
+        };
+
+        log_transition(work_dir, &entry).unwrap();
+
+        let path = work_dir.join(".swarm").join("transitions.jsonl");
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("creating"));
+        assert!(content.contains("starting"));
+        assert!(content.contains("hive-1"));
     }
 }

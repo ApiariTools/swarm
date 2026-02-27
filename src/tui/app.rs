@@ -1,7 +1,9 @@
 #![allow(dead_code)]
 
 use crate::core::shell::sanitize;
+use crate::core::state::WorkerPhase;
 use crate::core::{agent::AgentKind, git, ipc, merge, socket_listener, state, tmux};
+use crate::swarm_log;
 use chrono::{DateTime, Local};
 use color_eyre::Result;
 use std::cell::Cell;
@@ -13,9 +15,9 @@ use tokio::sync::mpsc;
 
 /// Pane foreground colors for selected/dimmed states.
 const PANE_FG_SELECTED: &str = "#dcdce1"; // full FROST brightness
-const PANE_FG_DIMMED: &str = "#3a3835"; // heavily muted
+const PANE_FG_DIMMED: &str = "#5a5550"; // readable gray, not invisible
 const PANE_BG_SELECTED: &str = "#302c26"; // slightly brighter than COMB — spotlight
-const PANE_BG_DIMMED: &str = "#141210"; // very dark, strongly receded
+const PANE_BG_DIMMED: &str = "#1e1b18"; // dark but not pitch black
 
 /// Hex colors for worktree pane border titles.
 const WORKTREE_BORDER_COLORS: &[&str] = &[
@@ -73,6 +75,8 @@ pub struct Worktree {
     pub agent: Option<TrackedPane>,
     pub terminals: Vec<TrackedPane>,
     pub pr: Option<PrInfo>,
+    /// Worker lifecycle phase — single source of truth for worker state.
+    pub phase: WorkerPhase,
     /// LLM-generated short summary of the task prompt.
     pub summary: Option<String>,
     /// Prompt to send once the agent is ready (sent after a delay, then cleared).
@@ -84,6 +88,13 @@ pub struct Worktree {
 impl Worktree {
     /// Convert to persistable state.
     fn to_state(&self) -> state::WorktreeState {
+        // Compute backward-compat status from phase
+        let status = if self.phase.is_active() {
+            "running".to_string()
+        } else {
+            "done".to_string()
+        };
+
         state::WorktreeState {
             id: self.id.clone(),
             branch: self.branch.clone(),
@@ -103,15 +114,8 @@ impl Worktree {
                 .collect(),
             summary: self.summary.clone(),
             pr: self.pr.clone(),
-            status: if self
-                .agent
-                .as_ref()
-                .is_some_and(|p| matches!(p.status, super::app::PaneStatus::Running))
-            {
-                "running".to_string()
-            } else {
-                "done".to_string()
-            },
+            phase: self.phase.clone(),
+            status,
             agent_session_status: self.agent_session_status.clone(),
         }
     }
@@ -139,6 +143,7 @@ impl Worktree {
                 })
                 .collect(),
             pr: ws.pr.clone(),
+            phase: ws.phase.clone(),
             summary: ws.summary.clone(),
             pending_prompt: None,
             agent_session_status: None,
@@ -248,11 +253,14 @@ impl App {
 
         let (summary_tx, summary_rx) = mpsc::unbounded_channel();
 
+        // Initialise file logger (before anything that might log)
+        crate::core::log::init(&work_dir);
+
         // Start socket listener (before restore so we're ready for messages)
         let (inbox_rx, socket_handle) = match socket_listener::start(&work_dir) {
             Ok((rx, handle)) => (rx, Some(handle)),
             Err(e) => {
-                eprintln!("[swarm] failed to start socket listener: {}", e);
+                swarm_log!("[swarm] failed to start socket listener: {}", e);
                 let (_tx, rx) = mpsc::unbounded_channel();
                 (rx, None)
             }
@@ -327,6 +335,11 @@ impl App {
                 for ws in &saved.worktrees {
                     let mut wt = Worktree::from_state(ws);
 
+                    let agent_alive = wt
+                        .agent
+                        .as_ref()
+                        .is_some_and(|a| live_pane_ids.contains(&a.pane_id));
+
                     if let Some(ref mut agent) = wt.agent
                         && !live_pane_ids.contains(&agent.pane_id)
                     {
@@ -336,6 +349,22 @@ impl App {
                         if !live_pane_ids.contains(&term.pane_id) {
                             term.status = PaneStatus::Done;
                         }
+                    }
+
+                    // Restart recovery: fix phase based on pane liveness
+                    match wt.phase {
+                        WorkerPhase::Creating | WorkerPhase::Starting if !agent_alive => {
+                            wt.phase = WorkerPhase::Failed;
+                        }
+                        WorkerPhase::Creating | WorkerPhase::Starting if agent_alive => {
+                            // Pane is alive but startup incomplete — will transition
+                            // to Running when prompt delivers
+                            wt.phase = WorkerPhase::Starting;
+                        }
+                        WorkerPhase::Running | WorkerPhase::Waiting if !agent_alive => {
+                            wt.phase = WorkerPhase::Completed;
+                        }
+                        _ => {}
                     }
 
                     self.worktrees.push(wt);
@@ -401,6 +430,7 @@ impl App {
                         agent: None,
                         terminals: Vec::new(),
                         pr: None,
+                        phase: WorkerPhase::Completed,
                         summary: None,
                         pending_prompt: None,
                         agent_session_status: None,
@@ -438,6 +468,13 @@ impl App {
     }
 
     pub fn save_state(&self) {
+        if let Err(e) = self.save_state_inner() {
+            swarm_log!("[swarm] save_state failed: {}", e);
+            // Flash is not available from &self, but the error is logged
+        }
+    }
+
+    fn save_state_inner(&self) -> Result<()> {
         let mut worktree_states: Vec<state::WorktreeState> =
             self.worktrees.iter().map(|w| w.to_state()).collect();
 
@@ -459,7 +496,57 @@ impl App {
             last_inbox_pos: self.last_inbox_pos,
         };
 
-        let _ = state::save_state(&self.work_dir, &swarm_state);
+        state::save_state(&self.work_dir, &swarm_state)
+    }
+
+    /// Transition a worktree to a new phase with validation, logging, and event emission.
+    fn transition(&mut self, idx: usize, to: WorkerPhase, reason: Option<&str>) {
+        let wt = &self.worktrees[idx];
+        let from = wt.phase.clone();
+
+        if from == to {
+            return; // no-op
+        }
+
+        if !from.can_transition_to(&to) {
+            swarm_log!(
+                "[swarm] illegal transition for {}: {} -> {}",
+                wt.id, from, to
+            );
+            return;
+        }
+
+        let worktree_id = wt.id.clone();
+        let now = Local::now();
+
+        // Log to transitions.jsonl
+        let _ = ipc::log_transition(
+            &self.work_dir,
+            &ipc::TransitionEntry {
+                worktree: worktree_id.clone(),
+                from: from.clone(),
+                to: to.clone(),
+                timestamp: now,
+                reason: reason.map(|s| s.to_string()),
+            },
+        );
+
+        // Emit PhaseChanged event to events.jsonl
+        let _ = ipc::emit_event(
+            &self.work_dir,
+            &ipc::SwarmEvent::PhaseChanged {
+                worktree: worktree_id.clone(),
+                from: from.clone(),
+                to: to.clone(),
+                timestamp: now,
+            },
+        );
+
+        swarm_log!("[swarm] {} : {} -> {}", worktree_id, from, to);
+
+        // Update phase
+        self.worktrees[idx].phase = to;
+        self.save_state();
     }
 
     // ── Navigation ─────────────────────────────────────────
@@ -608,6 +695,9 @@ impl App {
         });
         self.worktrees[idx].pending_prompt = Some((cmd, Instant::now()));
 
+        // Reset phase so deliver_pending_prompts can transition Starting → Running
+        self.transition(idx, WorkerPhase::Starting, Some("agent relaunched"));
+
         // Rebalance, re-apply styling, re-select sidebar (after setting agent so pane is included)
         self.rebalance_layout();
         let _ = tmux::apply_session_style(&self.session_name);
@@ -650,7 +740,7 @@ impl App {
 
         for idx in indices {
             if let Err(e) = self.relaunch_agent(idx) {
-                eprintln!("[swarm] failed to relaunch {}: {e}", self.worktrees[idx].id);
+                swarm_log!("[swarm] failed to relaunch {}: {e}", self.worktrees[idx].id);
             }
         }
     }
@@ -929,12 +1019,43 @@ impl App {
         let branch_name = format!("swarm/{}-{}", sanitized, num);
         let wt_dir_name = format!("{}-{}", sanitized, num);
         let worktree_dir = self.worktree_base().join(&wt_dir_name);
+        let window_name = format!("{}-{}", repo_name, num);
 
         if let Some(parent) = worktree_dir.parent() {
             std::fs::create_dir_all(parent)?;
         }
 
-        git::create_worktree(&repo_path, &branch_name, &worktree_dir, start_point)?;
+        // Phase 1: Push with Creating phase (no agent yet)
+        self.worktrees.push(Worktree {
+            id: window_name.clone(),
+            branch: branch_name.clone(),
+            prompt: prompt.to_string(),
+            agent_kind: agent.clone(),
+            repo_path: repo_path.clone(),
+            worktree_path: worktree_dir.clone(),
+            created_at: Local::now(),
+            agent: None,
+            terminals: Vec::new(),
+            pr: None,
+            phase: WorkerPhase::Creating,
+            summary: None,
+            pending_prompt: None,
+            agent_session_status: None,
+        });
+        let idx = self.worktrees.len() - 1;
+        self.save_state();
+
+        // Phase 2: Create git worktree
+        if let Err(e) = git::create_worktree(&repo_path, &branch_name, &worktree_dir, start_point)
+        {
+            swarm_log!(
+                "[swarm] git worktree creation failed for {}: {}",
+                window_name, e
+            );
+            self.worktrees.remove(idx);
+            self.save_state();
+            return Err(e);
+        }
 
         // Auto-trust mise if the repo uses it
         if repo_path.join(".mise.toml").exists() || repo_path.join("mise.toml").exists() {
@@ -944,25 +1065,20 @@ impl App {
                 .output();
         }
 
-        let window_name = format!("{}-{}", repo_name, num);
-
-        // Smart split: first agent splits horizontal from sidebar (creates right column),
-        // subsequent agents split vertical from last agent (stacks in right column).
+        // Phase 3: Create tmux pane
         let has_live_agents = self.worktrees.iter().any(|w| {
             w.agent
                 .as_ref()
                 .is_some_and(|a| a.status == PaneStatus::Running)
         });
 
-        let pane_id = if !has_live_agents {
-            // First agent: split horizontal from sidebar
+        let pane_result = if !has_live_agents {
             let split_from = self
                 .sidebar_pane_id
                 .clone()
                 .unwrap_or_else(|| "%0".to_string());
-            tmux::split_pane_horizontal(&split_from, &worktree_dir.to_string_lossy(), 70)?
+            tmux::split_pane_horizontal(&split_from, &worktree_dir.to_string_lossy(), 70)
         } else {
-            // Subsequent agents: split vertical from last live agent pane
             let last_agent_pane = self
                 .worktrees
                 .iter()
@@ -979,7 +1095,24 @@ impl App {
                         .clone()
                         .unwrap_or_else(|| "%0".to_string())
                 });
-            tmux::split_pane_vertical(&last_agent_pane, &worktree_dir.to_string_lossy())?
+            tmux::split_pane_vertical(&last_agent_pane, &worktree_dir.to_string_lossy())
+        };
+
+        let pane_id = match pane_result {
+            Ok(id) => id,
+            Err(e) => {
+                swarm_log!(
+                    "[swarm] tmux pane creation failed for {}: {}",
+                    window_name, e
+                );
+                // Rollback: clean up git worktree
+                let _ = git::remove_worktree(&repo_path, &worktree_dir);
+                let _ = git::prune_worktrees(&repo_path);
+                let _ = git::delete_branch(&repo_path, &branch_name);
+                self.worktrees.remove(idx);
+                self.save_state();
+                return Err(e);
+            }
         };
 
         // Set pane title to truncated prompt so it matches the sidebar
@@ -1008,7 +1141,7 @@ impl App {
                 .unwrap_or_else(|_| "swarm".to_string());
             let prompt_file = format!("/tmp/swarm-prompt-{}.txt", window_name);
             std::fs::write(&prompt_file, prompt).unwrap_or_else(|e| {
-                eprintln!("[swarm] failed to write prompt file {prompt_file}: {e}");
+                swarm_log!("[swarm] failed to write prompt file {prompt_file}: {e}");
             });
             format!(
                 "'{}' -d {} agent-tui --dangerously-skip-permissions --worktree-id {} --prompt-file {}",
@@ -1021,26 +1154,15 @@ impl App {
             agent.launch_cmd_with_prompt(prompt, true)
         };
 
-        self.worktrees.push(Worktree {
-            id: window_name.clone(),
-            branch: branch_name.clone(),
-            prompt: prompt.to_string(),
-            agent_kind: agent.clone(),
-            repo_path,
-            worktree_path: worktree_dir,
-            created_at: Local::now(),
-            agent: Some(TrackedPane {
-                pane_id: pane_id.clone(),
-                status: PaneStatus::Running,
-            }),
-            terminals: Vec::new(),
-            pr: None,
-            summary: None,
-            pending_prompt: Some((cmd, Instant::now())),
-            agent_session_status: None,
+        // Phase 4: Pane created → transition to Starting
+        self.worktrees[idx].agent = Some(TrackedPane {
+            pane_id: pane_id.clone(),
+            status: PaneStatus::Running,
         });
+        self.worktrees[idx].pending_prompt = Some((cmd, Instant::now()));
+        self.transition(idx, WorkerPhase::Starting, Some("pane created"));
 
-        self.selected = self.worktrees.len() - 1;
+        self.selected = idx;
 
         // Rebalance layout and re-apply styling (after push so the new pane is included)
         self.rebalance_layout();
@@ -1056,7 +1178,6 @@ impl App {
         self.apply_worktree_color(self.selected);
         self.prev_selected = None;
         self.update_pane_selection();
-        self.save_state();
 
         // Request LLM-generated summary for the task prompt
         self.request_summary(window_name.clone(), prompt.to_string());
@@ -1387,9 +1508,50 @@ impl App {
         let all_repos = self.repos.clone();
         let mut merged_ids = Vec::new();
 
-        for wt in &mut self.worktrees {
-            if lookup_pr_for_worktree(wt, &all_repos) {
+        // Snapshot PR state before lookups to detect new PRs
+        let prev_prs: Vec<Option<PrInfo>> =
+            self.worktrees.iter().map(|wt| wt.pr.clone()).collect();
+
+        // Collect all branches so each lookup can skip other worktrees' branches
+        let all_branches: Vec<String> =
+            self.worktrees.iter().map(|w| w.branch.clone()).collect();
+
+        for (i, wt) in &mut self.worktrees.iter_mut().enumerate() {
+            let other_branches: Vec<String> = all_branches
+                .iter()
+                .enumerate()
+                .filter(|(j, _)| *j != i)
+                .map(|(_, b)| b.clone())
+                .collect();
+            if lookup_pr_for_worktree(wt, &all_repos, &other_branches) {
                 merged_ids.push(wt.id.clone());
+            }
+        }
+
+        // Emit PrDetected events for worktrees where PR went from None to Some
+        // (or URL changed)
+        for (idx, prev) in prev_prs.iter().enumerate() {
+            if idx >= self.worktrees.len() {
+                break;
+            }
+            let wt = &self.worktrees[idx];
+            if let Some(ref pr) = wt.pr {
+                let is_new = match prev {
+                    None => true,
+                    Some(old) => old.url != pr.url,
+                };
+                if is_new {
+                    let _ = ipc::emit_event(
+                        &self.work_dir,
+                        &ipc::SwarmEvent::PrDetected {
+                            worktree: wt.id.clone(),
+                            pr_url: pr.url.clone(),
+                            pr_title: pr.title.clone(),
+                            pr_number: pr.number,
+                            timestamp: Local::now(),
+                        },
+                    );
+                }
             }
         }
 
@@ -1399,7 +1561,7 @@ impl App {
         // Auto-close worktrees whose PRs were just merged
         for id in merged_ids {
             if let Some(idx) = self.worktrees.iter().position(|w| w.id == id) {
-                eprintln!("[swarm] Auto-closing worktree {} — PR merged", id);
+                swarm_log!("[swarm] Auto-closing worktree {} — PR merged", id);
                 let prompt = self.worktrees[idx].prompt.clone();
                 let _ = self.close_worktree(idx);
                 self.flash(format!("auto-closed \"{}\" (PR merged)", prompt));
@@ -1418,6 +1580,7 @@ impl App {
         let all_repos = self.repos.clone();
         let mut needs_save = false;
         let mut newly_waiting: Vec<usize> = Vec::new();
+        let mut phase_transitions: Vec<(usize, WorkerPhase)> = Vec::new();
 
         for (idx, wt) in self.worktrees.iter_mut().enumerate() {
             let new_status = std::fs::read_to_string(status_dir.join(&wt.id))
@@ -1433,27 +1596,55 @@ impl App {
 
             let was_waiting = wt.agent_session_status.as_deref() == Some("waiting");
             let is_waiting = new_status.as_deref() == Some("waiting");
+            let is_running = new_status.as_deref() == Some("running");
 
             if wt.agent_session_status != new_status {
                 wt.agent_session_status = new_status;
                 needs_save = true;
             }
 
-            // Newly transitioned to waiting — queue immediate PR lookup
-            if is_waiting && !was_waiting {
-                newly_waiting.push(idx);
+            // Phase transitions based on agent-status file
+            if is_waiting && wt.phase == WorkerPhase::Running {
+                phase_transitions.push((idx, WorkerPhase::Waiting));
+            } else if is_running && wt.phase == WorkerPhase::Waiting {
+                phase_transitions.push((idx, WorkerPhase::Running));
             }
+
+            // Newly transitioned to waiting — queue immediate PR lookup,
+            // but skip very new workers (< 60s old) that can't possibly have a PR yet.
+            if is_waiting && !was_waiting {
+                let age = Local::now().signed_duration_since(wt.created_at);
+                if age.num_seconds() >= 60 {
+                    newly_waiting.push(idx);
+                }
+            }
+        }
+
+        // Apply phase transitions
+        for (idx, to) in phase_transitions {
+            self.transition(idx, to, Some("agent-status file"));
         }
 
         // Run PR lookups for workers that just became waiting.
         // Always re-check — even if a PR was already found by the 30s poll —
         // because the PR may have been merged since the last check.
         if !newly_waiting.is_empty() {
+            let all_branches: Vec<String> =
+                self.worktrees.iter().map(|w| w.branch.clone()).collect();
             let mut any_merged = Vec::new();
             for idx in &newly_waiting {
+                if *idx >= self.worktrees.len() {
+                    continue;
+                }
+                let other_branches: Vec<String> = all_branches
+                    .iter()
+                    .enumerate()
+                    .filter(|(j, _)| *j != *idx)
+                    .map(|(_, b)| b.clone())
+                    .collect();
                 let wt = &mut self.worktrees[*idx];
-                eprintln!("[swarm] Agent waiting — immediate PR lookup for {}", wt.id);
-                if lookup_pr_for_worktree(wt, &all_repos) {
+                swarm_log!("[swarm] Agent waiting — immediate PR lookup for {}", wt.id);
+                if lookup_pr_for_worktree(wt, &all_repos, &other_branches) {
                     any_merged.push(wt.id.clone());
                 }
             }
@@ -1462,7 +1653,7 @@ impl App {
             // Auto-close any that were merged
             for id in any_merged {
                 if let Some(idx) = self.worktrees.iter().position(|w| w.id == id) {
-                    eprintln!("[swarm] Auto-closing worktree {} — PR merged", id);
+                    swarm_log!("[swarm] Auto-closing worktree {} — PR merged", id);
                     let prompt = self.worktrees[idx].prompt.clone();
                     let _ = self.close_worktree(idx);
                     self.flash(format!("auto-closed \"{}\" (PR merged)", prompt));
@@ -1539,7 +1730,10 @@ impl App {
     }
 
     fn deliver_pending_prompts(&mut self) {
-        for wt in &mut self.worktrees {
+        // Collect indices that need delivery first (to avoid borrow conflict with transition)
+        let mut delivered: Vec<usize> = Vec::new();
+
+        for (idx, wt) in self.worktrees.iter_mut().enumerate() {
             if let Some((ref prompt, created)) = wt.pending_prompt {
                 let pane_id = match wt.agent.as_ref() {
                     Some(agent) => agent.pane_id.clone(),
@@ -1550,7 +1744,15 @@ impl App {
                 if ready || timed_out {
                     let _ = tmux::send_keys_to_pane(&pane_id, prompt);
                     wt.pending_prompt = None;
+                    delivered.push(idx);
                 }
+            }
+        }
+
+        // Transition delivered workers from Starting → Running
+        for idx in delivered {
+            if self.worktrees[idx].phase == WorkerPhase::Starting {
+                self.transition(idx, WorkerPhase::Running, Some("prompt delivered"));
             }
         }
     }
@@ -1564,14 +1766,17 @@ impl App {
             .map(|p| p.pane_id.clone())
             .collect();
 
-        let mut any_done = false;
-        for wt in &mut self.worktrees {
+        // Track which agents JUST transitioned to done (fix double-emit bug:
+        // previously emitted AgentDone for ALL done agents when any_done was true)
+        let mut just_done: Vec<usize> = Vec::new();
+
+        for (idx, wt) in self.worktrees.iter_mut().enumerate() {
             if let Some(ref mut agent) = wt.agent
                 && agent.status == PaneStatus::Running
                 && !live_pane_ids.contains(&agent.pane_id)
             {
                 agent.status = PaneStatus::Done;
-                any_done = true;
+                just_done.push(idx);
             }
             for term in &mut wt.terminals {
                 if term.status == PaneStatus::Running && !live_pane_ids.contains(&term.pane_id) {
@@ -1580,20 +1785,20 @@ impl App {
             }
         }
 
-        // Emit agent_done events
-        if any_done {
-            for wt in &self.worktrees {
-                if let Some(ref agent) = wt.agent
-                    && agent.status == PaneStatus::Done
-                {
-                    let _ = ipc::emit_event(
-                        &self.work_dir,
-                        &ipc::SwarmEvent::AgentDone {
-                            worktree: wt.id.clone(),
-                            timestamp: Local::now(),
-                        },
-                    );
-                }
+        // Emit AgentDone events and transition to Completed only for agents that JUST died
+        for idx in just_done {
+            let wt = &self.worktrees[idx];
+            let _ = ipc::emit_event(
+                &self.work_dir,
+                &ipc::SwarmEvent::AgentDone {
+                    worktree: wt.id.clone(),
+                    timestamp: Local::now(),
+                },
+            );
+
+            // Transition active phases to Completed
+            if self.worktrees[idx].phase.is_active() {
+                self.transition(idx, WorkerPhase::Completed, Some("pane exited"));
             }
         }
     }
@@ -1672,12 +1877,7 @@ impl App {
             } else {
                 PANE_BG_DIMMED
             };
-            // Use dim/nodim attribute so colorized terminal output is also affected
-            let style = if is_selected {
-                format!("bg={},fg={},nodim", bg, fg)
-            } else {
-                format!("bg={},fg={},dim", bg, fg)
-            };
+            let style = format!("bg={},fg={}", bg, fg);
 
             if let Some(wt) = self.worktrees.get(idx) {
                 if let Some(ref agent) = wt.agent
@@ -1770,7 +1970,7 @@ impl App {
 /// Tries the assigned branch first, then falls back to the worktree's actual
 /// current branch (workers often create their own). Returns `true` if the PR
 /// just transitioned to MERGED (caller should auto-close).
-fn lookup_pr_for_worktree(wt: &mut Worktree, all_repos: &[PathBuf]) -> bool {
+fn lookup_pr_for_worktree(wt: &mut Worktree, all_repos: &[PathBuf], other_branches: &[String]) -> bool {
     if wt.branch.is_empty() {
         return false;
     }
@@ -1811,7 +2011,7 @@ fn lookup_pr_for_worktree(wt: &mut Worktree, all_repos: &[PathBuf]) -> bool {
         });
 
     if let Some(ref actual) = actual_branch {
-        eprintln!(
+        swarm_log!(
             "[swarm] Branch fallback for {}: assigned '{}', actual '{}'",
             wt.id, wt.branch, actual
         );
@@ -1827,6 +2027,7 @@ fn lookup_pr_for_worktree(wt: &mut Worktree, all_repos: &[PathBuf]) -> bool {
     if let Some(ref actual) = actual_branch {
         skip.push(actual.clone());
     }
+    skip.extend_from_slice(other_branches);
     if let Some(newly_merged) = try_pr_lookup_by_worktree_branches(wt, &repo_refs, &skip) {
         return newly_merged;
     }
@@ -1890,18 +2091,18 @@ fn try_pr_lookup(
                 let state_changed = wt.pr.as_ref().is_some_and(|old| old.state != new_pr.state);
                 if is_new {
                     if let Some(label) = fallback_label {
-                        eprintln!(
+                        swarm_log!(
                             "[swarm] PR detected (via actual branch '{label}'): #{} \"{}\" ({}) {}",
                             new_pr.number, new_pr.title, new_pr.state, new_pr.url
                         );
                     } else {
-                        eprintln!(
+                        swarm_log!(
                             "[swarm] PR detected: #{} \"{}\" ({}) {}",
                             new_pr.number, new_pr.title, new_pr.state, new_pr.url
                         );
                     }
                 } else if state_changed {
-                    eprintln!(
+                    swarm_log!(
                         "[swarm] PR updated: #{} state -> {} {}",
                         new_pr.number, new_pr.state, new_pr.url
                     );
@@ -2053,12 +2254,12 @@ fn try_pr_lookup_by_worktree_branches(
                 let is_new = wt.pr.is_none();
                 let state_changed = wt.pr.as_ref().is_some_and(|old| old.state != new_pr.state);
                 if is_new {
-                    eprintln!(
+                    swarm_log!(
                         "[swarm] PR detected (via worktree branch '{head_ref}'): #{} \"{}\" ({}) {}",
                         new_pr.number, new_pr.title, new_pr.state, new_pr.url
                     );
                 } else if state_changed {
-                    eprintln!(
+                    swarm_log!(
                         "[swarm] PR updated: #{} state -> {} {}",
                         new_pr.number, new_pr.state, new_pr.url
                     );
@@ -2155,7 +2356,7 @@ fn try_pr_lookup_by_number(
                 let newly_merged = new_pr.is_newly_merged(wt.pr.as_ref());
                 let state_changed = wt.pr.as_ref().is_some_and(|old| old.state != new_pr.state);
                 if state_changed {
-                    eprintln!(
+                    swarm_log!(
                         "[swarm] PR #{} state -> {} (direct lookup)",
                         new_pr.number, new_pr.state
                     );
@@ -2294,6 +2495,7 @@ mod tests {
             agent: None,
             terminals: vec![],
             pr: Some(make_pr("MERGED")),
+            phase: WorkerPhase::Running,
             summary: None,
             pending_prompt: None,
             agent_session_status: None,
@@ -2318,6 +2520,7 @@ mod tests {
             terminals: vec![],
             summary: None,
             pr: Some(make_pr("OPEN")),
+            phase: WorkerPhase::Completed,
             status: "done".to_string(),
             agent_session_status: None,
         };
@@ -2339,6 +2542,7 @@ mod tests {
             agent: None,
             terminals: vec![],
             pr: None,
+            phase: WorkerPhase::Waiting,
             summary: None,
             pending_prompt: None,
             agent_session_status: Some("waiting".to_string()),
@@ -2360,6 +2564,7 @@ mod tests {
             agent: None,
             terminals: vec![],
             pr: None,
+            phase: WorkerPhase::Running,
             summary: None,
             pending_prompt: None,
             agent_session_status: None,
@@ -2716,6 +2921,7 @@ mod tests {
             agent: None,
             terminals: vec![],
             pr: None,
+            phase: WorkerPhase::Running,
             summary: None,
             pending_prompt: None,
             agent_session_status: None,
@@ -2994,6 +3200,8 @@ mod tests {
             url: "https://github.com/org/repo/pull/42".to_string(),
         });
         wt.agent_session_status = Some("running".to_string());
+        // Backdate so the age guard (< 60s) doesn't skip the PR lookup
+        wt.created_at = Local::now() - chrono::TimeDelta::seconds(120);
         app.worktrees.push(wt);
 
         // Agent transitions to "waiting" (e.g., after PR was merged)
@@ -3048,5 +3256,106 @@ mod tests {
             "PR should remain untouched when no status transition occurred"
         );
         assert_eq!(app.worktrees[0].pr.as_ref().unwrap().state, "OPEN");
+    }
+
+    // ── Phase transition tests ─────────────────────────────
+
+    #[test]
+    fn to_state_computes_status_from_phase() {
+        let mut wt = make_test_worktree("test-1", AgentKind::Claude);
+
+        // Active phases → "running" status
+        for phase in &[
+            WorkerPhase::Creating,
+            WorkerPhase::Starting,
+            WorkerPhase::Running,
+            WorkerPhase::Waiting,
+        ] {
+            wt.phase = phase.clone();
+            let state = wt.to_state();
+            assert_eq!(
+                state.status, "running",
+                "phase {:?} should produce status=running",
+                phase
+            );
+        }
+
+        // Terminal phases → "done" status
+        for phase in &[WorkerPhase::Completed, WorkerPhase::Failed] {
+            wt.phase = phase.clone();
+            let state = wt.to_state();
+            assert_eq!(
+                state.status, "done",
+                "phase {:?} should produce status=done",
+                phase
+            );
+        }
+    }
+
+    #[test]
+    fn to_state_preserves_phase() {
+        let mut wt = make_test_worktree("test-1", AgentKind::Claude);
+        wt.phase = WorkerPhase::Waiting;
+        let state = wt.to_state();
+        assert_eq!(state.phase, WorkerPhase::Waiting);
+    }
+
+    #[test]
+    fn from_state_restores_phase() {
+        let ws = state::WorktreeState {
+            id: "test-1".to_string(),
+            branch: "swarm/test-1".to_string(),
+            prompt: "test".to_string(),
+            agent_kind: AgentKind::Claude,
+            repo_path: PathBuf::from("/tmp/repo"),
+            worktree_path: PathBuf::from("/tmp/wt"),
+            created_at: Local::now(),
+            agent: None,
+            terminals: vec![],
+            summary: None,
+            pr: None,
+            phase: WorkerPhase::Waiting,
+            status: "running".to_string(),
+            agent_session_status: None,
+        };
+        let wt = Worktree::from_state(&ws);
+        assert_eq!(wt.phase, WorkerPhase::Waiting);
+    }
+
+    #[test]
+    fn poll_agent_statuses_transitions_to_waiting() {
+        let dir = tempfile::tempdir().unwrap();
+        let work_dir = dir.path().to_path_buf();
+        let status_dir = work_dir.join(".swarm").join("agent-status");
+        std::fs::create_dir_all(&status_dir).unwrap();
+
+        let mut app = test_app(work_dir, vec![]);
+        let mut wt = make_test_worktree("hive-1", AgentKind::ClaudeTui);
+        wt.phase = WorkerPhase::Running;
+        app.worktrees.push(wt);
+
+        std::fs::write(status_dir.join("hive-1"), "waiting\n").unwrap();
+        app.poll_agent_statuses();
+
+        assert_eq!(app.worktrees[0].phase, WorkerPhase::Waiting);
+    }
+
+    #[test]
+    fn poll_agent_statuses_transitions_back_to_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let work_dir = dir.path().to_path_buf();
+        let status_dir = work_dir.join(".swarm").join("agent-status");
+        std::fs::create_dir_all(&status_dir).unwrap();
+
+        let mut app = test_app(work_dir, vec![]);
+        let mut wt = make_test_worktree("hive-1", AgentKind::ClaudeTui);
+        wt.phase = WorkerPhase::Waiting;
+        wt.agent_session_status = Some("waiting".to_string());
+        app.worktrees.push(wt);
+
+        std::fs::write(status_dir.join("hive-1"), "running\n").unwrap();
+        app.poll_agent_statuses();
+
+        assert_eq!(app.worktrees[0].phase, WorkerPhase::Running);
     }
 }

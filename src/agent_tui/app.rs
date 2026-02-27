@@ -15,6 +15,7 @@ pub enum ConversationEntry {
         input: String,
         output: Option<String>,
         is_error: bool,
+        collapsed: bool,
     },
     /// Status message (e.g. "Session started", "Rate limited").
     Status { text: String },
@@ -85,7 +86,7 @@ pub struct TuiApp {
     /// Whether we're currently receiving streaming text.
     pub is_streaming: bool,
     /// Scroll offset (0 = bottom, follows output).
-    pub scroll_offset: u16,
+    pub scroll_offset: u32,
     /// Whether auto-scroll is active (disabled when user scrolls up).
     pub auto_scroll: bool,
     /// Session status.
@@ -209,6 +210,7 @@ impl TuiApp {
                         input: input_str,
                         output: None,
                         is_error: false,
+                        collapsed: true,
                     });
                 }
                 ContentBlock::ToolResult {
@@ -340,14 +342,29 @@ impl TuiApp {
         std::mem::take(&mut self.input_buffer)
     }
 
+    // ── Tool collapse ──
+
+    /// Toggle all tool blocks: if any are collapsed, expand all; otherwise collapse all.
+    pub fn toggle_all_tools(&mut self) {
+        let any_collapsed = self.entries.iter().any(|e| {
+            matches!(e, ConversationEntry::ToolCall { collapsed: true, .. })
+        });
+        let new_state = !any_collapsed;
+        for entry in &mut self.entries {
+            if let ConversationEntry::ToolCall { collapsed, .. } = entry {
+                *collapsed = new_state;
+            }
+        }
+    }
+
     // ── Scrolling ──
 
-    pub fn scroll_up(&mut self, amount: u16) {
+    pub fn scroll_up(&mut self, amount: u32) {
         self.scroll_offset = self.scroll_offset.saturating_add(amount);
         self.auto_scroll = false;
     }
 
-    pub fn scroll_down(&mut self, amount: u16) {
+    pub fn scroll_down(&mut self, amount: u32) {
         self.scroll_offset = self.scroll_offset.saturating_sub(amount);
         if self.scroll_offset == 0 {
             self.auto_scroll = true;
@@ -377,5 +394,676 @@ fn truncate_output(output: &str, max_lines: usize) -> String {
             kept.join("\n"),
             lines.len() - max_lines
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn make_app() -> (TuiApp, mpsc::UnboundedSender<SdkEvent>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        (TuiApp::new(rx), tx)
+    }
+
+    // ── truncate_output ──
+
+    #[test]
+    fn truncate_output_short() {
+        assert_eq!(truncate_output("a\nb\nc", 5), "a\nb\nc");
+    }
+
+    #[test]
+    fn truncate_output_exact_limit() {
+        assert_eq!(truncate_output("a\nb\nc", 3), "a\nb\nc");
+    }
+
+    #[test]
+    fn truncate_output_over_limit() {
+        let result = truncate_output("1\n2\n3\n4\n5", 2);
+        assert_eq!(result, "1\n2\n... (3 more lines)");
+    }
+
+    #[test]
+    fn truncate_output_empty() {
+        assert_eq!(truncate_output("", 5), "");
+    }
+
+    // ── Scrolling ──
+
+    #[test]
+    fn scroll_up_disables_auto_scroll() {
+        let (mut app, _tx) = make_app();
+        assert!(app.auto_scroll);
+        app.scroll_up(5);
+        assert_eq!(app.scroll_offset, 5);
+        assert!(!app.auto_scroll);
+    }
+
+    #[test]
+    fn scroll_down_to_zero_re_enables_auto_scroll() {
+        let (mut app, _tx) = make_app();
+        app.scroll_up(10);
+        assert!(!app.auto_scroll);
+        app.scroll_down(10);
+        assert_eq!(app.scroll_offset, 0);
+        assert!(app.auto_scroll);
+    }
+
+    #[test]
+    fn scroll_down_partial_stays_manual() {
+        let (mut app, _tx) = make_app();
+        app.scroll_up(10);
+        app.scroll_down(3);
+        assert_eq!(app.scroll_offset, 7);
+        assert!(!app.auto_scroll);
+    }
+
+    #[test]
+    fn scroll_down_saturates_at_zero() {
+        let (mut app, _tx) = make_app();
+        app.scroll_up(2);
+        app.scroll_down(100);
+        assert_eq!(app.scroll_offset, 0);
+        assert!(app.auto_scroll);
+    }
+
+    #[test]
+    fn scroll_to_bottom_resets() {
+        let (mut app, _tx) = make_app();
+        app.scroll_up(50);
+        app.scroll_to_bottom();
+        assert_eq!(app.scroll_offset, 0);
+        assert!(app.auto_scroll);
+    }
+
+    // ── Input handling ──
+
+    #[test]
+    fn input_char_ascii() {
+        let (mut app, _tx) = make_app();
+        app.input_char('h');
+        app.input_char('i');
+        assert_eq!(app.input_buffer, "hi");
+        assert_eq!(app.input_cursor, 2);
+    }
+
+    #[test]
+    fn input_char_multibyte_utf8() {
+        let (mut app, _tx) = make_app();
+        app.input_char('🐝');
+        assert_eq!(app.input_buffer, "🐝");
+        assert_eq!(app.input_cursor, 4); // 🐝 is 4 bytes
+        app.input_char('!');
+        assert_eq!(app.input_buffer, "🐝!");
+        assert_eq!(app.input_cursor, 5);
+    }
+
+    #[test]
+    fn input_backspace_ascii() {
+        let (mut app, _tx) = make_app();
+        app.input_char('a');
+        app.input_char('b');
+        app.input_backspace();
+        assert_eq!(app.input_buffer, "a");
+        assert_eq!(app.input_cursor, 1);
+    }
+
+    #[test]
+    fn input_backspace_multibyte() {
+        let (mut app, _tx) = make_app();
+        app.input_char('a');
+        app.input_char('é'); // 2-byte UTF-8
+        app.input_backspace();
+        assert_eq!(app.input_buffer, "a");
+        assert_eq!(app.input_cursor, 1);
+    }
+
+    #[test]
+    fn input_backspace_at_start_is_noop() {
+        let (mut app, _tx) = make_app();
+        app.input_backspace(); // should not panic
+        assert_eq!(app.input_buffer, "");
+        assert_eq!(app.input_cursor, 0);
+    }
+
+    #[test]
+    fn input_cursor_movement() {
+        let (mut app, _tx) = make_app();
+        app.input_char('a');
+        app.input_char('b');
+        app.input_char('c');
+        // cursor at end (3)
+        app.input_cursor_left();
+        assert_eq!(app.input_cursor, 2);
+        app.input_cursor_left();
+        assert_eq!(app.input_cursor, 1);
+        app.input_cursor_right();
+        assert_eq!(app.input_cursor, 2);
+    }
+
+    #[test]
+    fn input_cursor_left_at_start_is_noop() {
+        let (mut app, _tx) = make_app();
+        app.input_char('x');
+        app.input_cursor_left();
+        app.input_cursor_left(); // already at 0
+        assert_eq!(app.input_cursor, 0);
+    }
+
+    #[test]
+    fn input_cursor_right_at_end_is_noop() {
+        let (mut app, _tx) = make_app();
+        app.input_char('x');
+        app.input_cursor_right(); // already at end
+        assert_eq!(app.input_cursor, 1);
+    }
+
+    #[test]
+    fn input_cursor_movement_multibyte() {
+        let (mut app, _tx) = make_app();
+        app.input_char('a');
+        app.input_char('🐝'); // 4 bytes
+        app.input_char('b');
+        // buffer: "a🐝b", cursor at 6
+        app.input_cursor_left(); // back over 'b' → 5
+        assert_eq!(app.input_cursor, 5);
+        app.input_cursor_left(); // back over 🐝 → 1
+        assert_eq!(app.input_cursor, 1);
+        app.input_cursor_right(); // forward over 🐝 → 5
+        assert_eq!(app.input_cursor, 5);
+    }
+
+    #[test]
+    fn input_insert_at_middle() {
+        let (mut app, _tx) = make_app();
+        app.input_char('a');
+        app.input_char('c');
+        app.input_cursor_left(); // cursor between 'a' and 'c'
+        app.input_char('b');
+        assert_eq!(app.input_buffer, "abc");
+    }
+
+    #[test]
+    fn take_input_returns_and_clears() {
+        let (mut app, _tx) = make_app();
+        app.input_char('h');
+        app.input_char('i');
+        let text = app.take_input();
+        assert_eq!(text, "hi");
+        assert_eq!(app.input_buffer, "");
+        assert_eq!(app.input_cursor, 0);
+    }
+
+    // ── SDK event handling ──
+
+    #[test]
+    fn thinking_delta_sets_thinking_status() {
+        let (mut app, tx) = make_app();
+        tx.send(SdkEvent::ThinkingDelta).unwrap();
+        app.drain_sdk_events();
+        assert_eq!(app.status, SessionStatus::Thinking);
+    }
+
+    #[test]
+    fn system_event_sets_model() {
+        let (mut app, tx) = make_app();
+        tx.send(SdkEvent::System {
+            model: Some("opus-4".into()),
+        })
+        .unwrap();
+        app.drain_sdk_events();
+        assert_eq!(app.model, Some("opus-4".into()));
+        assert_eq!(app.status, SessionStatus::Streaming);
+    }
+
+    #[test]
+    fn text_delta_accumulates_streaming() {
+        let (mut app, tx) = make_app();
+        tx.send(SdkEvent::TextDelta("hello ".into())).unwrap();
+        tx.send(SdkEvent::TextDelta("world".into())).unwrap();
+        app.drain_sdk_events();
+        assert_eq!(app.streaming_text, "hello world");
+        assert!(app.is_streaming);
+        assert_eq!(app.status, SessionStatus::Streaming);
+        // No entries yet — not flushed
+        assert!(app.entries.is_empty());
+    }
+
+    #[test]
+    fn turn_complete_flushes_streaming_text() {
+        let (mut app, tx) = make_app();
+        tx.send(SdkEvent::TextDelta("streamed text".into()))
+            .unwrap();
+        tx.send(SdkEvent::TurnComplete).unwrap();
+        app.drain_sdk_events();
+        assert!(!app.is_streaming);
+        assert_eq!(app.streaming_text, "");
+        assert_eq!(app.turn_count, 1);
+        assert_eq!(app.status, SessionStatus::Idle);
+        assert!(matches!(
+            &app.entries[0],
+            ConversationEntry::AssistantText { text } if text == "streamed text"
+        ));
+    }
+
+    #[test]
+    fn content_block_text_deduplicates_streamed() {
+        let (mut app, tx) = make_app();
+        // Simulate streaming then ContentBlock::Text with same content
+        tx.send(SdkEvent::TextDelta("hello".into())).unwrap();
+        tx.send(SdkEvent::ContentBlock(ContentBlock::Text {
+            text: "hello".into(),
+        }))
+        .unwrap();
+        app.drain_sdk_events();
+        // Should only have one entry (the flushed streaming text)
+        assert_eq!(app.entries.len(), 1);
+    }
+
+    #[test]
+    fn content_block_text_adds_when_not_streamed() {
+        let (mut app, tx) = make_app();
+        tx.send(SdkEvent::ContentBlock(ContentBlock::Text {
+            text: "direct text".into(),
+        }))
+        .unwrap();
+        app.drain_sdk_events();
+        assert_eq!(app.entries.len(), 1);
+        assert!(matches!(
+            &app.entries[0],
+            ConversationEntry::AssistantText { text } if text == "direct text"
+        ));
+    }
+
+    #[test]
+    fn tool_use_creates_tool_call_entry() {
+        let (mut app, tx) = make_app();
+        tx.send(SdkEvent::ContentBlock(ContentBlock::ToolUse {
+            id: "t1".into(),
+            name: "Bash".into(),
+            input: json!({"command": "ls -la"}),
+        }))
+        .unwrap();
+        app.drain_sdk_events();
+        assert_eq!(app.tool_count, 1);
+        assert_eq!(app.status, SessionStatus::ToolRunning);
+        assert!(matches!(
+            &app.entries[0],
+            ConversationEntry::ToolCall { tool, input, output: None, collapsed: true, .. }
+            if tool == "Bash" && input == "ls -la"
+        ));
+    }
+
+    #[test]
+    fn tool_use_extracts_file_path() {
+        let (mut app, tx) = make_app();
+        tx.send(SdkEvent::ContentBlock(ContentBlock::ToolUse {
+            id: "t1".into(),
+            name: "Read".into(),
+            input: json!({"file_path": "/src/main.rs"}),
+        }))
+        .unwrap();
+        app.drain_sdk_events();
+        assert!(matches!(
+            &app.entries[0],
+            ConversationEntry::ToolCall { input, .. } if input == "/src/main.rs"
+        ));
+    }
+
+    #[test]
+    fn tool_use_extracts_pattern() {
+        let (mut app, tx) = make_app();
+        tx.send(SdkEvent::ContentBlock(ContentBlock::ToolUse {
+            id: "t1".into(),
+            name: "Grep".into(),
+            input: json!({"pattern": "fn main"}),
+        }))
+        .unwrap();
+        app.drain_sdk_events();
+        assert!(matches!(
+            &app.entries[0],
+            ConversationEntry::ToolCall { input, .. } if input == "fn main"
+        ));
+    }
+
+    #[test]
+    fn tool_result_updates_last_tool_call() {
+        let (mut app, tx) = make_app();
+        tx.send(SdkEvent::ContentBlock(ContentBlock::ToolUse {
+            id: "t1".into(),
+            name: "Bash".into(),
+            input: json!({"command": "echo hi"}),
+        }))
+        .unwrap();
+        tx.send(SdkEvent::ContentBlock(ContentBlock::ToolResult {
+            tool_use_id: "t1".into(),
+            content: Some(json!("hi")),
+            is_error: Some(false),
+        }))
+        .unwrap();
+        app.drain_sdk_events();
+        assert!(matches!(
+            &app.entries[0],
+            ConversationEntry::ToolCall { output: Some(out), is_error: false, .. }
+            if out == "hi"
+        ));
+        assert_eq!(app.status, SessionStatus::Streaming);
+    }
+
+    #[test]
+    fn tool_result_error_flag() {
+        let (mut app, tx) = make_app();
+        tx.send(SdkEvent::ContentBlock(ContentBlock::ToolUse {
+            id: "t1".into(),
+            name: "Bash".into(),
+            input: json!({"command": "exit 1"}),
+        }))
+        .unwrap();
+        tx.send(SdkEvent::ContentBlock(ContentBlock::ToolResult {
+            tool_use_id: "t1".into(),
+            content: Some(json!("failed")),
+            is_error: Some(true),
+        }))
+        .unwrap();
+        app.drain_sdk_events();
+        assert!(matches!(
+            &app.entries[0],
+            ConversationEntry::ToolCall { is_error: true, .. }
+        ));
+    }
+
+    #[test]
+    fn result_event_sets_done_status() {
+        let (mut app, tx) = make_app();
+        tx.send(SdkEvent::Result {
+            turns: 5,
+            cost_usd: Some(0.12),
+            session_id: "sess-1".into(),
+            is_error: false,
+        })
+        .unwrap();
+        app.drain_sdk_events();
+        assert_eq!(app.status, SessionStatus::Done);
+        assert_eq!(app.turn_count, 5);
+        assert_eq!(app.cost_usd, Some(0.12));
+        assert_eq!(app.session_id, Some("sess-1".into()));
+    }
+
+    #[test]
+    fn result_event_error_sets_errored() {
+        let (mut app, tx) = make_app();
+        tx.send(SdkEvent::Result {
+            turns: 1,
+            cost_usd: None,
+            session_id: "s".into(),
+            is_error: true,
+        })
+        .unwrap();
+        app.drain_sdk_events();
+        assert_eq!(app.status, SessionStatus::Errored);
+    }
+
+    #[test]
+    fn session_waiting_sets_waiting_status() {
+        let (mut app, tx) = make_app();
+        tx.send(SdkEvent::SessionWaiting {
+            session_id: "sess-w".into(),
+        })
+        .unwrap();
+        app.drain_sdk_events();
+        assert_eq!(app.status, SessionStatus::Waiting);
+        assert_eq!(app.session_id, Some("sess-w".into()));
+        assert!(matches!(
+            &app.entries[0],
+            ConversationEntry::Status { text } if text.contains("Waiting")
+        ));
+    }
+
+    #[test]
+    fn error_event_sets_errored_and_adds_status() {
+        let (mut app, tx) = make_app();
+        tx.send(SdkEvent::Error("something broke".into()))
+            .unwrap();
+        app.drain_sdk_events();
+        assert_eq!(app.status, SessionStatus::Errored);
+        assert!(matches!(
+            &app.entries[0],
+            ConversationEntry::Status { text } if text == "Error: something broke"
+        ));
+    }
+
+    #[test]
+    fn error_flushes_streaming_text() {
+        let (mut app, tx) = make_app();
+        tx.send(SdkEvent::TextDelta("partial ".into())).unwrap();
+        tx.send(SdkEvent::Error("crash".into())).unwrap();
+        app.drain_sdk_events();
+        // Streaming text should be flushed before error
+        assert_eq!(app.entries.len(), 2);
+        assert!(matches!(
+            &app.entries[0],
+            ConversationEntry::AssistantText { text } if text == "partial "
+        ));
+        assert!(matches!(
+            &app.entries[1],
+            ConversationEntry::Status { text } if text.contains("crash")
+        ));
+    }
+
+    // ── add_user_message ──
+
+    #[test]
+    fn add_user_message_sets_streaming() {
+        let (mut app, _tx) = make_app();
+        app.add_user_message("hello".into());
+        assert_eq!(app.status, SessionStatus::Streaming);
+        assert!(matches!(
+            &app.entries[0],
+            ConversationEntry::User { text } if text == "hello"
+        ));
+    }
+
+    // ── Tool collapse ──
+
+    #[test]
+    fn toggle_tools_expands_all_when_any_collapsed() {
+        let (mut app, _tx) = make_app();
+        app.entries.push(ConversationEntry::ToolCall {
+            tool: "A".into(),
+            input: "".into(),
+            output: None,
+            is_error: false,
+            collapsed: true,
+        });
+        app.entries.push(ConversationEntry::ToolCall {
+            tool: "B".into(),
+            input: "".into(),
+            output: None,
+            is_error: false,
+            collapsed: false,
+        });
+        app.toggle_all_tools();
+        // Any was collapsed → expand all (collapsed = false)
+        for entry in &app.entries {
+            if let ConversationEntry::ToolCall { collapsed, .. } = entry {
+                assert!(!collapsed);
+            }
+        }
+    }
+
+    #[test]
+    fn toggle_tools_collapses_all_when_none_collapsed() {
+        let (mut app, _tx) = make_app();
+        app.entries.push(ConversationEntry::ToolCall {
+            tool: "A".into(),
+            input: "".into(),
+            output: None,
+            is_error: false,
+            collapsed: false,
+        });
+        app.entries.push(ConversationEntry::ToolCall {
+            tool: "B".into(),
+            input: "".into(),
+            output: None,
+            is_error: false,
+            collapsed: false,
+        });
+        app.toggle_all_tools();
+        for entry in &app.entries {
+            if let ConversationEntry::ToolCall { collapsed, .. } = entry {
+                assert!(collapsed);
+            }
+        }
+    }
+
+    #[test]
+    fn toggle_tools_no_tools_is_noop() {
+        let (mut app, _tx) = make_app();
+        app.entries.push(ConversationEntry::AssistantText {
+            text: "hi".into(),
+        });
+        app.toggle_all_tools(); // should not panic
+        assert_eq!(app.entries.len(), 1);
+    }
+
+    // ── drain_sdk_events ──
+
+    #[test]
+    fn drain_returns_forwarded_events() {
+        let (mut app, tx) = make_app();
+        tx.send(SdkEvent::ThinkingDelta).unwrap();
+        tx.send(SdkEvent::TextDelta("x".into())).unwrap();
+        let events = app.drain_sdk_events();
+        assert_eq!(events.len(), 2);
+    }
+
+    #[test]
+    fn drain_empty_channel_returns_empty() {
+        let (mut app, _tx) = make_app();
+        let events = app.drain_sdk_events();
+        assert!(events.is_empty());
+    }
+
+    // ── Full conversation flow ──
+
+    #[test]
+    fn full_conversation_flow() {
+        let (mut app, tx) = make_app();
+
+        // System
+        tx.send(SdkEvent::System {
+            model: Some("opus".into()),
+        })
+        .unwrap();
+
+        // Streaming response
+        tx.send(SdkEvent::TextDelta("I'll ".into())).unwrap();
+        tx.send(SdkEvent::TextDelta("help.".into())).unwrap();
+
+        // Tool use
+        tx.send(SdkEvent::ContentBlock(ContentBlock::ToolUse {
+            id: "t1".into(),
+            name: "Read".into(),
+            input: json!({"file_path": "main.rs"}),
+        }))
+        .unwrap();
+
+        tx.send(SdkEvent::ContentBlock(ContentBlock::ToolResult {
+            tool_use_id: "t1".into(),
+            content: Some(json!("fn main() {}")),
+            is_error: Some(false),
+        }))
+        .unwrap();
+
+        // More text
+        tx.send(SdkEvent::TextDelta("Done!".into())).unwrap();
+        tx.send(SdkEvent::TurnComplete).unwrap();
+
+        // Result
+        tx.send(SdkEvent::Result {
+            turns: 3,
+            cost_usd: Some(0.05),
+            session_id: "s1".into(),
+            is_error: false,
+        })
+        .unwrap();
+
+        // Waiting
+        tx.send(SdkEvent::SessionWaiting {
+            session_id: "s1".into(),
+        })
+        .unwrap();
+
+        app.drain_sdk_events();
+
+        assert_eq!(app.model, Some("opus".into()));
+        assert_eq!(app.tool_count, 1);
+        assert_eq!(app.turn_count, 3);
+        assert_eq!(app.cost_usd, Some(0.05));
+        assert_eq!(app.session_id, Some("s1".into()));
+        assert_eq!(app.status, SessionStatus::Waiting);
+
+        // Check entries: AssistantText("I'll help."), ToolCall, AssistantText("Done!"), Status(waiting)
+        assert_eq!(app.entries.len(), 4);
+        assert!(matches!(
+            &app.entries[0],
+            ConversationEntry::AssistantText { text } if text == "I'll help."
+        ));
+        assert!(matches!(
+            &app.entries[1],
+            ConversationEntry::ToolCall { tool, .. } if tool == "Read"
+        ));
+        assert!(matches!(
+            &app.entries[2],
+            ConversationEntry::AssistantText { text } if text == "Done!"
+        ));
+        assert!(matches!(&app.entries[3], ConversationEntry::Status { .. }));
+    }
+
+    // ── tick ──
+
+    #[test]
+    fn tick_increments() {
+        let (mut app, _tx) = make_app();
+        assert_eq!(app.tick_count, 0);
+        app.tick();
+        app.tick();
+        assert_eq!(app.tick_count, 2);
+    }
+
+    #[test]
+    fn tick_wraps() {
+        let (mut app, _tx) = make_app();
+        app.tick_count = u64::MAX;
+        app.tick();
+        assert_eq!(app.tick_count, 0);
+    }
+
+    // ── Tool use flushes streaming ──
+
+    #[test]
+    fn tool_use_flushes_streaming_text() {
+        let (mut app, tx) = make_app();
+        tx.send(SdkEvent::TextDelta("before tool".into()))
+            .unwrap();
+        tx.send(SdkEvent::ContentBlock(ContentBlock::ToolUse {
+            id: "t1".into(),
+            name: "Bash".into(),
+            input: json!({"command": "ls"}),
+        }))
+        .unwrap();
+        app.drain_sdk_events();
+        // Streaming text flushed as entry[0], tool call as entry[1]
+        assert_eq!(app.entries.len(), 2);
+        assert!(matches!(
+            &app.entries[0],
+            ConversationEntry::AssistantText { text } if text == "before tool"
+        ));
+        assert!(matches!(
+            &app.entries[1],
+            ConversationEntry::ToolCall { tool, .. } if tool == "Bash"
+        ));
     }
 }
