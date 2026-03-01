@@ -1,4 +1,5 @@
 use apiari_claude_sdk::types::ContentBlock;
+use ratatui::layout::Rect;
 use std::time::Instant;
 use tokio::sync::mpsc;
 
@@ -115,6 +116,14 @@ pub struct TuiApp {
     pub last_event_at: Instant,
     /// Tick counter for animations.
     pub tick_count: u64,
+    /// Entry index of the currently focused ToolCall (for Tab/Enter navigation).
+    pub focused_tool: Option<usize>,
+    /// (start_line, line_count) per entry, built during render.
+    pub entry_line_map: Vec<(u32, u32)>,
+    /// Total logical line count from last render.
+    pub total_rendered_lines: u32,
+    /// Conversation area rect from last render (for mouse hit-testing).
+    pub conversation_area: Rect,
 }
 
 impl TuiApp {
@@ -138,6 +147,10 @@ impl TuiApp {
             viewport_height: 0,
             last_event_at: Instant::now(),
             tick_count: 0,
+            focused_tool: None,
+            entry_line_map: Vec::new(),
+            total_rendered_lines: 0,
+            conversation_area: Rect::default(),
         }
     }
 
@@ -355,6 +368,165 @@ impl TuiApp {
                 *collapsed = new_state;
             }
         }
+    }
+
+    // ── Individual tool focus ──
+
+    /// Collect indices of ToolCall entries.
+    fn tool_indices(&self) -> Vec<usize> {
+        self.entries
+            .iter()
+            .enumerate()
+            .filter_map(|(i, e)| {
+                if matches!(e, ConversationEntry::ToolCall { .. }) {
+                    Some(i)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// Tab: focus the next ToolCall after current (wraps around).
+    pub fn focus_next_tool(&mut self) {
+        let tools = self.tool_indices();
+        if tools.is_empty() {
+            return;
+        }
+        self.focused_tool = Some(match self.focused_tool {
+            None => tools[0],
+            Some(cur) => {
+                // Find first tool index strictly after `cur`
+                match tools.iter().find(|&&i| i > cur) {
+                    Some(&next) => next,
+                    None => tools[0], // wrap
+                }
+            }
+        });
+    }
+
+    /// Shift-Tab: focus the previous ToolCall (wraps around).
+    pub fn focus_prev_tool(&mut self) {
+        let tools = self.tool_indices();
+        if tools.is_empty() {
+            return;
+        }
+        self.focused_tool = Some(match self.focused_tool {
+            None => *tools.last().unwrap(),
+            Some(cur) => {
+                // Find last tool index strictly before `cur`
+                match tools.iter().rev().find(|&&i| i < cur) {
+                    Some(&prev) => prev,
+                    None => *tools.last().unwrap(), // wrap
+                }
+            }
+        });
+    }
+
+    /// Enter: flip the collapsed state of the focused tool.
+    pub fn toggle_focused_tool(&mut self) {
+        if let Some(idx) = self.focused_tool
+            && let Some(ConversationEntry::ToolCall { collapsed, .. }) = self.entries.get_mut(idx)
+        {
+            *collapsed = !*collapsed;
+        }
+    }
+
+    /// Mouse click: flip tool at entry index and set focus.
+    pub fn toggle_tool_at(&mut self, idx: usize) {
+        if let Some(ConversationEntry::ToolCall { collapsed, .. }) = self.entries.get_mut(idx) {
+            *collapsed = !*collapsed;
+            self.focused_tool = Some(idx);
+        }
+    }
+
+    /// Esc: clear the focused tool indicator.
+    pub fn clear_focus(&mut self) {
+        self.focused_tool = None;
+    }
+
+    /// After focus change, adjust scroll so the focused tool is visible.
+    pub fn scroll_to_focused(&mut self) {
+        let idx = match self.focused_tool {
+            Some(i) => i,
+            None => return,
+        };
+        if idx >= self.entry_line_map.len() {
+            return;
+        }
+        let (start, count) = self.entry_line_map[idx];
+        let visible = self.viewport_height as u32;
+        if visible == 0 || self.total_rendered_lines <= visible {
+            return;
+        }
+        let max_scroll = self.total_rendered_lines.saturating_sub(visible);
+        // Current top line: when auto_scroll, top = max_scroll (bottom-pinned).
+        // scroll_offset counts lines UP from the bottom, so top = max_scroll - scroll_offset.
+        let top = if self.auto_scroll {
+            max_scroll
+        } else {
+            max_scroll.saturating_sub(self.scroll_offset)
+        };
+        let bottom = top + visible;
+
+        if start < top {
+            // Need to scroll up to show the entry
+            let new_top = start;
+            self.scroll_offset = max_scroll.saturating_sub(new_top);
+            self.auto_scroll = false;
+        } else if start + count > bottom {
+            // Need to scroll down to show the entry
+            let new_top = (start + count).saturating_sub(visible);
+            self.scroll_offset = max_scroll.saturating_sub(new_top);
+            self.auto_scroll = self.scroll_offset == 0;
+        }
+    }
+
+    /// Clear focus if index is out of bounds or no longer a ToolCall.
+    pub fn validate_focus(&mut self) {
+        if let Some(idx) = self.focused_tool {
+            match self.entries.get(idx) {
+                Some(ConversationEntry::ToolCall { .. }) => {} // valid
+                _ => self.focused_tool = None,
+            }
+        }
+    }
+
+    /// Map a terminal row (from mouse click) to an entry index, if it's a ToolCall.
+    pub fn entry_at_row(&self, row: u16) -> Option<usize> {
+        // Convert terminal row to inner rect row
+        let inner_top = self.conversation_area.y;
+        let inner_height = self.conversation_area.height;
+        if row < inner_top || row >= inner_top + inner_height {
+            return None;
+        }
+        let visible_row = (row - inner_top) as u32;
+
+        // Calculate the top logical line (same as in render)
+        let visible = inner_height as u32;
+        if self.total_rendered_lines == 0 {
+            return None;
+        }
+        let max_scroll = self.total_rendered_lines.saturating_sub(visible);
+        let top = if self.auto_scroll {
+            max_scroll
+        } else {
+            max_scroll.saturating_sub(self.scroll_offset)
+        };
+
+        let logical_line = top + visible_row;
+
+        // Binary search entry_line_map for the entry containing this logical line
+        for (i, &(start, count)) in self.entry_line_map.iter().enumerate() {
+            if logical_line >= start && logical_line < start + count {
+                // Only return if it's a ToolCall
+                if matches!(self.entries.get(i), Some(ConversationEntry::ToolCall { .. })) {
+                    return Some(i);
+                }
+                return None;
+            }
+        }
+        None
     }
 
     // ── Scrolling ──
@@ -1065,5 +1237,156 @@ mod tests {
             &app.entries[1],
             ConversationEntry::ToolCall { tool, .. } if tool == "Bash"
         ));
+    }
+
+    // ── Individual tool focus ──
+
+    fn make_tool(name: &str) -> ConversationEntry {
+        ConversationEntry::ToolCall {
+            tool: name.into(),
+            input: "test".into(),
+            output: None,
+            is_error: false,
+            collapsed: true,
+        }
+    }
+
+    fn make_text(s: &str) -> ConversationEntry {
+        ConversationEntry::AssistantText { text: s.into() }
+    }
+
+    #[test]
+    fn focus_next_no_tools_is_noop() {
+        let (mut app, _tx) = make_app();
+        app.entries.push(make_text("hello"));
+        app.focus_next_tool();
+        assert_eq!(app.focused_tool, None);
+    }
+
+    #[test]
+    fn focus_next_first_tool() {
+        let (mut app, _tx) = make_app();
+        app.entries.push(make_text("hello"));
+        app.entries.push(make_tool("Bash"));
+        app.focus_next_tool();
+        assert_eq!(app.focused_tool, Some(1));
+    }
+
+    #[test]
+    fn focus_next_wraps() {
+        let (mut app, _tx) = make_app();
+        app.entries.push(make_tool("Bash"));
+        app.entries.push(make_text("text"));
+        app.entries.push(make_tool("Read"));
+        // Focus last tool
+        app.focused_tool = Some(2);
+        app.focus_next_tool();
+        // Should wrap to first tool
+        assert_eq!(app.focused_tool, Some(0));
+    }
+
+    #[test]
+    fn focus_prev_wraps() {
+        let (mut app, _tx) = make_app();
+        app.entries.push(make_tool("Bash"));
+        app.entries.push(make_text("text"));
+        app.entries.push(make_tool("Read"));
+        // Focus first tool
+        app.focused_tool = Some(0);
+        app.focus_prev_tool();
+        // Should wrap to last tool
+        assert_eq!(app.focused_tool, Some(2));
+    }
+
+    #[test]
+    fn focus_prev_no_focus() {
+        let (mut app, _tx) = make_app();
+        app.entries.push(make_tool("Bash"));
+        app.entries.push(make_tool("Read"));
+        // No current focus
+        app.focus_prev_tool();
+        // Should go to last tool
+        assert_eq!(app.focused_tool, Some(1));
+    }
+
+    #[test]
+    fn focus_skips_non_tool_entries() {
+        let (mut app, _tx) = make_app();
+        app.entries.push(make_text("text1"));
+        app.entries.push(make_tool("Bash")); // index 1
+        app.entries.push(make_text("text2"));
+        app.entries.push(ConversationEntry::Status {
+            text: "status".into(),
+        });
+        app.entries.push(make_tool("Read")); // index 4
+        app.entries.push(make_text("text3"));
+
+        // First Tab → index 1
+        app.focus_next_tool();
+        assert_eq!(app.focused_tool, Some(1));
+        // Second Tab → index 4 (skips text and status)
+        app.focus_next_tool();
+        assert_eq!(app.focused_tool, Some(4));
+        // Third Tab → wraps to index 1
+        app.focus_next_tool();
+        assert_eq!(app.focused_tool, Some(1));
+    }
+
+    #[test]
+    fn toggle_focused_tool() {
+        let (mut app, _tx) = make_app();
+        app.entries.push(make_tool("Bash"));
+        app.focused_tool = Some(0);
+        // Initially collapsed
+        assert!(matches!(
+            &app.entries[0],
+            ConversationEntry::ToolCall { collapsed: true, .. }
+        ));
+        app.toggle_focused_tool();
+        assert!(matches!(
+            &app.entries[0],
+            ConversationEntry::ToolCall { collapsed: false, .. }
+        ));
+        app.toggle_focused_tool();
+        assert!(matches!(
+            &app.entries[0],
+            ConversationEntry::ToolCall { collapsed: true, .. }
+        ));
+    }
+
+    #[test]
+    fn clear_focus_test() {
+        let (mut app, _tx) = make_app();
+        app.entries.push(make_tool("Bash"));
+        app.focused_tool = Some(0);
+        app.clear_focus();
+        assert_eq!(app.focused_tool, None);
+    }
+
+    #[test]
+    fn validate_focus_clears_invalid() {
+        let (mut app, _tx) = make_app();
+        app.entries.push(make_tool("Bash"));
+        app.focused_tool = Some(5); // out of bounds
+        app.validate_focus();
+        assert_eq!(app.focused_tool, None);
+    }
+
+    #[test]
+    fn validate_focus_clears_non_tool() {
+        let (mut app, _tx) = make_app();
+        app.entries.push(make_text("hello"));
+        app.focused_tool = Some(0); // points to text, not tool
+        app.validate_focus();
+        assert_eq!(app.focused_tool, None);
+    }
+
+    #[test]
+    fn validate_focus_keeps_valid() {
+        let (mut app, _tx) = make_app();
+        app.entries.push(make_tool("Bash"));
+        app.focused_tool = Some(0);
+        app.validate_focus();
+        assert_eq!(app.focused_tool, Some(0));
     }
 }

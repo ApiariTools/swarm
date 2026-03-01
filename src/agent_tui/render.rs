@@ -1,4 +1,5 @@
 use crate::agent_tui::app::{ConversationEntry, InputMode, SessionStatus, TuiApp};
+use crate::agent_tui::markdown;
 use crate::tui::theme;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -46,12 +47,16 @@ fn draw_title_bar(frame: &mut Frame, area: Rect) {
     frame.render_widget(Paragraph::new(title), area);
 }
 
-fn draw_conversation(frame: &mut Frame, area: Rect, app: &TuiApp) {
+fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut TuiApp) {
     let block = Block::default().padding(Padding::new(0, 0, 0, 2));
     let inner = block.inner(area);
+    app.conversation_area = inner;
     let mut lines: Vec<Line<'_>> = Vec::new();
+    let mut entry_line_map: Vec<(u32, u32)> = Vec::with_capacity(app.entries.len());
 
     for (i, entry) in app.entries.iter().enumerate() {
+        let start = lines.len() as u32;
+        let is_focused = app.focused_tool == Some(i);
         match entry {
             ConversationEntry::User { text } => {
                 lines.push(Line::from(""));
@@ -81,12 +86,7 @@ fn draw_conversation(frame: &mut Frame, area: Rect, app: &TuiApp) {
                             .add_modifier(Modifier::BOLD),
                     )));
                 }
-                for line in text.lines() {
-                    lines.push(Line::from(Span::styled(
-                        format!("  {}", line),
-                        theme::text(),
-                    )));
-                }
+                lines.extend(markdown::render_markdown(text));
             }
             ConversationEntry::ToolCall {
                 tool,
@@ -95,6 +95,14 @@ fn draw_conversation(frame: &mut Frame, area: Rect, app: &TuiApp) {
                 is_error,
                 collapsed,
             } => {
+                let focus_prefix = if is_focused { "▶ " } else { "  " };
+                let tool_style = if is_focused {
+                    Style::default()
+                        .fg(theme::HONEY)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    theme::tool_name()
+                };
                 if *collapsed {
                     // Collapsed: single-line summary
                     let (icon, icon_style) = if output.is_none() {
@@ -107,8 +115,8 @@ fn draw_conversation(frame: &mut Frame, area: Rect, app: &TuiApp) {
                     let preview = input.lines().next().unwrap_or("").chars().take(50).collect::<String>();
                     let ellipsis = if input.lines().next().is_some_and(|l| l.len() > 50) { "..." } else { "" };
                     lines.push(Line::from(vec![
-                        Span::styled(format!("  {} ", icon), icon_style),
-                        Span::styled(tool.as_str(), theme::tool_name()),
+                        Span::styled(format!("{}{} ", focus_prefix, icon), icon_style),
+                        Span::styled(tool.as_str(), tool_style),
                         Span::styled(format!("  {}{}", preview, ellipsis), theme::muted()),
                     ]));
                 } else {
@@ -116,8 +124,8 @@ fn draw_conversation(frame: &mut Frame, area: Rect, app: &TuiApp) {
                     lines.push(Line::from(""));
                     // Tool header
                     lines.push(Line::from(vec![
-                        Span::styled("  ", theme::muted()),
-                        Span::styled(format!(" {} ", tool), theme::tool_name()),
+                        Span::styled(focus_prefix, theme::muted()),
+                        Span::styled(format!(" {} ", tool), tool_style),
                         Span::styled(
                             " ────────────────────────────",
                             Style::default().fg(theme::STEEL),
@@ -174,6 +182,8 @@ fn draw_conversation(frame: &mut Frame, area: Rect, app: &TuiApp) {
                 )));
             }
         }
+        let count = lines.len() as u32 - start;
+        entry_line_map.push((start, count));
     }
 
     // Streaming text (not yet flushed)
@@ -214,6 +224,9 @@ fn draw_conversation(frame: &mut Frame, area: Rect, app: &TuiApp) {
                 .add_modifier(Modifier::BOLD),
         )));
     }
+
+    app.entry_line_map = entry_line_map;
+    app.total_rendered_lines = lines.len() as u32;
 
     let text = Text::from(lines);
     let total_lines = text.lines.len() as u32;
@@ -326,13 +339,15 @@ fn draw_status_bar(frame: &mut Frame, area: Rect, app: &TuiApp) {
         String::new()
     };
 
-    let hint = if app.status == SessionStatus::Done
+    let hint = if app.focused_tool.is_some() {
+        format!(" {}tab:next s-tab:prev enter:toggle esc:done ", scroll_hint)
+    } else if app.status == SessionStatus::Done
         || app.status == SessionStatus::Idle
         || app.status == SessionStatus::Waiting
     {
-        format!(" {}u/d:page c:tools i:input q:quit ", scroll_hint)
+        format!(" {}tab:tool u/d:page c:tools i:input q:quit ", scroll_hint)
     } else {
-        format!(" {}u/d:page c:tools q:quit ", scroll_hint)
+        format!(" {}tab:tool u/d:page c:tools q:quit ", scroll_hint)
     };
 
     // Build the status line

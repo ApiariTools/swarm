@@ -56,6 +56,7 @@ impl WorkerPhase {
                 | (Self::Waiting, Self::Running)
                 | (Self::Waiting, Self::Completed)
                 | (Self::Completed, Self::Starting) // agent relaunch
+                | (Self::Failed, Self::Starting) // agent relaunch after failure
         )
     }
 

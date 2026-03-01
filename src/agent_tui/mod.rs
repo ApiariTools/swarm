@@ -1,5 +1,6 @@
 pub mod app;
 pub mod events;
+pub mod markdown;
 pub mod render;
 
 use apiari_claude_sdk::streaming::AssembledEvent;
@@ -8,7 +9,7 @@ use apiari_claude_sdk::{ClaudeClient, Event, SessionOptions};
 use app::{InputMode, SdkEvent, SessionStatus, TuiApp};
 use color_eyre::Result;
 use crossterm::ExecutableCommand;
-use crossterm::event::{self, KeyCode, KeyModifiers, MouseEventKind, EnableMouseCapture, DisableMouseCapture};
+use crossterm::event::{self, KeyCode, KeyModifiers, MouseButton, MouseEventKind, EnableMouseCapture, DisableMouseCapture};
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
@@ -405,6 +406,7 @@ async fn event_loop(
 
         // Drain SDK events and advance animation tick
         app.drain_sdk_events();
+        app.validate_focus();
         app.tick();
 
         // Write agent status file when SessionStatus transitions to/from Waiting
@@ -460,6 +462,23 @@ async fn event_loop(
                                     app.input_mode = InputMode::Input;
                                 }
                             }
+                            KeyCode::Tab => {
+                                app.focus_next_tool();
+                                app.scroll_to_focused();
+                            }
+                            KeyCode::BackTab => {
+                                app.focus_prev_tool();
+                                app.scroll_to_focused();
+                            }
+                            KeyCode::Enter => {
+                                if app.focused_tool.is_some() {
+                                    app.toggle_focused_tool();
+                                    app.scroll_to_focused();
+                                }
+                            }
+                            KeyCode::Esc => {
+                                app.clear_focus();
+                            }
                             KeyCode::PageUp | KeyCode::Char('u') => {
                                 app.scroll_up(app.viewport_height as u32 / 2);
                             }
@@ -498,6 +517,13 @@ async fn event_loop(
                 event::Event::Mouse(mouse) => match mouse.kind {
                     MouseEventKind::ScrollUp => app.scroll_up(3),
                     MouseEventKind::ScrollDown => app.scroll_down(3),
+                    MouseEventKind::Down(MouseButton::Left) => {
+                        if app.input_mode == InputMode::Normal
+                            && let Some(idx) = app.entry_at_row(mouse.row)
+                        {
+                            app.toggle_tool_at(idx);
+                        }
+                    }
                     _ => {}
                 },
                 _ => {}
