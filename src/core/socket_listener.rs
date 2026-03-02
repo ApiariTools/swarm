@@ -1,4 +1,5 @@
 use super::ipc::{self, InboxAck, InboxMessage};
+use crate::swarm_log;
 use std::path::{Path, PathBuf};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::net::UnixListener;
@@ -59,7 +60,7 @@ async fn accept_loop(listener: UnixListener, tx: mpsc::UnboundedSender<InboxMess
                 tokio::spawn(handle_connection(stream, tx));
             }
             Err(e) => {
-                eprintln!("[swarm] socket accept error: {}", e);
+                swarm_log!("[swarm] socket accept error: {}", e);
                 // Brief pause to avoid tight error loops
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }

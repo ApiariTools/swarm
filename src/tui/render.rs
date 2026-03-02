@@ -1,7 +1,8 @@
 use super::{
-    app::{App, Mode, PaneStatus, Worktree},
+    app::{App, Mode, Worktree},
     theme,
 };
+use crate::core::state::WorkerPhase;
 
 use ratatui::{
     prelude::*,
@@ -356,14 +357,22 @@ const SIDEBAR_COLORS: &[Color] = &[
 ];
 
 fn draw_worktree_row(frame: &mut Frame, area: Rect, wt: &Worktree, selected: bool, idx: usize) {
-    let status = wt.status();
-    let status_icon = match status {
-        PaneStatus::Running => "\u{25cf}",
-        PaneStatus::Done => "\u{25c6}",
-    };
-    let status_style = match status {
-        PaneStatus::Running => theme::status_running(),
-        PaneStatus::Done => theme::status_done(),
+    let (status_icon, status_style) = match wt.phase {
+        WorkerPhase::Creating | WorkerPhase::Starting => {
+            ("\u{25cc}", Style::default().fg(theme::HONEY)) // ◌ dashed circle, amber
+        }
+        WorkerPhase::Running => {
+            ("\u{25cf}", theme::status_running()) // ● filled circle, green
+        }
+        WorkerPhase::Waiting => {
+            ("\u{25cf}", Style::default().fg(theme::HONEY)) // ● filled circle, amber
+        }
+        WorkerPhase::Completed => {
+            ("\u{25c6}", theme::status_done()) // ◆ diamond, grey
+        }
+        WorkerPhase::Failed => {
+            ("\u{2717}", Style::default().fg(Color::Rgb(200, 60, 60))) // ✗ red
+        }
     };
 
     let wt_color = SIDEBAR_COLORS[idx % SIDEBAR_COLORS.len()];
