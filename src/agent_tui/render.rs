@@ -1,4 +1,5 @@
 use crate::agent_tui::app::{ConversationEntry, InputMode, SessionStatus, TuiApp};
+use crate::agent_tui::markdown;
 use crate::tui::theme;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -37,23 +38,32 @@ pub fn draw(frame: &mut Frame, app: &mut TuiApp) {
 }
 
 fn draw_title_bar(frame: &mut Frame, area: Rect) {
-    let title = Line::from(vec![Span::styled("  Claude TUI Agent", theme::title())]);
+    let title = Line::from(vec![Span::styled(
+        "  Claude TUI Agent",
+        Style::default()
+            .fg(theme::FROST)
+            .add_modifier(Modifier::BOLD),
+    )]);
     frame.render_widget(Paragraph::new(title), area);
 }
 
-fn draw_conversation(frame: &mut Frame, area: Rect, app: &TuiApp) {
+fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut TuiApp) {
     let block = Block::default().padding(Padding::new(0, 0, 0, 2));
     let inner = block.inner(area);
+    app.conversation_area = inner;
     let mut lines: Vec<Line<'_>> = Vec::new();
+    let mut entry_line_map: Vec<(u32, u32)> = Vec::with_capacity(app.entries.len());
 
     for (i, entry) in app.entries.iter().enumerate() {
+        let start = lines.len() as u32;
+        let is_focused = app.focused_tool == Some(i);
         match entry {
             ConversationEntry::User { text } => {
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled(
                     "  You:",
                     Style::default()
-                        .fg(theme::HONEY)
+                        .fg(theme::SLATE)
                         .add_modifier(Modifier::BOLD),
                 )));
                 for line in text.lines() {
@@ -76,72 +86,93 @@ fn draw_conversation(frame: &mut Frame, area: Rect, app: &TuiApp) {
                             .add_modifier(Modifier::BOLD),
                     )));
                 }
-                for line in text.lines() {
-                    lines.push(Line::from(Span::styled(
-                        format!("  {}", line),
-                        theme::text(),
-                    )));
-                }
+                lines.extend(markdown::render_markdown(text));
             }
             ConversationEntry::ToolCall {
                 tool,
                 input,
                 output,
                 is_error,
+                collapsed,
             } => {
-                lines.push(Line::from(""));
-                // Tool header
-                lines.push(Line::from(vec![
-                    Span::styled("  ", theme::muted()),
-                    Span::styled(
-                        format!(" {} ", tool),
-                        Style::default()
-                            .fg(theme::GOLD)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        " ────────────────────────────",
-                        Style::default().fg(theme::WAX),
-                    ),
-                ]));
-                // Input
-                for line in input.lines().take(5) {
-                    lines.push(Line::from(Span::styled(
-                        format!("  │ {}", line),
-                        Style::default().fg(theme::GOLD),
-                    )));
-                }
-                if input.lines().count() > 5 {
-                    lines.push(Line::from(Span::styled(
-                        format!("  │ ... ({} more lines)", input.lines().count() - 5),
-                        theme::muted(),
-                    )));
-                }
-                // Output
-                if let Some(out) = output {
-                    let out_style = if *is_error {
-                        theme::error()
+                let focus_prefix = if is_focused { "▶ " } else { "  " };
+                let tool_style = if is_focused {
+                    Style::default()
+                        .fg(theme::HONEY)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    theme::tool_name()
+                };
+                if *collapsed {
+                    // Collapsed: single-line summary
+                    let (icon, icon_style) = if output.is_none() {
+                        ("⋯", theme::muted())
+                    } else if *is_error {
+                        ("✖", theme::error())
                     } else {
-                        theme::muted()
+                        ("✔", theme::success())
                     };
-                    lines.push(Line::from(Span::styled(
-                        "  ├──────────────────────────────",
-                        Style::default().fg(theme::WAX),
-                    )));
-                    for line in out.lines().take(10) {
-                        lines.push(Line::from(Span::styled(format!("  │ {}", line), out_style)));
-                    }
-                    if out.lines().count() > 10 {
+                    let preview = input.lines().next().unwrap_or("").chars().take(50).collect::<String>();
+                    let ellipsis = if input.lines().next().is_some_and(|l| l.len() > 50) { "..." } else { "" };
+                    lines.push(Line::from(vec![
+                        Span::styled(format!("{}{} ", focus_prefix, icon), icon_style),
+                        Span::styled(tool.as_str(), tool_style),
+                        Span::styled(format!("  {}{}", preview, ellipsis), theme::muted()),
+                    ]));
+                } else {
+                    // Expanded: full tool block
+                    lines.push(Line::from(""));
+                    // Tool header
+                    lines.push(Line::from(vec![
+                        Span::styled(focus_prefix, theme::muted()),
+                        Span::styled(format!(" {} ", tool), tool_style),
+                        Span::styled(
+                            " ────────────────────────────",
+                            Style::default().fg(theme::STEEL),
+                        ),
+                    ]));
+                    // Input
+                    for line in input.lines().take(5) {
                         lines.push(Line::from(Span::styled(
-                            format!("  │ ... ({} more lines)", out.lines().count() - 10),
+                            format!("  │ {}", line),
+                            Style::default().fg(theme::SLATE),
+                        )));
+                    }
+                    if input.lines().count() > 5 {
+                        lines.push(Line::from(Span::styled(
+                            format!("  │ ... ({} more lines)", input.lines().count() - 5),
                             theme::muted(),
                         )));
                     }
+                    // Output
+                    if let Some(out) = output {
+                        let out_style = if *is_error {
+                            theme::error()
+                        } else {
+                            theme::muted()
+                        };
+                        lines.push(Line::from(Span::styled(
+                            "  ├──────────────────────────────",
+                            Style::default().fg(theme::STEEL),
+                        )));
+                        for line in out.lines().take(10) {
+                            lines.push(Line::from(Span::styled(
+                                format!("  │ {}", line),
+                                out_style,
+                            )));
+                        }
+                        if out.lines().count() > 10 {
+                            lines.push(Line::from(Span::styled(
+                                format!("  │ ... ({} more lines)", out.lines().count() - 10),
+                                theme::muted(),
+                            )));
+                        }
+                    }
+                    lines.push(Line::from(Span::styled(
+                        "  └──────────────────────────────",
+                        Style::default().fg(theme::STEEL),
+                    )));
                 }
-                lines.push(Line::from(Span::styled(
-                    "  └──────────────────────────────",
-                    Style::default().fg(theme::WAX),
-                )));
             }
             ConversationEntry::Status { text } => {
                 lines.push(Line::from(""));
@@ -151,6 +182,8 @@ fn draw_conversation(frame: &mut Frame, area: Rect, app: &TuiApp) {
                 )));
             }
         }
+        let count = lines.len() as u32 - start;
+        entry_line_map.push((start, count));
     }
 
     // Streaming text (not yet flushed)
@@ -178,7 +211,7 @@ fn draw_conversation(frame: &mut Frame, area: Rect, app: &TuiApp) {
             lines.push(Line::from(Span::styled(
                 "  \u{258c}",
                 Style::default()
-                    .fg(theme::HONEY)
+                    .fg(theme::FROST)
                     .add_modifier(Modifier::BOLD),
             )));
         }
@@ -187,16 +220,19 @@ fn draw_conversation(frame: &mut Frame, area: Rect, app: &TuiApp) {
         lines.push(Line::from(Span::styled(
             "  \u{258c}",
             Style::default()
-                .fg(theme::HONEY)
+                .fg(theme::FROST)
                 .add_modifier(Modifier::BOLD),
         )));
     }
 
+    app.entry_line_map = entry_line_map;
+    app.total_rendered_lines = lines.len() as u32;
+
     let text = Text::from(lines);
-    let total_lines = text.lines.len() as u16;
+    let total_lines = text.lines.len() as u32;
 
     // Calculate scroll using inner height (accounts for bottom padding)
-    let visible_height = inner.height;
+    let visible_height = inner.height as u32;
     let scroll = if app.auto_scroll {
         total_lines.saturating_sub(visible_height)
     } else {
@@ -206,7 +242,7 @@ fn draw_conversation(frame: &mut Frame, area: Rect, app: &TuiApp) {
     };
 
     let paragraph = Paragraph::new(text)
-        .scroll((scroll, 0))
+        .scroll((scroll as u16, 0))
         .wrap(Wrap { trim: false })
         .block(block);
 
@@ -303,13 +339,15 @@ fn draw_status_bar(frame: &mut Frame, area: Rect, app: &TuiApp) {
         String::new()
     };
 
-    let hint = if app.status == SessionStatus::Done
+    let hint = if app.focused_tool.is_some() {
+        format!(" {}tab:next s-tab:prev enter:toggle esc:done ", scroll_hint)
+    } else if app.status == SessionStatus::Done
         || app.status == SessionStatus::Idle
         || app.status == SessionStatus::Waiting
     {
-        format!(" {}u/d:page i:input q:quit ", scroll_hint)
+        format!(" {}tab:tool u/d:page c:tools i:input q:quit ", scroll_hint)
     } else {
-        format!(" {}u/d:page q:quit ", scroll_hint)
+        format!(" {}tab:tool u/d:page c:tools q:quit ", scroll_hint)
     };
 
     // Build the status line

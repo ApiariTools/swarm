@@ -118,9 +118,13 @@ async fn event_loop(
                     },
                 }
             }
+
+            // Skip tick after handling events — redraw immediately so
+            // navigation feels instant.  Tick runs only on idle polls.
+            continue;
         }
 
-        // Refresh states periodically
+        // No events for 100ms — run periodic tasks
         app.tick();
     }
 
