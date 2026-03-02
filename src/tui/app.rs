@@ -3123,6 +3123,60 @@ mod tests {
     }
 
     #[test]
+    fn test_ipc_create_single_repo_resolves_repo() {
+        // When only one repo exists and no --repo is specified, the Create
+        // handler should auto-select it and attempt creation. The attempt
+        // will fail (no git init in tmpdir), but the error flash should be
+        // from create_worktree_with_agent — NOT from "unknown repo" or
+        // "--repo required".
+        let dir = tempfile::tempdir().unwrap();
+        let work_dir = dir.path().to_path_buf();
+        std::fs::create_dir_all(work_dir.join(".swarm")).unwrap();
+
+        let single_repo = work_dir.join("my-project");
+        std::fs::create_dir_all(&single_repo).unwrap();
+        let mut app = test_app(work_dir.clone(), vec![single_repo]);
+
+        let msg = ipc::InboxMessage::Create {
+            id: "msg-1".to_string(),
+            prompt: "add tests".to_string(),
+            agent: "claude".to_string(),
+            repo: None,
+            start_point: None,
+            timestamp: Local::now(),
+        };
+
+        app.handle_inbox_message(msg);
+
+        // The flash message, if any, should NOT be about unknown repo
+        if let Some((flash, _)) = &app.status_message {
+            assert!(!flash.contains("unknown repo"), "flash: {}", flash);
+            assert!(!flash.contains("--repo required"), "flash: {}", flash);
+        }
+    }
+
+    #[test]
+    fn test_ipc_merge_unknown_worktree_no_crash() {
+        let dir = tempfile::tempdir().unwrap();
+        let work_dir = dir.path().to_path_buf();
+
+        let mut app = test_app(work_dir, vec![]);
+        app.worktrees
+            .push(make_test_worktree("hive-1", AgentKind::Claude));
+
+        let msg = ipc::InboxMessage::Merge {
+            id: "msg-1".to_string(),
+            worktree: "nonexistent-99".to_string(),
+            timestamp: Local::now(),
+        };
+
+        // Should not panic, and should not affect existing worktrees
+        app.handle_inbox_message(msg);
+        assert_eq!(app.worktrees.len(), 1);
+        assert_eq!(app.worktrees[0].id, "hive-1");
+    }
+
+    #[test]
     fn test_ipc_file_inbox_round_trip_dispatch() {
         // End-to-end: write messages to inbox.jsonl, read them, dispatch them.
         let dir = tempfile::tempdir().unwrap();
