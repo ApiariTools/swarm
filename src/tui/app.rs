@@ -3123,6 +3123,122 @@ mod tests {
     }
 
     #[test]
+    fn test_ipc_merge_unknown_worktree_no_crash() {
+        let dir = tempfile::tempdir().unwrap();
+        let work_dir = dir.path().to_path_buf();
+
+        let mut app = test_app(work_dir, vec![]);
+        app.worktrees
+            .push(make_test_worktree("hive-1", AgentKind::Claude));
+
+        let msg = ipc::InboxMessage::Merge {
+            id: "msg-1".to_string(),
+            worktree: "nonexistent-99".to_string(),
+            timestamp: Local::now(),
+        };
+
+        // Should not panic, and should not affect the existing worktree
+        app.handle_inbox_message(msg);
+        assert_eq!(app.worktrees.len(), 1);
+        assert_eq!(app.worktrees[0].id, "hive-1");
+    }
+
+    #[test]
+    fn test_ipc_create_valid_single_repo_reaches_creation() {
+        // When a single repo exists and no --repo is specified, the
+        // Create handler should resolve the repo and attempt worktree
+        // creation. Since there's no real tmux/git in the tempdir,
+        // create_worktree_with_agent will fail — but the error should
+        // be from the creation phase, NOT from repo matching.
+        //
+        // Once CommandRunner is wired through App this can be replaced
+        // with a full happy-path test (see core/runner.rs).
+        let dir = tempfile::tempdir().unwrap();
+        let work_dir = dir.path().to_path_buf();
+        std::fs::create_dir_all(work_dir.join(".swarm")).unwrap();
+
+        let repo = work_dir.join("my-repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let mut app = test_app(work_dir.clone(), vec![repo]);
+
+        let msg = ipc::InboxMessage::Create {
+            id: "msg-1".to_string(),
+            prompt: "add feature".to_string(),
+            agent: "claude".to_string(),
+            repo: None, // should default to the single repo
+            start_point: None,
+            timestamp: Local::now(),
+        };
+
+        app.handle_inbox_message(msg);
+
+        // The error should be from the creation phase (tmux/git), not
+        // from repo matching. "inbox create error" comes from the
+        // create_worktree_with_agent error path; "create failed:" with
+        // "unknown repo" would mean repo matching failed.
+        let (flash, _) = app
+            .status_message
+            .as_ref()
+            .expect("should have flash message from creation failure");
+        assert!(
+            flash.contains("inbox create error"),
+            "expected creation-phase error, got repo-matching error: {}",
+            flash
+        );
+        assert!(
+            !flash.contains("unknown repo"),
+            "should not fail at repo matching: {}",
+            flash
+        );
+    }
+
+    #[test]
+    fn test_ipc_create_valid_named_repo_reaches_creation() {
+        // Like the above test, but with an explicit --repo name.
+        let dir = tempfile::tempdir().unwrap();
+        let work_dir = dir.path().to_path_buf();
+        std::fs::create_dir_all(work_dir.join(".swarm")).unwrap();
+
+        let repo_a = work_dir.join("alpha");
+        let repo_b = work_dir.join("beta");
+        std::fs::create_dir_all(&repo_a).unwrap();
+        std::fs::create_dir_all(&repo_b).unwrap();
+        // git init so repo_name() returns the directory name
+        let _ = std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(&repo_a)
+            .output();
+        let _ = std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(&repo_b)
+            .output();
+
+        let mut app = test_app(work_dir.clone(), vec![repo_a, repo_b]);
+
+        let msg = ipc::InboxMessage::Create {
+            id: "msg-1".to_string(),
+            prompt: "fix tests".to_string(),
+            agent: "claude".to_string(),
+            repo: Some("beta".to_string()),
+            start_point: None,
+            timestamp: Local::now(),
+        };
+
+        app.handle_inbox_message(msg);
+
+        // Should reach creation phase, not fail at repo matching
+        let (flash, _) = app
+            .status_message
+            .as_ref()
+            .expect("should have flash message from creation failure");
+        assert!(
+            !flash.contains("unknown repo"),
+            "should not fail at repo matching: {}",
+            flash
+        );
+    }
+
+    #[test]
     fn test_ipc_file_inbox_round_trip_dispatch() {
         // End-to-end: write messages to inbox.jsonl, read them, dispatch them.
         let dir = tempfile::tempdir().unwrap();

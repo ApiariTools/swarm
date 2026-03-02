@@ -227,9 +227,10 @@ mod tests {
         let sock = work_dir.join(".swarm").join("swarm.sock");
         std::fs::create_dir_all(sock.parent().unwrap()).unwrap();
 
-        // Create a stale socket file (just a regular file, no listener)
-        // We need an actual socket to test cleanup, so bind and drop
-        let listener = UnixListener::bind(&sock).unwrap();
+        // Use std::os::unix::net::UnixListener (not tokio) so that
+        // drop() closes the file descriptor immediately without needing
+        // the tokio runtime to process the close.
+        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
         drop(listener);
         // Socket file exists but nobody is listening
         assert!(sock.exists());
