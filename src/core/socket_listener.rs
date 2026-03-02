@@ -1,4 +1,5 @@
 use super::ipc::{self, InboxAck, InboxMessage};
+use crate::swarm_log;
 use std::path::{Path, PathBuf};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::net::UnixListener;
@@ -59,7 +60,7 @@ async fn accept_loop(listener: UnixListener, tx: mpsc::UnboundedSender<InboxMess
                 tokio::spawn(handle_connection(stream, tx));
             }
             Err(e) => {
-                eprintln!("[swarm] socket accept error: {}", e);
+                swarm_log!("[swarm] socket accept error: {}", e);
                 // Brief pause to avoid tight error loops
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
@@ -226,9 +227,10 @@ mod tests {
         let sock = work_dir.join(".swarm").join("swarm.sock");
         std::fs::create_dir_all(sock.parent().unwrap()).unwrap();
 
-        // Create a stale socket file (just a regular file, no listener)
-        // We need an actual socket to test cleanup, so bind and drop
-        let listener = UnixListener::bind(&sock).unwrap();
+        // Use std::os::unix::net::UnixListener (not tokio) so that
+        // drop() closes the file descriptor immediately without needing
+        // the tokio runtime to process the close.
+        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
         drop(listener);
         // Socket file exists but nobody is listening
         assert!(sock.exists());

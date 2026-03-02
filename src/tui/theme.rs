@@ -17,6 +17,9 @@ pub const ROYAL: Color = Color::Rgb(160, 120, 255); // purple accent
 pub const MINT: Color = Color::Rgb(100, 230, 180); // green/success
 pub const EMBER: Color = Color::Rgb(255, 90, 90); // red/error
 pub const FROST: Color = Color::Rgb(220, 220, 225); // bright text
+pub const SLATE: Color = Color::Rgb(140, 145, 155); // cool gray for headers
+pub const STEEL: Color = Color::Rgb(100, 105, 115); // medium cool gray for borders
+pub const ICE: Color = Color::Rgb(175, 180, 190); // light cool gray for labels
 
 // ── Styles ─────────────────────────────────────────────────
 
@@ -77,6 +80,14 @@ pub fn border() -> Style {
 
 pub fn border_active() -> Style {
     Style::default().fg(HONEY)
+}
+
+pub fn tool_name() -> Style {
+    Style::default().fg(ICE).add_modifier(Modifier::BOLD)
+}
+
+pub fn border_neutral() -> Style {
+    Style::default().fg(STEEL)
 }
 
 pub fn input_cursor() -> Style {
