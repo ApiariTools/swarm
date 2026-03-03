@@ -9,6 +9,7 @@ repository = "https://github.com/ApiariTools/swarm"
 [dependencies]
 apiari-common.workspace = true
 apiari-claude-sdk.workspace = true
+apiari-codex-sdk.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true
 color-eyre.workspace = true
@@ -20,6 +21,10 @@ dirs = "6"
 chrono.workspace = true
 uuid.workspace = true
 clap.workspace = true
+pulldown-cmark = "0.13"
+libc.workspace = true
+async-trait = "0.1"
+futures = "0.3"
 
 [dev-dependencies]
 tempfile = "3"
