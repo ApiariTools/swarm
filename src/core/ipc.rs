@@ -562,4 +562,192 @@ mod tests {
             _ => panic!("expected ReviewStarted"),
         }
     }
+
+    // ── Inbox file read/write integration tests ─────────────
+
+    #[test]
+    fn test_inbox_read_empty_when_no_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let (messages, offset) = read_inbox(dir.path(), 0).unwrap();
+        assert!(messages.is_empty());
+        assert_eq!(offset, 0);
+    }
+
+    #[test]
+    fn test_inbox_read_tracks_offset() {
+        let dir = tempfile::tempdir().unwrap();
+        let work_dir = dir.path();
+
+        // Manually write two inbox messages
+        let inbox_path = inbox_path(work_dir);
+        std::fs::create_dir_all(inbox_path.parent().unwrap()).unwrap();
+
+        let msg1 = r#"{"action":"create","id":"msg-1","prompt":"first task","timestamp":"2025-01-01T00:00:00-05:00"}"#;
+        let msg2 = r#"{"action":"create","id":"msg-2","prompt":"second task","timestamp":"2025-01-01T00:00:00-05:00"}"#;
+        std::fs::write(&inbox_path, format!("{}\n{}\n", msg1, msg2)).unwrap();
+
+        // Read all messages
+        let (messages, offset) = read_inbox(work_dir, 0).unwrap();
+        assert_eq!(messages.len(), 2);
+        assert!(offset > 0);
+
+        // Reading again from the same offset returns nothing
+        let (messages2, offset2) = read_inbox(work_dir, offset).unwrap();
+        assert!(messages2.is_empty());
+        assert_eq!(offset2, offset);
+    }
+
+    #[test]
+    fn test_inbox_read_incremental() {
+        let dir = tempfile::tempdir().unwrap();
+        let work_dir = dir.path();
+        let inbox = inbox_path(work_dir);
+        std::fs::create_dir_all(inbox.parent().unwrap()).unwrap();
+
+        // Write first message
+        let msg1 = r#"{"action":"create","id":"msg-1","prompt":"first","timestamp":"2025-01-01T00:00:00-05:00"}"#;
+        std::fs::write(&inbox, format!("{}\n", msg1)).unwrap();
+
+        let (messages, offset1) = read_inbox(work_dir, 0).unwrap();
+        assert_eq!(messages.len(), 1);
+
+        // Append second message
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new().append(true).open(&inbox).unwrap();
+        let msg2 = r#"{"action":"send","id":"msg-2","worktree":"hive-1","message":"hello","timestamp":"2025-01-01T00:00:00-05:00"}"#;
+        writeln!(file, "{}", msg2).unwrap();
+
+        // Read from previous offset — should only get the new message
+        let (messages2, _offset2) = read_inbox(work_dir, offset1).unwrap();
+        assert_eq!(messages2.len(), 1);
+        match &messages2[0] {
+            InboxMessage::Send { worktree, message, .. } => {
+                assert_eq!(worktree, "hive-1");
+                assert_eq!(message, "hello");
+            }
+            _ => panic!("expected Send variant"),
+        }
+    }
+
+    #[test]
+    fn test_inbox_malformed_lines_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let work_dir = dir.path();
+        let inbox = inbox_path(work_dir);
+        std::fs::create_dir_all(inbox.parent().unwrap()).unwrap();
+
+        // Write mix of valid and invalid lines
+        let content = concat!(
+            r#"{"action":"create","id":"msg-1","prompt":"valid","timestamp":"2025-01-01T00:00:00-05:00"}"#,
+            "\n",
+            "this is not valid json\n",
+            r#"{"action":"send","id":"msg-2","worktree":"hive-1","message":"also valid","timestamp":"2025-01-01T00:00:00-05:00"}"#,
+            "\n",
+        );
+        std::fs::write(&inbox, content).unwrap();
+
+        let (messages, _) = read_inbox(work_dir, 0).unwrap();
+        // JsonlReader skips malformed lines — should get both valid messages
+        // (or at least 1, depending on error handling policy)
+        assert!(!messages.is_empty());
+    }
+
+    #[test]
+    fn test_emit_multiple_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let work_dir = dir.path();
+
+        emit_event(
+            work_dir,
+            &SwarmEvent::WorktreeCreated {
+                worktree: "hive-1".to_string(),
+                branch: "swarm/fix-1".to_string(),
+                agent: "claude-tui".to_string(),
+                pane_id: "daemon".to_string(),
+                timestamp: Local::now(),
+            },
+        )
+        .unwrap();
+
+        emit_event(
+            work_dir,
+            &SwarmEvent::AgentStarted {
+                worktree: "hive-1".to_string(),
+                pane_id: "daemon".to_string(),
+                timestamp: Local::now(),
+            },
+        )
+        .unwrap();
+
+        emit_event(
+            work_dir,
+            &SwarmEvent::AgentDone {
+                worktree: "hive-1".to_string(),
+                timestamp: Local::now(),
+            },
+        )
+        .unwrap();
+
+        let events_file = work_dir.join(".swarm").join("events.jsonl");
+        let content = std::fs::read_to_string(&events_file).unwrap();
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].contains("worktree_created"));
+        assert!(lines[1].contains("agent_started"));
+        assert!(lines[2].contains("agent_done"));
+    }
+
+    // ── State persistence tests ─────────────────────────────
+
+    #[test]
+    fn test_state_save_and_load_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let work_dir = dir.path();
+
+        let original = crate::core::state::SwarmState {
+            session_name: "swarm-test".to_string(),
+            sidebar_pane_id: None,
+            worktrees: vec![crate::core::state::WorktreeState {
+                id: "hive-1".to_string(),
+                branch: "swarm/fix-1".to_string(),
+                prompt: "fix the bug".to_string(),
+                agent_kind: crate::core::agent::AgentKind::ClaudeTui,
+                repo_path: std::path::PathBuf::from("/tmp/repo"),
+                worktree_path: std::path::PathBuf::from("/tmp/wt/hive-1"),
+                created_at: Local::now(),
+                agent: None,
+                terminals: vec![],
+                summary: None,
+                pr: None,
+                phase: WorkerPhase::Running,
+                status: "running".to_string(),
+                agent_session_status: None,
+                review_configs: None,
+                review_parent: None,
+                review_slug: None,
+                review_mode: None,
+                agent_pid: None,
+                session_id: Some("sess-123".to_string()),
+                restart_count: Some(1),
+            }],
+            last_inbox_pos: 42,
+        };
+
+        crate::core::state::save_state(work_dir, &original).unwrap();
+        let loaded = crate::core::state::load_state(work_dir).unwrap().unwrap();
+
+        assert_eq!(loaded.session_name, "swarm-test");
+        assert_eq!(loaded.worktrees.len(), 1);
+        assert_eq!(loaded.worktrees[0].id, "hive-1");
+        assert_eq!(loaded.worktrees[0].phase, WorkerPhase::Running);
+        assert_eq!(loaded.worktrees[0].session_id.as_deref(), Some("sess-123"));
+        assert_eq!(loaded.last_inbox_pos, 42);
+    }
+
+    #[test]
+    fn test_state_load_returns_none_when_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = crate::core::state::load_state(dir.path()).unwrap();
+        assert!(result.is_none());
+    }
 }
