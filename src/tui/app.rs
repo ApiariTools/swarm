@@ -3382,4 +3382,159 @@ mod tests {
 
         assert_eq!(app.worktrees[0].phase, WorkerPhase::Running);
     }
+
+    // --- Additional IPC dispatch coverage ---
+
+    #[test]
+    fn test_ipc_merge_unknown_worktree_no_crash() {
+        let dir = tempfile::tempdir().unwrap();
+        let work_dir = dir.path().to_path_buf();
+
+        let mut app = test_app(work_dir, vec![]);
+        app.worktrees
+            .push(make_test_worktree("hive-1", AgentKind::Claude));
+
+        let msg = ipc::InboxMessage::Merge {
+            id: "msg-1".to_string(),
+            worktree: "nonexistent-99".to_string(),
+            timestamp: Local::now(),
+        };
+
+        // Should not panic, existing worktree unaffected
+        app.handle_inbox_message(msg);
+        assert_eq!(app.worktrees.len(), 1);
+        assert_eq!(app.worktrees[0].id, "hive-1");
+    }
+
+    #[test]
+    fn test_ipc_create_single_repo_resolves_repo() {
+        // When only one repo exists and --repo is omitted,
+        // the Create handler should auto-select it rather than erroring.
+        let dir = tempfile::tempdir().unwrap();
+        let work_dir = dir.path().to_path_buf();
+        std::fs::create_dir_all(work_dir.join(".swarm")).unwrap();
+
+        let repo_path = work_dir.join("my-repo");
+        std::fs::create_dir_all(&repo_path).unwrap();
+        let mut app = test_app(work_dir.clone(), vec![repo_path.clone()]);
+
+        let msg = ipc::InboxMessage::Create {
+            id: "msg-1".to_string(),
+            prompt: "fix something".to_string(),
+            agent: "claude".to_string(),
+            repo: None, // no explicit --repo
+            start_point: None,
+            timestamp: Local::now(),
+        };
+
+        app.handle_inbox_message(msg);
+
+        // With a single repo the handler proceeds into create_worktree_with_agent.
+        // It will fail because there's no real git repo / tmux, but the repo
+        // resolution itself should NOT produce a "create failed" flash about
+        // an unknown repo or missing --repo.
+        if let Some((flash, _)) = &app.status_message {
+            // It should never say "--repo required" or "unknown repo"
+            assert!(
+                !flash.contains("--repo required"),
+                "single repo should not require --repo, flash: {}",
+                flash
+            );
+            assert!(
+                !flash.contains("unknown repo"),
+                "single repo should not say unknown repo, flash: {}",
+                flash
+            );
+        }
+    }
+
+    #[test]
+    fn test_ipc_create_invalid_agent_defaults_to_claude_tui() {
+        // Invalid agent string should fall back to ClaudeTui (not panic).
+        let dir = tempfile::tempdir().unwrap();
+        let work_dir = dir.path().to_path_buf();
+        std::fs::create_dir_all(work_dir.join(".swarm")).unwrap();
+
+        let repo_path = work_dir.join("repo");
+        std::fs::create_dir_all(&repo_path).unwrap();
+        let mut app = test_app(work_dir.clone(), vec![repo_path]);
+
+        let msg = ipc::InboxMessage::Create {
+            id: "msg-1".to_string(),
+            prompt: "test task".to_string(),
+            agent: "totally-bogus-agent".to_string(),
+            repo: None,
+            start_point: None,
+            timestamp: Local::now(),
+        };
+
+        // Should not panic — invalid agent defaults to ClaudeTui
+        app.handle_inbox_message(msg);
+
+        // The flash (if any) should not mention an unknown agent
+        if let Some((flash, _)) = &app.status_message {
+            assert!(
+                !flash.contains("unknown agent"),
+                "invalid agent should default gracefully, flash: {}",
+                flash
+            );
+        }
+    }
+
+    #[test]
+    fn test_drain_file_inbox_reads_and_advances_position() {
+        let dir = tempfile::tempdir().unwrap();
+        let work_dir = dir.path().to_path_buf();
+        std::fs::create_dir_all(work_dir.join(".swarm")).unwrap();
+
+        let mut app = test_app(work_dir.clone(), vec![]);
+        app.worktrees
+            .push(make_test_worktree("hive-1", AgentKind::ClaudeTui));
+
+        // Write two messages to file inbox
+        let msg1 = ipc::InboxMessage::Send {
+            id: "msg-1".to_string(),
+            worktree: "hive-1".to_string(),
+            message: "first message".to_string(),
+            timestamp: Local::now(),
+        };
+        let msg2 = ipc::InboxMessage::Send {
+            id: "msg-2".to_string(),
+            worktree: "hive-1".to_string(),
+            message: "second message".to_string(),
+            timestamp: Local::now(),
+        };
+        ipc::write_inbox(&work_dir, &msg1).unwrap();
+        ipc::write_inbox(&work_dir, &msg2).unwrap();
+
+        assert_eq!(app.last_inbox_pos, 0);
+
+        // Drain should process both messages and advance position
+        app.drain_file_inbox();
+        assert!(app.last_inbox_pos > 0, "position should advance");
+
+        // Messages should have been dispatched to agent inbox
+        let (agent_msgs, _) = ipc::read_agent_inbox(&work_dir, "hive-1", 0).unwrap();
+        assert_eq!(agent_msgs.len(), 2);
+        assert_eq!(agent_msgs[0].message, "first message");
+        assert_eq!(agent_msgs[1].message, "second message");
+
+        // Draining again should be a no-op
+        let pos_after = app.last_inbox_pos;
+        app.drain_file_inbox();
+        assert_eq!(app.last_inbox_pos, pos_after);
+    }
+
+    #[test]
+    fn test_drain_file_inbox_handles_empty_inbox() {
+        let dir = tempfile::tempdir().unwrap();
+        let work_dir = dir.path().to_path_buf();
+        // No .swarm/ directory, no inbox file
+
+        let mut app = test_app(work_dir, vec![]);
+
+        // Should not panic, position stays at 0
+        app.drain_file_inbox();
+        assert_eq!(app.last_inbox_pos, 0);
+    }
 }
