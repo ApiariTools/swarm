@@ -1,4 +1,4 @@
-use super::protocol::{AgentEventWire, DaemonRequest, DaemonResponse};
+use super::protocol::{DaemonRequest, DaemonResponse};
 use crate::core::ipc::{self, InboxMessage};
 use crate::swarm_log;
 use std::path::PathBuf;
@@ -36,7 +36,7 @@ impl Drop for DaemonSocketHandle {
 /// TCP connections must authenticate with `Auth { token }` before any other request.
 #[allow(clippy::type_complexity)]
 pub fn start(
-    event_tx: broadcast::Sender<(String, AgentEventWire)>,
+    event_tx: broadcast::Sender<DaemonResponse>,
     tcp_bind: Option<String>,
     auth_token: Option<String>,
 ) -> color_eyre::Result<(
@@ -120,7 +120,7 @@ pub fn start(
 async fn unix_accept_loop(
     listener: UnixListener,
     request_tx: mpsc::UnboundedSender<(DaemonRequest, mpsc::UnboundedSender<DaemonResponse>)>,
-    event_tx: broadcast::Sender<(String, AgentEventWire)>,
+    event_tx: broadcast::Sender<DaemonResponse>,
 ) {
     loop {
         match listener.accept().await {
@@ -149,7 +149,7 @@ async fn unix_accept_loop(
 async fn tcp_accept_loop(
     listener: tokio::net::TcpListener,
     request_tx: mpsc::UnboundedSender<(DaemonRequest, mpsc::UnboundedSender<DaemonResponse>)>,
-    event_tx: broadcast::Sender<(String, AgentEventWire)>,
+    event_tx: broadcast::Sender<DaemonResponse>,
     expected_token: String,
 ) {
     loop {
@@ -230,7 +230,7 @@ async fn handle_connection(
     mut reader: Box<dyn AsyncBufRead + Unpin + Send>,
     mut writer: Box<dyn AsyncWrite + Unpin + Send>,
     request_tx: mpsc::UnboundedSender<(DaemonRequest, mpsc::UnboundedSender<DaemonResponse>)>,
-    event_rx: broadcast::Receiver<(String, AgentEventWire)>,
+    event_rx: broadcast::Receiver<DaemonResponse>,
 ) {
     let mut line = String::new();
 
@@ -298,7 +298,7 @@ async fn handle_subscription_dyn(
     mut reader: Box<dyn AsyncBufRead + Unpin + Send>,
     mut writer: Box<dyn AsyncWrite + Unpin + Send>,
     request_tx: mpsc::UnboundedSender<(DaemonRequest, mpsc::UnboundedSender<DaemonResponse>)>,
-    mut event_rx: broadcast::Receiver<(String, AgentEventWire)>,
+    mut event_rx: broadcast::Receiver<DaemonResponse>,
     mut resp_rx: mpsc::UnboundedReceiver<DaemonResponse>,
 ) {
     let mut line = String::new();
@@ -307,11 +307,7 @@ async fn handle_subscription_dyn(
         tokio::select! {
             event = event_rx.recv() => {
                 match event {
-                    Ok((worktree_id, agent_event)) => {
-                        let resp = DaemonResponse::AgentEvent {
-                            worktree_id,
-                            event: agent_event,
-                        };
+                    Ok(resp) => {
                         if write_response_dyn(&mut writer, &resp).await.is_err() {
                             return;
                         }

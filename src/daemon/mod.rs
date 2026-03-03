@@ -12,7 +12,7 @@ use agent_supervisor::SupervisorEvent;
 use chrono::Local;
 use color_eyre::Result;
 use protocol::{
-    AgentEventWire, DaemonRequest, DaemonResponse, WorkerInfo, WorkspaceInfo,
+    DaemonRequest, DaemonResponse, WorkerInfo, WorkspaceInfo,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -321,6 +321,14 @@ async fn run_daemon(
     if let Some(ref wd) = initial_work_dir {
         crate::core::log::init(wd);
     }
+
+    // Ignore SIGPIPE — the daemon may be spawned with a piped stderr that
+    // closes when the parent (TUI process) drops the child handle. Without
+    // this, any subsequent eprintln! would deliver SIGPIPE and kill us.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+    }
+
     eprintln!("[swarm] Daemon starting (pid {})", std::process::id());
 
     // Set up signal handlers
@@ -329,8 +337,9 @@ async fn run_daemon(
     let mut sigint =
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
 
-    // Event broadcast channel for subscribers
-    let (event_tx, _) = broadcast::channel::<(String, AgentEventWire)>(1024);
+    // Event broadcast channel for subscribers — carries full DaemonResponse
+    // so both AgentEvent and StateChanged can be pushed to subscribers.
+    let (event_tx, _) = broadcast::channel::<DaemonResponse>(1024);
 
     // Supervisor event channel
     let (supervisor_tx, mut supervisor_rx) = mpsc::unbounded_channel::<SupervisorEvent>();
@@ -468,12 +477,18 @@ async fn run_daemon(
                                 }
                                 state_dirty = true;
 
-                                // Emit phase change event
+                                // Emit phase change event to file
                                 let _ = ipc::emit_event(&ws.path, &ipc::SwarmEvent::PhaseChanged {
                                     worktree: worktree_id.clone(),
                                     from: old_phase,
-                                    to: phase,
+                                    to: phase.clone(),
                                     timestamp: Local::now(),
+                                });
+
+                                // Broadcast to socket subscribers
+                                let _ = event_tx.send(DaemonResponse::StateChanged {
+                                    worktree_id: worktree_id.clone(),
+                                    phase,
                                 });
                                 break;
                             }
@@ -561,7 +576,7 @@ async fn handle_request(
     request: DaemonRequest,
     resp_tx: &mpsc::UnboundedSender<DaemonResponse>,
     workspaces: &mut HashMap<PathBuf, WorkspaceState>,
-    event_tx: &broadcast::Sender<(String, AgentEventWire)>,
+    event_tx: &broadcast::Sender<DaemonResponse>,
     supervisor_tx: &mpsc::UnboundedSender<SupervisorEvent>,
     state_dirty: &mut bool,
 ) {
@@ -1249,7 +1264,7 @@ mod tests {
         mpsc::UnboundedReceiver<DaemonResponse>,
         mpsc::UnboundedSender<DaemonResponse>,
         HashMap<PathBuf, WorkspaceState>,
-        broadcast::Sender<(String, AgentEventWire)>,
+        broadcast::Sender<DaemonResponse>,
         mpsc::UnboundedSender<SupervisorEvent>,
     ) {
         let (resp_tx, resp_rx) = mpsc::unbounded_channel();

@@ -140,8 +140,9 @@ pub fn emit_event(work_dir: &Path, event: &SwarmEvent) -> Result<()> {
 
 /// Global config directory for the swarm daemon.
 pub fn global_config_dir() -> std::path::PathBuf {
-    dirs::config_dir()
-        .expect("no config dir")
+    dirs::home_dir()
+        .expect("no home dir")
+        .join(".config")
         .join("swarm")
 }
 

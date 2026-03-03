@@ -1,5 +1,5 @@
 use super::managed_agent::{self, ManagedAgent, SpawnOptions};
-use super::protocol::AgentEventWire;
+use super::protocol::{AgentEventWire, DaemonResponse};
 use crate::agent_tui::events::EventLogger;
 use crate::core::agent::AgentKind;
 use crate::core::state::WorkerPhase;
@@ -15,7 +15,7 @@ const MAX_RESTARTS: u32 = 3;
 pub struct AgentHandle {
     pub worktree_id: String,
     pub agent: Box<dyn ManagedAgent>,
-    pub event_tx: broadcast::Sender<(String, AgentEventWire)>,
+    pub event_tx: broadcast::Sender<DaemonResponse>,
     pub logger: EventLogger,
 }
 
@@ -45,7 +45,7 @@ pub struct SpawnAgentOpts<'a> {
     pub work_dir: &'a Path,
     pub resume_session_id: Option<String>,
     pub dangerously_skip_permissions: bool,
-    pub event_tx: broadcast::Sender<(String, AgentEventWire)>,
+    pub event_tx: broadcast::Sender<DaemonResponse>,
 }
 
 /// Spawn a new agent and return a handle for interacting with it.
@@ -228,9 +228,10 @@ async fn drain_agent_events(
                 log_agent_event(&handle.logger, &event);
 
                 // Broadcast to subscribers
-                let _ = handle
-                    .event_tx
-                    .send((handle.worktree_id.clone(), event.clone()));
+                let _ = handle.event_tx.send(DaemonResponse::AgentEvent {
+                    worktree_id: handle.worktree_id.clone(),
+                    event: event.clone(),
+                });
 
                 // Notify daemon of the event
                 let _ = supervisor_tx.send(SupervisorEvent::AgentEvent {

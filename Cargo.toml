@@ -24,6 +24,7 @@ clap.workspace = true
 pulldown-cmark = "0.13"
 libc.workspace = true
 async-trait = "0.1"
+futures = "0.3"
 
 [dev-dependencies]
 tempfile = "3"
