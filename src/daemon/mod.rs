@@ -1223,6 +1223,7 @@ fn poll_prs(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::ipc::InboxMessage;
     use crate::core::review::ReviewConfig;
 
     /// Build a ManagedWorker with sensible defaults for testing.
@@ -1583,6 +1584,336 @@ mod tests {
                 assert!(message.contains("agent not accepting messages"));
             }
             other => panic!("expected Error about agent, got {:?}", other),
+        }
+    }
+
+    // ── resolve_repo tests ───────────────────────────────────
+
+    #[test]
+    fn resolve_repo_single_repo_no_name() {
+        let repos = vec![PathBuf::from("/tmp/my-repo")];
+        let result = resolve_repo(&repos, None);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), PathBuf::from("/tmp/my-repo"));
+    }
+
+    #[test]
+    fn resolve_repo_unknown_name_errors() {
+        let repos = vec![PathBuf::from("/tmp/my-repo")];
+        let result = resolve_repo(&repos, Some("bogus-repo"));
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("unknown repo 'bogus-repo'"));
+    }
+
+    #[test]
+    fn resolve_repo_multiple_repos_no_name_errors() {
+        let repos = vec![
+            PathBuf::from("/tmp/repo-a"),
+            PathBuf::from("/tmp/repo-b"),
+        ];
+        let result = resolve_repo(&repos, None);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("multiple repos detected"));
+    }
+
+    #[test]
+    fn resolve_repo_empty_repos_errors() {
+        let repos: Vec<PathBuf> = vec![];
+        let result = resolve_repo(&repos, None);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("no git repos detected"));
+    }
+
+    // ── resolve_workspace tests ──────────────────────────────
+
+    #[test]
+    fn resolve_workspace_single_no_hint() {
+        let mut workspaces = HashMap::new();
+        workspaces.insert(
+            PathBuf::from("/tmp/ws1"),
+            test_workspace("/tmp/ws1", vec![]),
+        );
+        let result = resolve_workspace(&workspaces, None);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), PathBuf::from("/tmp/ws1"));
+    }
+
+    #[test]
+    fn resolve_workspace_not_registered_errors() {
+        let workspaces = HashMap::new();
+        let result = resolve_workspace(&workspaces, Some(Path::new("/tmp/bogus")));
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("workspace not registered"));
+    }
+
+    #[test]
+    fn resolve_workspace_multiple_no_hint_errors() {
+        let mut workspaces = HashMap::new();
+        workspaces.insert(
+            PathBuf::from("/tmp/ws1"),
+            test_workspace("/tmp/ws1", vec![]),
+        );
+        workspaces.insert(
+            PathBuf::from("/tmp/ws2"),
+            test_workspace("/tmp/ws2", vec![]),
+        );
+        let result = resolve_workspace(&workspaces, None);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("multiple workspaces registered"));
+    }
+
+    #[test]
+    fn resolve_workspace_empty_no_hint_errors() {
+        let workspaces: HashMap<PathBuf, WorkspaceState> = HashMap::new();
+        let result = resolve_workspace(&workspaces, None);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("no workspaces registered"));
+    }
+
+    // ── handle_request: CreateWorker error paths ─────────────
+
+    #[tokio::test]
+    async fn handle_request_create_unknown_agent() {
+        let (mut resp_rx, resp_tx, mut workspaces, event_tx, supervisor_tx) = test_harness();
+        let mut state_dirty = false;
+
+        workspaces.insert(
+            PathBuf::from("/tmp/ws1"),
+            test_workspace("/tmp/ws1", vec![]),
+        );
+
+        handle_request(
+            DaemonRequest::CreateWorker {
+                prompt: "test".into(),
+                agent: "totally-fake-agent".into(),
+                repo: None,
+                start_point: None,
+                review_configs: None,
+                workspace: Some(PathBuf::from("/tmp/ws1")),
+            },
+            &resp_tx,
+            &mut workspaces,
+            &event_tx,
+            &supervisor_tx,
+            &mut state_dirty,
+        )
+        .await;
+
+        let resp = resp_rx.try_recv().unwrap();
+        match resp {
+            DaemonResponse::Error { message } => {
+                assert!(message.contains("unknown agent"));
+            }
+            other => panic!("expected Error about unknown agent, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_request_create_no_workspace_registered() {
+        let (mut resp_rx, resp_tx, mut workspaces, event_tx, supervisor_tx) = test_harness();
+        let mut state_dirty = false;
+
+        // No workspaces registered
+        handle_request(
+            DaemonRequest::CreateWorker {
+                prompt: "test".into(),
+                agent: "claude-tui".into(),
+                repo: None,
+                start_point: None,
+                review_configs: None,
+                workspace: None,
+            },
+            &resp_tx,
+            &mut workspaces,
+            &event_tx,
+            &supervisor_tx,
+            &mut state_dirty,
+        )
+        .await;
+
+        let resp = resp_rx.try_recv().unwrap();
+        match resp {
+            DaemonResponse::Error { message } => {
+                assert!(message.contains("no workspaces registered"));
+            }
+            other => panic!("expected Error about no workspaces, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_request_create_unknown_repo_no_crash() {
+        let (mut resp_rx, resp_tx, mut workspaces, event_tx, supervisor_tx) = test_harness();
+        let mut state_dirty = false;
+
+        // Workspace with no repos detected
+        workspaces.insert(
+            PathBuf::from("/tmp/ws1"),
+            test_workspace("/tmp/ws1", vec![]),
+        );
+
+        handle_request(
+            DaemonRequest::CreateWorker {
+                prompt: "test".into(),
+                agent: "claude-tui".into(),
+                repo: Some("nonexistent-repo".into()),
+                start_point: None,
+                review_configs: None,
+                workspace: Some(PathBuf::from("/tmp/ws1")),
+            },
+            &resp_tx,
+            &mut workspaces,
+            &event_tx,
+            &supervisor_tx,
+            &mut state_dirty,
+        )
+        .await;
+
+        let resp = resp_rx.try_recv().unwrap();
+        match resp {
+            DaemonResponse::Error { message } => {
+                assert!(message.contains("unknown repo"));
+            }
+            other => panic!("expected Error about unknown repo, got {:?}", other),
+        }
+        // No panic — test passes if we get here
+    }
+
+    #[tokio::test]
+    async fn handle_request_merge_unknown_worker() {
+        let (mut resp_rx, resp_tx, mut workspaces, event_tx, supervisor_tx) = test_harness();
+        let mut state_dirty = false;
+
+        handle_request(
+            DaemonRequest::MergeWorker {
+                worktree_id: "nonexistent".into(),
+            },
+            &resp_tx,
+            &mut workspaces,
+            &event_tx,
+            &supervisor_tx,
+            &mut state_dirty,
+        )
+        .await;
+
+        let resp = resp_rx.try_recv().unwrap();
+        match resp {
+            DaemonResponse::Error { message } => {
+                assert!(message.contains("unknown worker"));
+            }
+            other => panic!("expected Error, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_request_unregister_unknown_workspace() {
+        let (mut resp_rx, resp_tx, mut workspaces, event_tx, supervisor_tx) = test_harness();
+        let mut state_dirty = false;
+
+        handle_request(
+            DaemonRequest::UnregisterWorkspace {
+                path: PathBuf::from("/tmp/not-registered"),
+            },
+            &resp_tx,
+            &mut workspaces,
+            &event_tx,
+            &supervisor_tx,
+            &mut state_dirty,
+        )
+        .await;
+
+        let resp = resp_rx.try_recv().unwrap();
+        match resp {
+            DaemonResponse::Error { message } => {
+                assert!(message.contains("workspace not registered"));
+            }
+            other => panic!("expected Error, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_request_get_history_unknown_worker() {
+        let (mut resp_rx, resp_tx, mut workspaces, event_tx, supervisor_tx) = test_harness();
+        let mut state_dirty = false;
+
+        handle_request(
+            DaemonRequest::GetHistory {
+                worktree_id: "nonexistent".into(),
+            },
+            &resp_tx,
+            &mut workspaces,
+            &event_tx,
+            &supervisor_tx,
+            &mut state_dirty,
+        )
+        .await;
+
+        let resp = resp_rx.try_recv().unwrap();
+        // GetHistory returns Ok with empty events for unknown workers
+        match resp {
+            DaemonResponse::Ok { data } => {
+                let data = data.unwrap();
+                let events = data["events"].as_str().unwrap();
+                assert!(events.is_empty());
+            }
+            other => panic!("expected Ok with empty events, got {:?}", other),
+        }
+    }
+
+    // ── IPC inbox -> dispatch integration tests ──────────────
+
+    #[test]
+    fn translate_inbox_close_to_daemon_request() {
+        let msg = InboxMessage::Close {
+            id: "msg-3".into(),
+            worktree: "hive-5".into(),
+            timestamp: chrono::Local::now(),
+        };
+        let req = protocol::translate_inbox_message(&msg);
+        match req {
+            DaemonRequest::CloseWorker { worktree_id } => {
+                assert_eq!(worktree_id, "hive-5");
+            }
+            _ => panic!("expected CloseWorker"),
+        }
+    }
+
+    #[test]
+    fn translate_inbox_merge_to_daemon_request() {
+        let msg = InboxMessage::Merge {
+            id: "msg-4".into(),
+            worktree: "hive-6".into(),
+            timestamp: chrono::Local::now(),
+        };
+        let req = protocol::translate_inbox_message(&msg);
+        match req {
+            DaemonRequest::MergeWorker { worktree_id } => {
+                assert_eq!(worktree_id, "hive-6");
+            }
+            _ => panic!("expected MergeWorker"),
+        }
+    }
+
+    #[test]
+    fn translate_inbox_review_to_daemon_request() {
+        let msg = InboxMessage::Review {
+            id: "msg-5".into(),
+            worktree: "hive-7".into(),
+            slug: Some("security-audit".into()),
+            timestamp: chrono::Local::now(),
+        };
+        let req = protocol::translate_inbox_message(&msg);
+        match req {
+            DaemonRequest::Review { worktree_id, slug } => {
+                assert_eq!(worktree_id, "hive-7");
+                assert_eq!(slug.as_deref(), Some("security-audit"));
+            }
+            _ => panic!("expected Review"),
         }
     }
 }

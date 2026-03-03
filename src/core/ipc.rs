@@ -561,4 +561,130 @@ mod tests {
             _ => panic!("expected ReviewStarted"),
         }
     }
+
+    // ── Inbox read/write integration tests ───────────────────
+
+    #[test]
+    fn test_read_inbox_empty_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let (messages, offset) = read_inbox(dir.path(), 0).unwrap();
+        assert!(messages.is_empty());
+        assert_eq!(offset, 0);
+    }
+
+    #[test]
+    fn test_read_inbox_with_messages() {
+        let dir = tempfile::tempdir().unwrap();
+        let inbox = inbox_path(dir.path());
+        std::fs::create_dir_all(inbox.parent().unwrap()).unwrap();
+
+        // Write two messages manually
+        let msg1 = serde_json::json!({
+            "action": "create",
+            "id": "msg-1",
+            "prompt": "fix auth bug",
+            "agent": "claude-tui",
+            "timestamp": "2025-01-01T00:00:00-05:00"
+        });
+        let msg2 = serde_json::json!({
+            "action": "send",
+            "id": "msg-2",
+            "worktree": "hive-1",
+            "message": "check the tests",
+            "timestamp": "2025-01-01T00:00:01-05:00"
+        });
+        let content = format!("{}\n{}\n", msg1, msg2);
+        std::fs::write(&inbox, &content).unwrap();
+
+        let (messages, offset) = read_inbox(dir.path(), 0).unwrap();
+        assert_eq!(messages.len(), 2);
+        match &messages[0] {
+            InboxMessage::Create { prompt, .. } => assert_eq!(prompt, "fix auth bug"),
+            other => panic!("expected Create, got {:?}", other),
+        }
+        match &messages[1] {
+            InboxMessage::Send { worktree, message, .. } => {
+                assert_eq!(worktree, "hive-1");
+                assert_eq!(message, "check the tests");
+            }
+            other => panic!("expected Send, got {:?}", other),
+        }
+
+        // Second read at new offset returns nothing
+        let (messages2, _) = read_inbox(dir.path(), offset).unwrap();
+        assert!(messages2.is_empty());
+    }
+
+    #[test]
+    fn test_read_inbox_offset_tracking() {
+        let dir = tempfile::tempdir().unwrap();
+        let inbox = inbox_path(dir.path());
+        std::fs::create_dir_all(inbox.parent().unwrap()).unwrap();
+
+        // Write first message
+        let msg1 = serde_json::json!({
+            "action": "close",
+            "id": "msg-1",
+            "worktree": "hive-1",
+            "timestamp": "2025-01-01T00:00:00-05:00"
+        });
+        std::fs::write(&inbox, format!("{}\n", msg1)).unwrap();
+
+        let (messages, offset1) = read_inbox(dir.path(), 0).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert!(offset1 > 0);
+
+        // Append a second message
+        use std::io::Write;
+        let msg2 = serde_json::json!({
+            "action": "merge",
+            "id": "msg-2",
+            "worktree": "hive-2",
+            "timestamp": "2025-01-01T00:00:01-05:00"
+        });
+        let mut file = std::fs::OpenOptions::new().append(true).open(&inbox).unwrap();
+        writeln!(file, "{}", msg2).unwrap();
+
+        // Read from saved offset — only gets the new message
+        let (messages2, offset2) = read_inbox(dir.path(), offset1).unwrap();
+        assert_eq!(messages2.len(), 1);
+        match &messages2[0] {
+            InboxMessage::Merge { worktree, .. } => assert_eq!(worktree, "hive-2"),
+            other => panic!("expected Merge, got {:?}", other),
+        }
+        assert!(offset2 > offset1);
+    }
+
+    #[test]
+    fn test_emit_multiple_events() {
+        let dir = tempfile::tempdir().unwrap();
+
+        emit_event(
+            dir.path(),
+            &SwarmEvent::WorktreeCreated {
+                worktree: "hive-1".to_string(),
+                branch: "swarm/hive-1".to_string(),
+                agent: "claude-tui".to_string(),
+                pane_id: "daemon".to_string(),
+                timestamp: Local::now(),
+            },
+        )
+        .unwrap();
+
+        emit_event(
+            dir.path(),
+            &SwarmEvent::AgentDone {
+                worktree: "hive-1".to_string(),
+                timestamp: Local::now(),
+            },
+        )
+        .unwrap();
+
+        let events_file = dir.path().join(".swarm").join("events.jsonl");
+        let content = std::fs::read_to_string(&events_file).unwrap();
+        let lines: Vec<&str> = content.lines().filter(|l| !l.is_empty()).collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("worktree_created"));
+        assert!(lines[1].contains("agent_done"));
+    }
 }
