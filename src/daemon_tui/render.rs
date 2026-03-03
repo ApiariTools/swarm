@@ -55,6 +55,7 @@ pub fn draw(frame: &mut Frame, app: &mut DaemonTuiApp) {
         Mode::CreatePrompt => draw_create_prompt_overlay(frame, area, app),
         Mode::RepoSelect => draw_repo_select_overlay(frame, area, app),
         Mode::AgentSelect => draw_agent_select_overlay(frame, area, app),
+        Mode::ModifierSelect => draw_modifier_select_overlay(frame, area, app),
         Mode::ReviewSelect => draw_review_select_overlay(frame, area, app),
         Mode::Input => draw_input_overlay(frame, area, app),
         Mode::PrDetail => draw_pr_detail_overlay(frame, area, app),
@@ -145,13 +146,17 @@ fn draw_sidebar_header(frame: &mut Frame, area: Rect, app: &DaemonTuiApp, is_foc
     );
 
     // Line 2: connection status
-    let conn_span = if app.connected {
-        Span::styled(" daemon \u{25cf}", theme::success())
+    let conn_line = if app.connected {
+        Line::from(Span::styled(" daemon \u{25cf}", theme::success()))
     } else {
-        Span::styled(" daemon \u{25cb}", theme::error())
+        let spin = SPINNER[(app.tick_count / 4) as usize % SPINNER.len()];
+        Line::from(vec![
+            Span::styled(format!(" {} ", spin), Style::default().fg(theme::HONEY)),
+            Span::styled("connecting...", Style::default().fg(theme::SMOKE)),
+        ])
     };
     frame.render_widget(
-        Paragraph::new(Line::from(conn_span)),
+        Paragraph::new(conn_line),
         Rect::new(area.x, area.y + 1, area.width, 1),
     );
 }
@@ -1121,6 +1126,97 @@ fn draw_agent_select_overlay(frame: &mut Frame, area: Rect, app: &DaemonTuiApp) 
         ]);
         frame.render_widget(Paragraph::new(line), Rect::new(inner.x, y, inner.width, 1));
     }
+}
+
+fn draw_modifier_select_overlay(frame: &mut Frame, area: Rect, app: &DaemonTuiApp) {
+    let popup_width = (area.width).min(54);
+    let popup_height = (app.modifier_prompts.len() as u16 + 6).min(area.height);
+    let popup = centered_rect(popup_width, popup_height, area);
+    frame.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .title(Span::styled(" modifiers ", theme::title()))
+        .borders(Borders::ALL)
+        .border_style(theme::border_active())
+        .style(Style::default().bg(theme::COMB));
+
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    if app.modifier_prompts.is_empty() {
+        let empty = Line::from(Span::styled(" no modifiers available", theme::muted()));
+        frame.render_widget(
+            Paragraph::new(empty),
+            Rect::new(inner.x, inner.y + 1, inner.width, 1),
+        );
+    } else {
+        for (i, modifier) in app.modifier_prompts.iter().enumerate() {
+            let y = inner.y + 1 + i as u16;
+            if y >= inner.y + inner.height.saturating_sub(3) {
+                break;
+            }
+            let is_cursor = i == app.modifier_cursor;
+            let is_checked = app.modifier_selected[i];
+
+            let cursor_indicator = if is_cursor { "\u{25b8}" } else { " " };
+            let checkbox = if is_checked { "[x]" } else { "[ ]" };
+
+            let cursor_style = if is_cursor {
+                theme::selected()
+            } else {
+                theme::muted()
+            };
+            let checkbox_style = if is_checked {
+                Style::default().fg(theme::HONEY)
+            } else {
+                theme::muted()
+            };
+            let label_style = if is_cursor {
+                theme::selected()
+            } else {
+                theme::text()
+            };
+
+            let line = Line::from(vec![
+                Span::styled(format!(" {} ", cursor_indicator), cursor_style),
+                Span::styled(format!("{} ", checkbox), checkbox_style),
+                Span::styled(modifier.label(), label_style),
+            ]);
+            frame.render_widget(
+                Paragraph::new(line),
+                Rect::new(inner.x, y, inner.width, 1),
+            );
+        }
+    }
+
+    // Context line
+    let count = app.modifier_selected.iter().filter(|&&s| s).count();
+    let ctx = Line::from(vec![
+        Span::styled(format!(" selected: {}", count), theme::muted()),
+        Span::styled("  (optional, prepended to prompt)", theme::muted()),
+    ]);
+    let ctx_y = inner.y + inner.height.saturating_sub(3);
+    frame.render_widget(
+        Paragraph::new(ctx),
+        Rect::new(inner.x, ctx_y, inner.width, 1),
+    );
+
+    // Hint
+    let hint = Line::from(vec![
+        Span::styled("space", theme::key_hint()),
+        Span::styled(" toggle  ", theme::key_desc()),
+        Span::styled("a", theme::key_hint()),
+        Span::styled(" all  ", theme::key_desc()),
+        Span::styled("\u{21b5}", theme::key_hint()),
+        Span::styled(" next  ", theme::key_desc()),
+        Span::styled("esc", theme::key_hint()),
+        Span::styled(" back", theme::key_desc()),
+    ]);
+    let hint_y = inner.y + inner.height.saturating_sub(1);
+    frame.render_widget(
+        Paragraph::new(hint),
+        Rect::new(inner.x + 1, hint_y, inner.width.saturating_sub(2), 1),
+    );
 }
 
 fn draw_review_select_overlay(frame: &mut Frame, area: Rect, app: &DaemonTuiApp) {

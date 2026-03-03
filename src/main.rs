@@ -43,6 +43,10 @@ enum Commands {
         /// Can be specified multiple times: --review code-review --review security-audit
         #[arg(long)]
         review: Vec<String>,
+        /// Prompt modifiers to prepend (slug: research-first, explore-patterns, or custom .swarm/modifiers/*.md).
+        /// Can be specified multiple times: --mod research-first --mod explore-patterns
+        #[arg(long = "mod")]
+        modifiers: Vec<String>,
     },
     /// Send a message to a worktree's agent
     Send {
@@ -142,6 +146,7 @@ async fn main() -> Result<()> {
             agent,
             repo,
             review,
+            modifiers,
         }) => {
             cmd_create(
                 work_dir,
@@ -150,6 +155,7 @@ async fn main() -> Result<()> {
                 agent.unwrap_or_else(|| "claude-tui".to_string()),
                 repo,
                 review,
+                modifiers,
             )
             .await
         }
@@ -202,7 +208,13 @@ async fn run_default_tui(work_dir: std::path::PathBuf) -> Result<()> {
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_else(|_| "swarm".to_string());
 
-        let mut child = std::process::Command::new(&exe)
+        // Log daemon stderr to a file so we can diagnose startup failures.
+        let log_dir = work_dir.join(".swarm");
+        std::fs::create_dir_all(&log_dir).ok();
+        let daemon_log = std::fs::File::create(log_dir.join("daemon-stderr.log"))
+            .unwrap_or_else(|_| std::fs::File::open("/dev/null").unwrap());
+
+        std::process::Command::new(&exe)
             .args([
                 "-d",
                 &work_dir.to_string_lossy(),
@@ -212,35 +224,11 @@ async fn run_default_tui(work_dir: std::path::PathBuf) -> Result<()> {
             ])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::from(daemon_log))
             .spawn()
             .map_err(|e| color_eyre::eyre::eyre!("failed to spawn daemon: {}", e))?;
 
-        // Wait for daemon to be ready by sending a Ping
-        let start = std::time::Instant::now();
-        loop {
-            if start.elapsed() > std::time::Duration::from_secs(10) {
-                if let Some(status) = child.try_wait()? {
-                    return Err(color_eyre::eyre::eyre!(
-                        "daemon exited immediately with status: {}",
-                        status
-                    ));
-                }
-                return Err(color_eyre::eyre::eyre!(
-                    "timed out waiting for daemon to start"
-                ));
-            }
-            match core::ipc::send_daemon_request(
-                &work_dir,
-                &daemon::protocol::DaemonRequest::Ping,
-            ) {
-                Ok(daemon::protocol::DaemonResponse::Ok { .. }) => break,
-                _ => {
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                }
-            }
-        }
-        eprintln!("[swarm] Daemon started (pid {})", child.id());
+        // Don't wait for daemon readiness — TUI's reconnect loop handles it
     } else {
         // Daemon already running — register workspace in background (don't block TUI startup)
         let bg_dir = work_dir.clone();
@@ -327,8 +315,29 @@ async fn cmd_create(
     agent: String,
     repo: Option<String>,
     review: Vec<String>,
+    modifiers: Vec<String>,
 ) -> Result<()> {
-    let prompt = resolve_prompt(prompt, prompt_file)?;
+    let mut prompt = resolve_prompt(prompt, prompt_file)?;
+
+    // Resolve --mod slugs and assemble prompt
+    if !modifiers.is_empty() {
+        let available = core::modifier::ModifierPrompt::available(&work_dir);
+        let slugs: Vec<&str> = available.iter().map(|m| m.slug()).collect();
+        let mut resolved = Vec::new();
+        for slug in &modifiers {
+            let modifier =
+                core::modifier::ModifierPrompt::from_slug(slug, &work_dir).ok_or_else(|| {
+                    color_eyre::eyre::eyre!(
+                        "unknown modifier '{}' (available: {})",
+                        slug,
+                        slugs.join(", ")
+                    )
+                })?;
+            resolved.push(modifier);
+        }
+        let selected = vec![true; resolved.len()];
+        prompt = core::modifier::assemble_prompt(&prompt, &resolved, &selected);
+    }
 
     // Validate --repo when multiple repos detected
     let repo = if repo.is_some() {

@@ -1,20 +1,38 @@
+/// Write a diagnostic line to `.swarm/tui-debug.log` (TUI process can't use
+/// eprintln because stdout is in raw mode, and swarm_log! is only initialised
+/// in the daemon process).
+macro_rules! tui_log {
+    ($work_dir:expr, $($arg:tt)*) => {{
+        use std::io::Write;
+        let ts = chrono::Local::now().format("%H:%M:%S%.3f");
+        let msg = format!("[{}] {}\n", ts, format!($($arg)*));
+        let path = $work_dir.join(".swarm").join("tui-debug.log");
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            let _ = f.write_all(msg.as_bytes());
+        }
+    }};
+}
+
 pub mod app;
 pub mod render;
 pub mod socket_client;
 
 use app::{DaemonTuiApp, Mode, Panel, PendingAction, PrDetailInfo, daemon_agents};
 use color_eyre::Result;
-use crossterm::event::{self, KeyCode, KeyModifiers, MouseButton, MouseEventKind};
+use crossterm::event::{EventStream, KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use crossterm::ExecutableCommand;
+use futures::StreamExt;
 use ratatui::prelude::*;
-use socket_client::DaemonClient;
+use socket_client::{DaemonClient, DaemonReader};
 use std::io::stdout;
 use std::path::PathBuf;
 use std::time::Duration;
+use tokio::sync::mpsc;
 
+use crate::core::modifier;
 use crate::core::review::{ReviewConfig, load_reviews_toml};
 use crate::daemon::protocol::{DaemonRequest, DaemonResponse};
 
@@ -53,16 +71,13 @@ pub async fn run_remote(addr: String, token: String) -> Result<()> {
     app.connected = true;
     app.is_remote = true;
 
-    // Fire-and-forget: request worker list. Response arrives in the event drain loop.
+    // Fire-and-forget: request worker list. Response arrives via reader task.
     if let Err(e) = client
         .send(&DaemonRequest::ListWorkers { workspace: None })
         .await
     {
         app.set_status(format!("list workers failed: {}", e));
     }
-
-    // Remote mode: no repo detection
-    // app.repos stays empty
 
     // Enter terminal raw mode
     stdout().execute(EnterAlternateScreen)?;
@@ -83,63 +98,35 @@ pub async fn run_remote(addr: String, token: String) -> Result<()> {
 
 /// Run the daemon TUI.
 pub async fn run(work_dir: PathBuf) -> Result<()> {
-    // Connect + subscribe with retries — on cold start the daemon may not be
-    // fully ready even though Ping succeeded (socket server is up before the
-    // main event loop processes Subscribe).
-    let mut client = None;
-    for attempt in 0..10 {
-        match DaemonClient::connect(&work_dir).await {
-            Ok(mut c) => match c.subscribe(None).await {
-                Ok(DaemonResponse::Ok { .. }) => {
-                    client = Some(c);
-                    break;
-                }
-                Ok(DaemonResponse::Error { message }) => {
-                    if attempt == 9 {
-                        return Err(color_eyre::eyre::eyre!("subscribe failed: {}", message));
-                    }
-                }
-                Ok(_) => {
-                    client = Some(c);
-                    break;
-                }
-                Err(_) => {}
-            },
-            Err(_) => {}
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    let mut client = client.ok_or_else(|| {
-        color_eyre::eyre::eyre!("failed to connect to daemon after 10 attempts")
-    })?;
+    tui_log!(&work_dir, "run() entry");
 
+    // Enter terminal raw mode FIRST — user sees TUI instantly
+    stdout().execute(EnterAlternateScreen)?;
+    stdout().execute(crossterm::event::EnableMouseCapture)?;
+    enable_raw_mode()?;
+    tui_log!(&work_dir, "TUI visible (EnterAlternateScreen)");
+
+    let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
+    terminal.clear()?;
+
+    // App starts disconnected; reconnect loop handles initial connection.
+    // Set reconnect_at to the past so the first tick triggers an immediate attempt.
     let mut app = DaemonTuiApp::new(work_dir.clone());
-    app.connected = true;
+    app.reconnect_at = Some(std::time::Instant::now() - Duration::from_secs(1));
 
-    // Fire-and-forget: request worker list. Response arrives in the event drain loop.
-    // Don't use request_skipping_events — it blocks reading through all buffered events.
-    if let Err(e) = client
-        .send(&DaemonRequest::ListWorkers {
-            workspace: Some(work_dir.clone()),
-        })
-        .await
-    {
-        app.set_status(format!("list workers failed: {}", e));
-    }
+    // Create a placeholder client (not yet connected)
+    let mut client = DaemonClient::disconnected();
+
+    // First draw — shows "connecting..." state
+    terminal.draw(|frame| render::draw(frame, &mut app))?;
+    app.needs_redraw = false;
+    tui_log!(&work_dir, "first draw complete");
 
     // Detect repos in background (spawns git subprocesses, can take seconds)
     let bg_work_dir = work_dir.clone();
     let repo_task = tokio::task::spawn_blocking(move || {
         crate::core::git::detect_repos(&bg_work_dir).unwrap_or_default()
     });
-
-    // Enter terminal raw mode
-    stdout().execute(EnterAlternateScreen)?;
-    stdout().execute(crossterm::event::EnableMouseCapture)?;
-    enable_raw_mode()?;
-
-    let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
-    terminal.clear()?;
 
     let result = event_loop(&mut terminal, &mut app, &mut client, Some(repo_task)).await;
 
@@ -150,36 +137,62 @@ pub async fn run(work_dir: PathBuf) -> Result<()> {
     result
 }
 
-/// The main TUI event loop.
+// ── Background reader task ──────────────────────────────────
+
+/// Background task that reads daemon responses and forwards them on a channel.
+///
+/// Runs `read_line` in a tight loop (no `select!`, no timeouts) so there are
+/// no cancellation-safety issues. Exits on EOF, I/O error, or when the
+/// receiver is dropped.
+async fn daemon_reader_task(
+    mut reader: DaemonReader,
+    tx: mpsc::UnboundedSender<Result<DaemonResponse>>,
+) {
+    loop {
+        let result = reader.next_response().await;
+        let is_err = result.is_err();
+        if tx.send(result).is_err() {
+            break; // receiver dropped
+        }
+        if is_err {
+            break; // disconnected
+        }
+    }
+}
+
+// ── Main event loop ─────────────────────────────────────────
+
+/// The main TUI event loop using `tokio::select!` with three async sources:
+/// 1. `EventStream` — crossterm terminal events (keyboard, mouse)
+/// 2. `mpsc channel` — daemon responses from the reader task
+/// 3. `interval` — periodic tick for animations and housekeeping
 async fn event_loop(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     app: &mut DaemonTuiApp,
     client: &mut DaemonClient,
     mut repo_task: Option<tokio::task::JoinHandle<Vec<PathBuf>>>,
 ) -> Result<()> {
+    // Spawn daemon reader task
+    let (daemon_tx, mut daemon_rx) = mpsc::unbounded_channel();
+    if let Some(reader) = client.take_reader() {
+        tokio::spawn(daemon_reader_task(reader, daemon_tx.clone()));
+    }
+
+    // Async terminal event stream (non-blocking, backed by internal thread)
+    let mut event_stream = EventStream::new();
+
+    // Tick interval for spinner animation and periodic housekeeping
+    let mut tick = tokio::time::interval(Duration::from_millis(250));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
     loop {
+        // Draw if state has changed
         if app.needs_redraw {
             terminal.draw(|frame| render::draw(frame, app))?;
             app.needs_redraw = false;
         }
-        app.tick();
-        if let Some(conv) = app.selected_conversation_mut() {
-            conv.validate_focus();
-        }
 
-        // Check if background repo detection finished
-        if let Some(ref task) = repo_task {
-            if task.is_finished() {
-                if let Some(task) = repo_task.take() {
-                    if let Ok(repos) = task.await {
-                        app.repos = repos;
-                        app.needs_redraw = true;
-                    }
-                }
-            }
-        }
-
-        // Lazy-load history for the selected worker on first view (fire-and-forget)
+        // Lazy-load history for the selected worker on first view
         if let Some(w) = app.selected_worker() {
             let wt_id = w.id.clone();
             if app.connected && !app.history_loaded.contains(&wt_id) {
@@ -197,130 +210,87 @@ async fn event_loop(
             }
         }
 
-        // Poll for crossterm events (keyboard + mouse) with short timeout
-        let poll_ms = 100;
-        if event::poll(Duration::from_millis(poll_ms))? {
-            app.needs_redraw = true;
-            let action = match event::read()? {
-                event::Event::Key(key) => {
-                    // Ctrl+C always quits
-                    if key.modifiers.contains(KeyModifiers::CONTROL)
-                        && key.code == KeyCode::Char('c')
-                    {
-                        break;
-                    }
-                    handle_key(app, key)
-                }
-                event::Event::Mouse(mouse) => handle_mouse(app, mouse),
-                _ => KeyAction::None,
-            };
+        tokio::select! {
+            // Terminal events (keyboard, mouse, resize)
+            maybe_event = event_stream.next() => {
+                let event = match maybe_event {
+                    Some(Ok(event)) => event,
+                    Some(Err(_)) => continue,
+                    None => break, // terminal stream ended
+                };
 
-            match action {
-                KeyAction::None => {}
-                KeyAction::Quit => break,
-                KeyAction::CreateWorker {
-                    prompt,
-                    agent,
-                    repo,
-                    review_configs,
-                } => {
-                    app.set_status("creating worker...".to_string());
-                    let req = DaemonRequest::CreateWorker {
-                        prompt,
-                        agent,
-                        repo,
-                        start_point: None,
-                        review_configs,
-                        workspace: Some(app.work_dir.clone()),
-                    };
-                    fire_and_forget(client, app, req).await;
-                    // Queue a list refresh — daemon processes FIFO so this
-                    // runs after CreateWorker completes on the server side.
-                    fire_and_forget(
-                        client,
-                        app,
-                        DaemonRequest::ListWorkers {
-                            workspace: Some(app.work_dir.clone()),
-                        },
-                    )
-                    .await;
-                }
-                KeyAction::SendMessage { worktree_id, text } => {
-                    let req = DaemonRequest::SendMessage {
-                        worktree_id: worktree_id.clone(),
-                        message: text.clone(),
-                    };
-                    // Add user message to conversation immediately
-                    if let Some(conv) = app.conversations.get_mut(&worktree_id) {
-                        conv.entries
-                            .push(crate::agent_tui::app::ConversationEntry::User {
-                                text,
-                            });
-                        conv.auto_scroll = true;
+                app.needs_redraw = true;
+                let action = match event {
+                    crossterm::event::Event::Key(key) => {
+                        if key.modifiers.contains(KeyModifiers::CONTROL)
+                            && key.code == KeyCode::Char('c')
+                        {
+                            break;
+                        }
+                        handle_key(app, key)
                     }
-                    fire_and_forget(client, app, req).await;
+                    crossterm::event::Event::Mouse(mouse) => handle_mouse(app, mouse),
+                    _ => KeyAction::None,
+                };
+
+                if matches!(action, KeyAction::Quit) {
+                    break;
                 }
-                KeyAction::CloseWorker(id) => {
-                    app.set_status(format!("closing {}...", id));
-                    let req = DaemonRequest::CloseWorker {
-                        worktree_id: id,
-                    };
-                    fire_and_forget(client, app, req).await;
-                    fire_and_forget(
-                        client,
-                        app,
-                        DaemonRequest::ListWorkers {
-                            workspace: Some(app.work_dir.clone()),
-                        },
-                    )
-                    .await;
-                }
-                KeyAction::MergeWorker(id) => {
-                    app.set_status(format!("merging {}...", id));
-                    let req = DaemonRequest::MergeWorker {
-                        worktree_id: id,
-                    };
-                    fire_and_forget(client, app, req).await;
-                    fire_and_forget(
-                        client,
-                        app,
-                        DaemonRequest::ListWorkers {
-                            workspace: Some(app.work_dir.clone()),
-                        },
-                    )
-                    .await;
-                }
+                handle_action(app, client, action).await;
             }
-        }
 
-        // Drain all buffered daemon responses (up to 100 per tick)
-        if app.connected {
-            for _ in 0..100 {
-                match tokio::time::timeout(Duration::from_millis(1), client.next_response()).await {
-                    Ok(Ok(resp)) => {
+            // Daemon responses from the background reader task
+            Some(result) = daemon_rx.recv() => {
+                match result {
+                    Ok(resp) => {
                         handle_daemon_response(app, resp);
                     }
-                    Ok(Err(e)) => {
+                    Err(e) => {
+                        tui_log!(&app.work_dir, "reader task error: {}", e);
                         app.connected = false;
                         app.reconnect_at = Some(std::time::Instant::now());
                         app.set_status(format!("disconnected: {}", e));
-                        break;
                     }
-                    Err(_) => break, // no more buffered data
                 }
+                app.needs_redraw = true;
             }
-        } else if let Some(at) = app.reconnect_at {
-            // Attempt reconnection every 500ms
-            if at.elapsed() >= Duration::from_millis(500) {
-                app.reconnect_at = Some(std::time::Instant::now());
-                match try_reconnect(app, client).await {
-                    Ok(()) => {
-                        app.connected = true;
-                        app.reconnect_at = None;
-                        app.set_status("reconnected".to_string());
-                    }
-                    Err(_) => {
-                        // Still disconnected, will retry
+
+            // Periodic tick for animations and housekeeping
+            _ = tick.tick() => {
+                app.tick();
+
+                if let Some(conv) = app.selected_conversation_mut() {
+                    conv.validate_focus();
+                }
+
+                // Check if background repo detection finished
+                if let Some(ref task) = repo_task
+                    && task.is_finished()
+                    && let Some(task) = repo_task.take()
+                    && let Ok(repos) = task.await
+                {
+                    tui_log!(&app.work_dir, "detect_repos finished: {} repos", repos.len());
+                    app.repos = repos;
+                    app.needs_redraw = true;
+                }
+
+                // Reconnection attempts
+                if !app.connected
+                    && let Some(at) = app.reconnect_at
+                    && at.elapsed() >= Duration::from_millis(500)
+                {
+                    app.reconnect_at = Some(std::time::Instant::now());
+                    tui_log!(&app.work_dir, "reconnect attempt...");
+                    match try_reconnect(app, client, &daemon_tx).await {
+                        Ok(()) => {
+                            app.connected = true;
+                            app.reconnect_at = None;
+                            tui_log!(&app.work_dir, "connected + subscribed");
+                            app.set_status("connected".to_string());
+                        }
+                        Err(e) => {
+                            tui_log!(&app.work_dir, "reconnect failed: {}", e);
+                        }
                     }
                 }
             }
@@ -349,8 +319,83 @@ enum KeyAction {
     MergeWorker(String),
 }
 
+/// Execute a KeyAction by sending requests to the daemon.
+async fn handle_action(
+    app: &mut DaemonTuiApp,
+    client: &mut DaemonClient,
+    action: KeyAction,
+) {
+    match action {
+        KeyAction::None | KeyAction::Quit => {}
+        KeyAction::CreateWorker {
+            prompt,
+            agent,
+            repo,
+            review_configs,
+        } => {
+            app.set_status("creating worker...".to_string());
+            let req = DaemonRequest::CreateWorker {
+                prompt,
+                agent,
+                repo,
+                start_point: None,
+                review_configs,
+                workspace: Some(app.work_dir.clone()),
+            };
+            fire_and_forget(client, app, req).await;
+            fire_and_forget(
+                client,
+                app,
+                DaemonRequest::ListWorkers {
+                    workspace: Some(app.work_dir.clone()),
+                },
+            )
+            .await;
+        }
+        KeyAction::SendMessage { worktree_id, text } => {
+            let req = DaemonRequest::SendMessage {
+                worktree_id: worktree_id.clone(),
+                message: text.clone(),
+            };
+            // Add user message to conversation immediately
+            if let Some(conv) = app.conversations.get_mut(&worktree_id) {
+                conv.entries
+                    .push(crate::agent_tui::app::ConversationEntry::User { text });
+                conv.auto_scroll = true;
+            }
+            fire_and_forget(client, app, req).await;
+        }
+        KeyAction::CloseWorker(id) => {
+            app.set_status(format!("closing {}...", id));
+            let req = DaemonRequest::CloseWorker { worktree_id: id };
+            fire_and_forget(client, app, req).await;
+            fire_and_forget(
+                client,
+                app,
+                DaemonRequest::ListWorkers {
+                    workspace: Some(app.work_dir.clone()),
+                },
+            )
+            .await;
+        }
+        KeyAction::MergeWorker(id) => {
+            app.set_status(format!("merging {}...", id));
+            let req = DaemonRequest::MergeWorker { worktree_id: id };
+            fire_and_forget(client, app, req).await;
+            fire_and_forget(
+                client,
+                app,
+                DaemonRequest::ListWorkers {
+                    workspace: Some(app.work_dir.clone()),
+                },
+            )
+            .await;
+        }
+    }
+}
+
 /// Handle a key event and return the action to take.
-fn handle_key(app: &mut DaemonTuiApp, key: event::KeyEvent) -> KeyAction {
+fn handle_key(app: &mut DaemonTuiApp, key: crossterm::event::KeyEvent) -> KeyAction {
     match app.mode {
         Mode::Help => {
             // Any key dismisses help
@@ -454,9 +499,10 @@ fn handle_key(app: &mut DaemonTuiApp, key: event::KeyEvent) -> KeyAction {
                 KeyAction::None
             }
             KeyCode::Enter => {
-                app.pending_repo = app.repos.get(app.repo_select_index).map(|r| {
-                    crate::core::git::repo_name(r)
-                });
+                app.pending_repo = app
+                    .repos
+                    .get(app.repo_select_index)
+                    .map(|r| crate::core::git::repo_name(r));
                 app.input_buffer.clear();
                 app.input_cursor = 0;
                 app.mode = Mode::CreatePrompt;
@@ -481,9 +527,9 @@ fn handle_key(app: &mut DaemonTuiApp, key: event::KeyEvent) -> KeyAction {
                 KeyAction::None
             }
             KeyCode::Enter => {
-                app.review_cursor = 0;
-                app.review_selected = vec![false; app.review_prompts.len()];
-                app.mode = Mode::ReviewSelect;
+                app.modifier_cursor = 0;
+                app.modifier_selected = vec![false; app.modifier_prompts.len()];
+                app.mode = Mode::ModifierSelect;
                 KeyAction::None
             }
             KeyCode::Esc => {
@@ -496,10 +542,47 @@ fn handle_key(app: &mut DaemonTuiApp, key: event::KeyEvent) -> KeyAction {
                 let agents = daemon_agents();
                 if idx < agents.len() {
                     app.agent_select_index = idx;
-                    app.review_cursor = 0;
-                    app.review_selected = vec![false; app.review_prompts.len()];
-                    app.mode = Mode::ReviewSelect;
+                    app.modifier_cursor = 0;
+                    app.modifier_selected = vec![false; app.modifier_prompts.len()];
+                    app.mode = Mode::ModifierSelect;
                 }
+                KeyAction::None
+            }
+            _ => KeyAction::None,
+        },
+        Mode::ModifierSelect => match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                app.modifier_cursor = app.modifier_cursor.saturating_sub(1);
+                KeyAction::None
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if app.modifier_cursor + 1 < app.modifier_prompts.len() {
+                    app.modifier_cursor += 1;
+                }
+                KeyAction::None
+            }
+            KeyCode::Char(' ') => {
+                if let Some(sel) = app.modifier_selected.get_mut(app.modifier_cursor) {
+                    *sel = !*sel;
+                }
+                KeyAction::None
+            }
+            KeyCode::Char('a') => {
+                let any_selected = app.modifier_selected.iter().any(|&s| s);
+                let new_val = !any_selected;
+                for sel in &mut app.modifier_selected {
+                    *sel = new_val;
+                }
+                KeyAction::None
+            }
+            KeyCode::Enter => {
+                app.review_cursor = 0;
+                app.review_selected = vec![false; app.review_prompts.len()];
+                app.mode = Mode::ReviewSelect;
+                KeyAction::None
+            }
+            KeyCode::Esc => {
+                app.mode = Mode::AgentSelect;
                 KeyAction::None
             }
             _ => KeyAction::None,
@@ -535,10 +618,17 @@ fn handle_key(app: &mut DaemonTuiApp, key: event::KeyEvent) -> KeyAction {
                     .get(app.agent_select_index)
                     .map(|a| a.label().to_string())
                     .unwrap_or_else(|| "claude".to_string());
-                let prompt = std::mem::take(&mut app.pending_prompt);
+                let raw_prompt = std::mem::take(&mut app.pending_prompt);
                 let repo = app.pending_repo.take();
 
-                // Build review_configs from selections (same logic as picker.rs)
+                // Assemble modifiers into prompt
+                let prompt = modifier::assemble_prompt(
+                    &raw_prompt,
+                    &app.modifier_prompts,
+                    &app.modifier_selected,
+                );
+
+                // Build review_configs from selections
                 let project_config = load_reviews_toml(&app.work_dir);
                 let selected: Vec<ReviewConfig> = app
                     .review_prompts
@@ -571,7 +661,7 @@ fn handle_key(app: &mut DaemonTuiApp, key: event::KeyEvent) -> KeyAction {
                 }
             }
             KeyCode::Esc => {
-                app.mode = Mode::AgentSelect;
+                app.mode = Mode::ModifierSelect;
                 KeyAction::None
             }
             _ => KeyAction::None,
@@ -621,196 +711,189 @@ fn handle_key(app: &mut DaemonTuiApp, key: event::KeyEvent) -> KeyAction {
             }
             _ => KeyAction::None,
         },
-        Mode::Normal => {
-            match app.focus {
-                Panel::Sidebar => match key.code {
-                    KeyCode::Char('q') => KeyAction::Quit,
-                    KeyCode::Char('?') => {
-                        app.mode = Mode::Help;
-                        KeyAction::None
+        Mode::Normal => match app.focus {
+            Panel::Sidebar => match key.code {
+                KeyCode::Char('q') => KeyAction::Quit,
+                KeyCode::Char('?') => {
+                    app.mode = Mode::Help;
+                    KeyAction::None
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    app.select_next();
+                    KeyAction::None
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    app.select_prev();
+                    KeyAction::None
+                }
+                KeyCode::Tab | KeyCode::Char('l') | KeyCode::Enter => {
+                    if !app.workers.is_empty() {
+                        app.focus = Panel::Conversation;
                     }
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        app.select_next();
-                        KeyAction::None
+                    KeyAction::None
+                }
+                KeyCode::Char('n') => {
+                    app.ensure_prompts_loaded();
+                    app.input_buffer.clear();
+                    app.input_cursor = 0;
+                    if app.repos.len() > 1 {
+                        app.repo_select_index = 0;
+                        app.mode = Mode::RepoSelect;
+                    } else {
+                        app.pending_repo =
+                            app.repos.first().map(|r| crate::core::git::repo_name(r));
+                        app.mode = Mode::CreatePrompt;
                     }
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        app.select_prev();
-                        KeyAction::None
+                    KeyAction::None
+                }
+                KeyCode::Char('x') => {
+                    if let Some(w) = app.selected_worker() {
+                        let id = w.id.clone();
+                        app.confirm_message = format!("Close {}? (y/n)", id);
+                        app.pending_action = Some(PendingAction::Close(id));
+                        app.mode = Mode::Confirm;
                     }
-                    KeyCode::Tab | KeyCode::Char('l') | KeyCode::Enter => {
-                        if !app.workers.is_empty() {
-                            app.focus = Panel::Conversation;
-                        }
-                        KeyAction::None
+                    KeyAction::None
+                }
+                KeyCode::Char('m') => {
+                    if let Some(w) = app.selected_worker() {
+                        let id = w.id.clone();
+                        app.confirm_message = format!("Merge {}? (y/n)", id);
+                        app.pending_action = Some(PendingAction::Merge(id));
+                        app.mode = Mode::Confirm;
                     }
-                    KeyCode::Char('n') => {
+                    KeyAction::None
+                }
+                KeyCode::Char('s') => {
+                    if app.selected_worker().is_some() {
                         app.input_buffer.clear();
                         app.input_cursor = 0;
-                        if app.repos.len() > 1 {
-                            app.repo_select_index = 0;
-                            app.mode = Mode::RepoSelect;
-                        } else {
-                            app.pending_repo = app.repos.first().map(|r| {
-                                crate::core::git::repo_name(r)
-                            });
-                            app.mode = Mode::CreatePrompt;
-                        }
-                        KeyAction::None
+                        app.mode = Mode::Input;
                     }
-                    KeyCode::Char('x') => {
-                        if let Some(w) = app.selected_worker() {
-                            let id = w.id.clone();
-                            app.confirm_message = format!("Close {}? (y/n)", id);
-                            app.pending_action = Some(PendingAction::Close(id));
-                            app.mode = Mode::Confirm;
-                        }
-                        KeyAction::None
+                    KeyAction::None
+                }
+                KeyCode::Char('p') => {
+                    if let Some(w) = app.selected_worker()
+                        && let Some(detail) = PrDetailInfo::from_worker(w)
+                    {
+                        app.pr_detail = Some(detail);
+                        app.mode = Mode::PrDetail;
                     }
-                    KeyCode::Char('m') => {
-                        if let Some(w) = app.selected_worker() {
-                            let id = w.id.clone();
-                            app.confirm_message = format!("Merge {}? (y/n)", id);
-                            app.pending_action = Some(PendingAction::Merge(id));
-                            app.mode = Mode::Confirm;
-                        }
-                        KeyAction::None
+                    KeyAction::None
+                }
+                _ => KeyAction::None,
+            },
+            Panel::Conversation => match key.code {
+                KeyCode::Char('q') => KeyAction::Quit,
+                KeyCode::Char('?') => {
+                    app.mode = Mode::Help;
+                    KeyAction::None
+                }
+                KeyCode::Char('h') => {
+                    app.focus = Panel::Sidebar;
+                    if let Some(conv) = app.selected_conversation_mut() {
+                        conv.clear_focus();
                     }
-                    KeyCode::Char('s') => {
-                        // Quick send from sidebar
-                        if app.selected_worker().is_some() {
-                            app.input_buffer.clear();
-                            app.input_cursor = 0;
-                            app.mode = Mode::Input;
-                        }
-                        KeyAction::None
+                    KeyAction::None
+                }
+                KeyCode::Tab => {
+                    let vh = app.viewport_height;
+                    if let Some(conv) = app.selected_conversation_mut() {
+                        conv.focus_next_tool();
+                        conv.scroll_to_focused(vh);
                     }
-                    KeyCode::Char('p') => {
-                        if let Some(w) = app.selected_worker()
-                            && let Some(detail) = PrDetailInfo::from_worker(w)
-                        {
-                            app.pr_detail = Some(detail);
-                            app.mode = Mode::PrDetail;
-                        }
-                        KeyAction::None
+                    KeyAction::None
+                }
+                KeyCode::BackTab => {
+                    let vh = app.viewport_height;
+                    if let Some(conv) = app.selected_conversation_mut() {
+                        conv.focus_prev_tool();
+                        conv.scroll_to_focused(vh);
                     }
-                    _ => KeyAction::None,
-                },
-                Panel::Conversation => match key.code {
-                    KeyCode::Char('q') => KeyAction::Quit,
-                    KeyCode::Char('?') => {
-                        app.mode = Mode::Help;
-                        KeyAction::None
+                    KeyAction::None
+                }
+                KeyCode::Enter => {
+                    if let Some(conv) = app.selected_conversation_mut() {
+                        conv.toggle_focused_tool();
                     }
-                    KeyCode::Char('h') => {
-                        app.focus = Panel::Sidebar;
+                    KeyAction::None
+                }
+                KeyCode::Esc => {
+                    let has_focus = app
+                        .selected_conversation()
+                        .is_some_and(|c| c.focused_tool.is_some());
+                    if has_focus {
                         if let Some(conv) = app.selected_conversation_mut() {
                             conv.clear_focus();
                         }
-                        KeyAction::None
+                    } else {
+                        app.focus = Panel::Sidebar;
                     }
-                    KeyCode::Tab => {
-                        let vh = app.viewport_height;
-                        if let Some(conv) = app.selected_conversation_mut() {
-                            conv.focus_next_tool();
-                            conv.scroll_to_focused(vh);
-                        }
-                        KeyAction::None
+                    KeyAction::None
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    if let Some(conv) = app.selected_conversation_mut() {
+                        conv.scroll_up(1);
                     }
-                    KeyCode::BackTab => {
-                        let vh = app.viewport_height;
-                        if let Some(conv) = app.selected_conversation_mut() {
-                            conv.focus_prev_tool();
-                            conv.scroll_to_focused(vh);
-                        }
-                        KeyAction::None
+                    KeyAction::None
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if let Some(conv) = app.selected_conversation_mut() {
+                        conv.scroll_down(1);
                     }
-                    KeyCode::Enter => {
-                        if let Some(conv) = app.selected_conversation_mut() {
-                            conv.toggle_focused_tool();
-                        }
-                        KeyAction::None
+                    KeyAction::None
+                }
+                KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    let half = app.viewport_height / 2;
+                    if let Some(conv) = app.selected_conversation_mut() {
+                        conv.scroll_up(half as u32);
                     }
-                    KeyCode::Esc => {
-                        let has_focus = app
-                            .selected_conversation()
-                            .is_some_and(|c| c.focused_tool.is_some());
-                        if has_focus {
-                            if let Some(conv) = app.selected_conversation_mut() {
-                                conv.clear_focus();
-                            }
-                        } else {
-                            app.focus = Panel::Sidebar;
-                        }
-                        KeyAction::None
+                    KeyAction::None
+                }
+                KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    let half = app.viewport_height / 2;
+                    if let Some(conv) = app.selected_conversation_mut() {
+                        conv.scroll_down(half as u32);
                     }
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        if let Some(conv) = app.selected_conversation_mut() {
-                            conv.scroll_up(1);
-                        }
-                        KeyAction::None
+                    KeyAction::None
+                }
+                KeyCode::Char('G') | KeyCode::End => {
+                    if let Some(conv) = app.selected_conversation_mut() {
+                        conv.scroll_to_bottom();
                     }
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        if let Some(conv) = app.selected_conversation_mut() {
-                            conv.scroll_down(1);
-                        }
-                        KeyAction::None
+                    KeyAction::None
+                }
+                KeyCode::Char('c') => {
+                    if let Some(conv) = app.selected_conversation_mut() {
+                        conv.toggle_all_tools();
                     }
-                    KeyCode::Char('u')
-                        if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                    KeyAction::None
+                }
+                KeyCode::Char('i') | KeyCode::Char('s') => {
+                    if app.selected_worker().is_some() {
+                        app.input_buffer.clear();
+                        app.input_cursor = 0;
+                        app.mode = Mode::Input;
+                    }
+                    KeyAction::None
+                }
+                KeyCode::Char('p') => {
+                    if let Some(w) = app.selected_worker()
+                        && let Some(detail) = PrDetailInfo::from_worker(w)
                     {
-                        let half = app.viewport_height / 2;
-                        if let Some(conv) = app.selected_conversation_mut() {
-                            conv.scroll_up(half as u32);
-                        }
-                        KeyAction::None
+                        app.pr_detail = Some(detail);
+                        app.mode = Mode::PrDetail;
                     }
-                    KeyCode::Char('d')
-                        if key.modifiers.contains(KeyModifiers::CONTROL) =>
-                    {
-                        let half = app.viewport_height / 2;
-                        if let Some(conv) = app.selected_conversation_mut() {
-                            conv.scroll_down(half as u32);
-                        }
-                        KeyAction::None
-                    }
-                    KeyCode::Char('G') | KeyCode::End => {
-                        if let Some(conv) = app.selected_conversation_mut() {
-                            conv.scroll_to_bottom();
-                        }
-                        KeyAction::None
-                    }
-                    KeyCode::Char('c') => {
-                        if let Some(conv) = app.selected_conversation_mut() {
-                            conv.toggle_all_tools();
-                        }
-                        KeyAction::None
-                    }
-                    KeyCode::Char('i') | KeyCode::Char('s') => {
-                        if app.selected_worker().is_some() {
-                            app.input_buffer.clear();
-                            app.input_cursor = 0;
-                            app.mode = Mode::Input;
-                        }
-                        KeyAction::None
-                    }
-                    KeyCode::Char('p') => {
-                        if let Some(w) = app.selected_worker()
-                            && let Some(detail) = PrDetailInfo::from_worker(w)
-                        {
-                            app.pr_detail = Some(detail);
-                            app.mode = Mode::PrDetail;
-                        }
-                        KeyAction::None
-                    }
-                    _ => KeyAction::None,
-                },
-            }
-        }
+                    KeyAction::None
+                }
+                _ => KeyAction::None,
+            },
+        },
     }
 }
 
 /// Handle a mouse event and return the action to take.
-fn handle_mouse(app: &mut DaemonTuiApp, mouse: event::MouseEvent) -> KeyAction {
+fn handle_mouse(app: &mut DaemonTuiApp, mouse: crossterm::event::MouseEvent) -> KeyAction {
     match mouse.kind {
         MouseEventKind::ScrollUp => {
             if app.mode == Mode::Normal
@@ -842,14 +925,12 @@ fn handle_mouse(app: &mut DaemonTuiApp, mouse: event::MouseEvent) -> KeyAction {
     KeyAction::None
 }
 
+// ── Helpers ─────────────────────────────────────────────────
+
 /// Fire-and-forget: send a request, don't wait for response.
-/// Responses arrive asynchronously in the event drain loop.
+/// Responses arrive asynchronously via the reader task channel.
 /// On send failure, marks connection as disconnected for auto-reconnect.
-async fn fire_and_forget(
-    client: &mut DaemonClient,
-    app: &mut DaemonTuiApp,
-    req: DaemonRequest,
-) {
+async fn fire_and_forget(client: &mut DaemonClient, app: &mut DaemonTuiApp, req: DaemonRequest) {
     if let Err(e) = client.send(&req).await {
         handle_send_error(app, e);
     }
@@ -857,14 +938,18 @@ async fn fire_and_forget(
 
 /// Handle a send error by marking disconnected and scheduling reconnect.
 fn handle_send_error(app: &mut DaemonTuiApp, e: color_eyre::Report) {
+    tui_log!(&app.work_dir, "send error -> disconnected: {}", e);
     app.connected = false;
     app.reconnect_at = Some(std::time::Instant::now());
     app.set_status(format!("disconnected: {}", e));
 }
 
-/// Attempt to reconnect to the daemon, replaying state.
-async fn try_reconnect(app: &mut DaemonTuiApp, client: &mut DaemonClient) -> Result<()> {
-    // Use a short timeout so we don't block the event loop
+/// Attempt to reconnect to the daemon, spawning a new reader task.
+async fn try_reconnect(
+    app: &mut DaemonTuiApp,
+    client: &mut DaemonClient,
+    daemon_tx: &mpsc::UnboundedSender<Result<DaemonResponse>>,
+) -> Result<()> {
     let new_client = tokio::time::timeout(
         Duration::from_millis(500),
         DaemonClient::connect(&app.work_dir),
@@ -885,34 +970,32 @@ async fn try_reconnect(app: &mut DaemonTuiApp, client: &mut DaemonClient) -> Res
         _ => {}
     }
 
-    // Refresh worker list
+    // Fire-and-forget: ListWorkers response arrives through reader task
     client
         .send(&DaemonRequest::ListWorkers {
             workspace: Some(app.work_dir.clone()),
         })
         .await?;
-    let list_resp = tokio::time::timeout(Duration::from_millis(500), client.next_response())
-        .await
-        .map_err(|_| color_eyre::eyre::eyre!("timeout"))??;
 
-    if let DaemonResponse::Workers { workers } = list_resp {
-        app.conversations.clear();
-        app.history_loaded.clear();
-        app.pending_history.clear();
-        app.update_worker_list(workers);
-        // History will lazy-load on next worker select via the event loop
+    // Spawn new reader task on the same channel
+    if let Some(reader) = client.take_reader() {
+        tokio::spawn(daemon_reader_task(reader, daemon_tx.clone()));
     }
+
+    // Reset conversation state so history re-loads on select
+    app.conversations.clear();
+    app.history_loaded.clear();
+    app.pending_history.clear();
 
     Ok(())
 }
 
 /// Handle a response or event from the daemon.
-/// Process a daemon response and update app state accordingly.
 fn handle_daemon_response(app: &mut DaemonTuiApp, resp: DaemonResponse) {
     match resp {
         DaemonResponse::Ok { data } => {
             if let Some(ref d) = data {
-                // History response — apply events to the correct worker
+                // History response
                 if let Some(content) = d.get("events").and_then(|v| v.as_str()) {
                     if let Some(wt_id) = app.pending_history.pop_front() {
                         let events = app::parse_history_events(content);
@@ -1204,21 +1287,18 @@ mod tests {
         assert_eq!(app.workers[0].phase, WorkerPhase::Completed);
     }
 
-    // ── Full close flow (key → action → response) ──
+    // ── Full close flow (key -> action -> response) ──
 
     #[test]
     fn close_flow_x_then_y_produces_close_action() {
         let mut app = app_with_workers(&["w-1", "w-2"]);
-        // Select second worker
         handle_key(&mut app, key(KeyCode::Char('j')));
         assert_eq!(app.selected, 1);
 
-        // Press x → confirm mode
         handle_key(&mut app, key(KeyCode::Char('x')));
         assert!(matches!(app.mode, Mode::Confirm));
         assert!(matches!(app.pending_action, Some(PendingAction::Close(ref id)) if id == "w-2"));
 
-        // Press y → close action
         let action = handle_key(&mut app, key(KeyCode::Char('y')));
         assert!(matches!(action, KeyAction::CloseWorker(ref id) if id == "w-2"));
         assert!(matches!(app.mode, Mode::Normal));
@@ -1227,7 +1307,6 @@ mod tests {
     #[test]
     fn close_flow_refresh_removes_worker() {
         let mut app = app_with_workers(&["w-1", "w-2"]);
-        // Simulate: close succeeded, daemon sends updated worker list without w-1
         handle_daemon_response(
             &mut app,
             DaemonResponse::Workers {
@@ -1261,5 +1340,86 @@ mod tests {
         let mut app = DaemonTuiApp::new(std::path::PathBuf::from("/tmp"));
         handle_key(&mut app, key(KeyCode::Tab));
         assert!(matches!(app.focus, Panel::Sidebar));
+    }
+
+    // ── ModifierSelect flow ──
+
+    #[test]
+    fn agent_select_enter_goes_to_modifier_select() {
+        let mut app = DaemonTuiApp::new(std::path::PathBuf::from("/tmp"));
+        app.pending_prompt = "task".into();
+        app.mode = Mode::AgentSelect;
+        handle_key(&mut app, key(KeyCode::Enter));
+        assert!(matches!(app.mode, Mode::ModifierSelect));
+    }
+
+    #[test]
+    fn agent_select_number_goes_to_modifier_select() {
+        let mut app = DaemonTuiApp::new(std::path::PathBuf::from("/tmp"));
+        app.pending_prompt = "task".into();
+        app.mode = Mode::AgentSelect;
+        handle_key(&mut app, key(KeyCode::Char('1')));
+        assert!(matches!(app.mode, Mode::ModifierSelect));
+        assert_eq!(app.agent_select_index, 0);
+    }
+
+    #[test]
+    fn modifier_select_navigation() {
+        let mut app = DaemonTuiApp::new(std::path::PathBuf::from("/tmp"));
+        app.ensure_prompts_loaded();
+        app.mode = Mode::ModifierSelect;
+        assert_eq!(app.modifier_cursor, 0);
+        handle_key(&mut app, key(KeyCode::Char('j')));
+        assert_eq!(app.modifier_cursor, 1);
+        handle_key(&mut app, key(KeyCode::Char('k')));
+        assert_eq!(app.modifier_cursor, 0);
+    }
+
+    #[test]
+    fn modifier_select_toggle() {
+        let mut app = DaemonTuiApp::new(std::path::PathBuf::from("/tmp"));
+        app.ensure_prompts_loaded();
+        app.mode = Mode::ModifierSelect;
+        assert!(!app.modifier_selected[0]);
+        handle_key(&mut app, key(KeyCode::Char(' ')));
+        assert!(app.modifier_selected[0]);
+        handle_key(&mut app, key(KeyCode::Char(' ')));
+        assert!(!app.modifier_selected[0]);
+    }
+
+    #[test]
+    fn modifier_select_toggle_all() {
+        let mut app = DaemonTuiApp::new(std::path::PathBuf::from("/tmp"));
+        app.ensure_prompts_loaded();
+        app.mode = Mode::ModifierSelect;
+        handle_key(&mut app, key(KeyCode::Char('a')));
+        assert!(app.modifier_selected.iter().all(|&s| s));
+        handle_key(&mut app, key(KeyCode::Char('a')));
+        assert!(app.modifier_selected.iter().all(|&s| !s));
+    }
+
+    #[test]
+    fn modifier_select_enter_goes_to_review_select() {
+        let mut app = DaemonTuiApp::new(std::path::PathBuf::from("/tmp"));
+        app.pending_prompt = "task".into();
+        app.mode = Mode::ModifierSelect;
+        handle_key(&mut app, key(KeyCode::Enter));
+        assert!(matches!(app.mode, Mode::ReviewSelect));
+    }
+
+    #[test]
+    fn modifier_select_esc_goes_to_agent_select() {
+        let mut app = DaemonTuiApp::new(std::path::PathBuf::from("/tmp"));
+        app.mode = Mode::ModifierSelect;
+        handle_key(&mut app, key(KeyCode::Esc));
+        assert!(matches!(app.mode, Mode::AgentSelect));
+    }
+
+    #[test]
+    fn review_select_esc_goes_to_modifier_select() {
+        let mut app = DaemonTuiApp::new(std::path::PathBuf::from("/tmp"));
+        app.mode = Mode::ReviewSelect;
+        handle_key(&mut app, key(KeyCode::Esc));
+        assert!(matches!(app.mode, Mode::ModifierSelect));
     }
 }

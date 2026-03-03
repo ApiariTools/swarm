@@ -1,5 +1,6 @@
 use crate::agent_tui::app::ConversationEntry;
 use crate::core::agent::AgentKind;
+use crate::core::modifier::ModifierPrompt;
 use crate::core::review::ReviewPrompt;
 use crate::core::state::WorkerPhase;
 use crate::daemon::protocol::{AgentEventWire, WorkerInfo};
@@ -31,6 +32,7 @@ pub enum Mode {
     CreatePrompt,
     RepoSelect,
     AgentSelect,
+    ModifierSelect,
     ReviewSelect,
     Confirm,
     Help,
@@ -385,6 +387,9 @@ pub struct DaemonTuiApp {
     pub agent_select_index: usize,
     pub pending_prompt: String,
     pub pending_repo: Option<String>,
+    pub modifier_prompts: Vec<ModifierPrompt>,
+    pub modifier_selected: Vec<bool>,
+    pub modifier_cursor: usize,
     pub review_prompts: Vec<ReviewPrompt>,
     pub review_selected: Vec<bool>,
     pub review_cursor: usize,
@@ -419,12 +424,13 @@ pub struct DaemonTuiApp {
 
     // Queue of worktree IDs awaiting GetHistory responses (FIFO)
     pub pending_history: std::collections::VecDeque<String>,
+
+    // Lazy-loaded prompts: only loaded when user enters create flow
+    pub prompts_loaded: bool,
 }
 
 impl DaemonTuiApp {
     pub fn new(work_dir: PathBuf) -> Self {
-        let review_prompts = ReviewPrompt::available(&work_dir);
-        let review_selected = vec![false; review_prompts.len()];
         Self {
             workers: Vec::new(),
             selected: 0,
@@ -439,8 +445,11 @@ impl DaemonTuiApp {
             agent_select_index: 0,
             pending_prompt: String::new(),
             pending_repo: None,
-            review_prompts,
-            review_selected,
+            modifier_prompts: Vec::new(),
+            modifier_selected: Vec::new(),
+            modifier_cursor: 0,
+            review_prompts: Vec::new(),
+            review_selected: Vec::new(),
             review_cursor: 0,
             confirm_message: String::new(),
             pending_action: None,
@@ -455,6 +464,7 @@ impl DaemonTuiApp {
             needs_redraw: true,
             history_loaded: std::collections::HashSet::new(),
             pending_history: std::collections::VecDeque::new(),
+            prompts_loaded: false,
         }
     }
 
@@ -595,6 +605,23 @@ impl DaemonTuiApp {
     pub fn tick(&mut self) {
         self.tick_count = self.tick_count.wrapping_add(1);
         self.needs_redraw = true;
+    }
+
+    /// Load modifier and review prompts on first use (avoids startup I/O).
+    pub fn ensure_prompts_loaded(&mut self) {
+        if !self.prompts_loaded {
+            self.modifier_prompts = ModifierPrompt::available(&self.work_dir);
+            self.modifier_selected = vec![false; self.modifier_prompts.len()];
+            self.review_prompts = ReviewPrompt::available(&self.work_dir);
+            self.review_selected = vec![false; self.review_prompts.len()];
+            self.prompts_loaded = true;
+            tui_log!(
+                &self.work_dir,
+                "prompts loaded: {} modifiers, {} reviews",
+                self.modifier_prompts.len(),
+                self.review_prompts.len()
+            );
+        }
     }
 }
 
