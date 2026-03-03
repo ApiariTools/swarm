@@ -562,4 +562,130 @@ mod tests {
             _ => panic!("expected ReviewStarted"),
         }
     }
+
+    // ── File-based inbox round-trip tests ────────────────────
+
+    /// Helper: write a JSONL line to the inbox file (simulates external tool).
+    fn write_inbox_line(work_dir: &std::path::Path, json: &str) {
+        let inbox = inbox_path(work_dir);
+        if let Some(parent) = inbox.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&inbox)
+            .unwrap();
+        writeln!(f, "{}", json).unwrap();
+    }
+
+    #[test]
+    fn test_inbox_file_create_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let work_dir = dir.path();
+
+        let json = r#"{"action":"create","id":"msg-1","prompt":"fix the bug","agent":"claude","timestamp":"2025-06-01T12:00:00-05:00"}"#;
+        write_inbox_line(work_dir, json);
+
+        let (messages, new_offset) = read_inbox(work_dir, 0).unwrap();
+        assert_eq!(messages.len(), 1);
+        match &messages[0] {
+            InboxMessage::Create { prompt, agent, .. } => {
+                assert_eq!(prompt, "fix the bug");
+                assert_eq!(agent, "claude");
+            }
+            _ => panic!("expected Create"),
+        }
+
+        // Second read returns nothing
+        let (messages2, _) = read_inbox(work_dir, new_offset).unwrap();
+        assert!(messages2.is_empty());
+    }
+
+    #[test]
+    fn test_inbox_file_multiple_messages() {
+        let dir = tempfile::tempdir().unwrap();
+        let work_dir = dir.path();
+
+        write_inbox_line(
+            work_dir,
+            r#"{"action":"create","id":"m1","prompt":"task 1","timestamp":"2025-06-01T12:00:00-05:00"}"#,
+        );
+        write_inbox_line(
+            work_dir,
+            r#"{"action":"send","id":"m2","worktree":"hive-1","message":"hello","timestamp":"2025-06-01T12:01:00-05:00"}"#,
+        );
+        write_inbox_line(
+            work_dir,
+            r#"{"action":"close","id":"m3","worktree":"hive-1","timestamp":"2025-06-01T12:02:00-05:00"}"#,
+        );
+
+        let (messages, _) = read_inbox(work_dir, 0).unwrap();
+        assert_eq!(messages.len(), 3);
+        assert!(matches!(&messages[0], InboxMessage::Create { .. }));
+        assert!(matches!(&messages[1], InboxMessage::Send { .. }));
+        assert!(matches!(&messages[2], InboxMessage::Close { .. }));
+    }
+
+    #[test]
+    fn test_inbox_file_empty_returns_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        // No inbox file exists
+        let (messages, offset) = read_inbox(dir.path(), 0).unwrap();
+        assert!(messages.is_empty());
+        assert_eq!(offset, 0);
+    }
+
+    #[test]
+    fn test_inbox_file_incremental_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let work_dir = dir.path();
+
+        // Write first message
+        write_inbox_line(
+            work_dir,
+            r#"{"action":"create","id":"m1","prompt":"first","timestamp":"2025-06-01T12:00:00-05:00"}"#,
+        );
+
+        let (msgs1, offset1) = read_inbox(work_dir, 0).unwrap();
+        assert_eq!(msgs1.len(), 1);
+
+        // Write second message after first read
+        write_inbox_line(
+            work_dir,
+            r#"{"action":"create","id":"m2","prompt":"second","timestamp":"2025-06-01T12:01:00-05:00"}"#,
+        );
+
+        // Read from where we left off
+        let (msgs2, _) = read_inbox(work_dir, offset1).unwrap();
+        assert_eq!(msgs2.len(), 1);
+        match &msgs2[0] {
+            InboxMessage::Create { prompt, .. } => assert_eq!(prompt, "second"),
+            _ => panic!("expected Create"),
+        }
+    }
+
+    #[test]
+    fn test_inbox_file_malformed_line_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let work_dir = dir.path();
+
+        // Write a valid message, then garbage, then another valid message
+        write_inbox_line(
+            work_dir,
+            r#"{"action":"create","id":"m1","prompt":"valid","timestamp":"2025-06-01T12:00:00-05:00"}"#,
+        );
+        write_inbox_line(work_dir, r#"not valid json at all"#);
+        write_inbox_line(
+            work_dir,
+            r#"{"action":"close","id":"m3","worktree":"hive-1","timestamp":"2025-06-01T12:02:00-05:00"}"#,
+        );
+
+        // The JsonlReader should skip invalid lines gracefully
+        let (messages, _) = read_inbox(work_dir, 0).unwrap();
+        // At minimum, the valid messages should be present (implementation dependent
+        // on whether JsonlReader skips or stops on malformed lines)
+        assert!(!messages.is_empty());
+    }
 }

@@ -1600,4 +1600,288 @@ mod tests {
             other => panic!("expected Error about agent, got {:?}", other),
         }
     }
+
+    // ── resolve_repo tests ───────────────────────────────────
+
+    #[test]
+    fn resolve_repo_single_repo_no_name() {
+        let repos = vec![PathBuf::from("/tmp/my-project")];
+        let result = resolve_repo(&repos, None);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), PathBuf::from("/tmp/my-project"));
+    }
+
+    #[test]
+    fn resolve_repo_no_repos() {
+        let repos: Vec<PathBuf> = vec![];
+        let result = resolve_repo(&repos, None);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("no git repos"));
+    }
+
+    #[test]
+    fn resolve_repo_multiple_repos_no_name() {
+        let repos = vec![
+            PathBuf::from("/tmp/repo-a"),
+            PathBuf::from("/tmp/repo-b"),
+        ];
+        let result = resolve_repo(&repos, None);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("multiple repos"));
+    }
+
+    #[test]
+    fn resolve_repo_unknown_name() {
+        let repos = vec![PathBuf::from("/tmp/swarm")];
+        let result = resolve_repo(&repos, Some("nonexistent"));
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("unknown repo 'nonexistent'"));
+    }
+
+    // ── resolve_workspace tests ──────────────────────────────
+
+    #[test]
+    fn resolve_workspace_single_no_path() {
+        let mut workspaces = HashMap::new();
+        workspaces.insert(
+            PathBuf::from("/tmp/ws"),
+            test_workspace("/tmp/ws", vec![]),
+        );
+        let result = resolve_workspace(&workspaces, None);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), PathBuf::from("/tmp/ws"));
+    }
+
+    #[test]
+    fn resolve_workspace_empty() {
+        let workspaces: HashMap<PathBuf, WorkspaceState> = HashMap::new();
+        let result = resolve_workspace(&workspaces, None);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("no workspaces registered"));
+    }
+
+    #[test]
+    fn resolve_workspace_multiple_no_path() {
+        let mut workspaces = HashMap::new();
+        workspaces.insert(
+            PathBuf::from("/tmp/ws1"),
+            test_workspace("/tmp/ws1", vec![]),
+        );
+        workspaces.insert(
+            PathBuf::from("/tmp/ws2"),
+            test_workspace("/tmp/ws2", vec![]),
+        );
+        let result = resolve_workspace(&workspaces, None);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("multiple workspaces"));
+    }
+
+    // ── CreateWorker error path tests ────────────────────────
+
+    #[tokio::test]
+    async fn handle_request_create_unknown_agent() {
+        let (mut resp_rx, resp_tx, mut workspaces, event_tx, supervisor_tx) = test_harness();
+        let mut state_dirty = false;
+
+        handle_request(
+            DaemonRequest::CreateWorker {
+                prompt: "test".into(),
+                agent: "bogus-agent".into(),
+                repo: None,
+                start_point: None,
+                review_configs: None,
+                workspace: None,
+            },
+            &resp_tx,
+            &mut workspaces,
+            &event_tx,
+            &supervisor_tx,
+            &mut state_dirty,
+        )
+        .await;
+
+        let resp = resp_rx.try_recv().unwrap();
+        match resp {
+            DaemonResponse::Error { message } => {
+                assert!(
+                    message.contains("unknown agent"),
+                    "expected 'unknown agent' error, got: {}",
+                    message
+                );
+            }
+            other => panic!("expected Error, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_request_create_no_workspace_registered() {
+        let (mut resp_rx, resp_tx, mut workspaces, event_tx, supervisor_tx) = test_harness();
+        let mut state_dirty = false;
+
+        // No workspaces registered
+        handle_request(
+            DaemonRequest::CreateWorker {
+                prompt: "fix bug".into(),
+                agent: "claude-tui".into(),
+                repo: None,
+                start_point: None,
+                review_configs: None,
+                workspace: None,
+            },
+            &resp_tx,
+            &mut workspaces,
+            &event_tx,
+            &supervisor_tx,
+            &mut state_dirty,
+        )
+        .await;
+
+        let resp = resp_rx.try_recv().unwrap();
+        match resp {
+            DaemonResponse::Error { message } => {
+                assert!(
+                    message.contains("no workspaces"),
+                    "expected 'no workspaces' error, got: {}",
+                    message
+                );
+            }
+            other => panic!("expected Error, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_request_create_unknown_repo() {
+        let (mut resp_rx, resp_tx, mut workspaces, event_tx, supervisor_tx) = test_harness();
+        let mut state_dirty = false;
+
+        // Use a real temp dir so canonicalize resolves consistently
+        let dir = tempfile::tempdir().unwrap();
+        let ws_path = std::fs::canonicalize(dir.path()).unwrap();
+
+        // Register a workspace with no repos
+        workspaces.insert(
+            ws_path.clone(),
+            WorkspaceState {
+                path: ws_path.clone(),
+                repos: vec![],
+                workers: HashMap::new(),
+                inbox_offset: 0,
+            },
+        );
+
+        handle_request(
+            DaemonRequest::CreateWorker {
+                prompt: "fix bug".into(),
+                agent: "claude-tui".into(),
+                repo: Some("bogus-repo".into()),
+                start_point: None,
+                review_configs: None,
+                workspace: Some(ws_path),
+            },
+            &resp_tx,
+            &mut workspaces,
+            &event_tx,
+            &supervisor_tx,
+            &mut state_dirty,
+        )
+        .await;
+
+        let resp = resp_rx.try_recv().unwrap();
+        match resp {
+            DaemonResponse::Error { message } => {
+                assert!(
+                    message.contains("unknown repo"),
+                    "expected 'unknown repo' error, got: {}",
+                    message
+                );
+            }
+            other => panic!("expected Error, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_request_merge_unknown_worker() {
+        let (mut resp_rx, resp_tx, mut workspaces, event_tx, supervisor_tx) = test_harness();
+        let mut state_dirty = false;
+
+        handle_request(
+            DaemonRequest::MergeWorker {
+                worktree_id: "nonexistent".into(),
+            },
+            &resp_tx,
+            &mut workspaces,
+            &event_tx,
+            &supervisor_tx,
+            &mut state_dirty,
+        )
+        .await;
+
+        let resp = resp_rx.try_recv().unwrap();
+        match resp {
+            DaemonResponse::Error { message } => {
+                assert!(message.contains("unknown worker"));
+            }
+            other => panic!("expected Error, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_request_unregister_unknown_workspace() {
+        let (mut resp_rx, resp_tx, mut workspaces, event_tx, supervisor_tx) = test_harness();
+        let mut state_dirty = false;
+
+        handle_request(
+            DaemonRequest::UnregisterWorkspace {
+                path: PathBuf::from("/tmp/nonexistent"),
+            },
+            &resp_tx,
+            &mut workspaces,
+            &event_tx,
+            &supervisor_tx,
+            &mut state_dirty,
+        )
+        .await;
+
+        let resp = resp_rx.try_recv().unwrap();
+        match resp {
+            DaemonResponse::Error { message } => {
+                assert!(message.contains("workspace not registered"));
+            }
+            other => panic!("expected Error, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_request_get_history_no_events() {
+        let (mut resp_rx, resp_tx, mut workspaces, event_tx, supervisor_tx) = test_harness();
+        let mut state_dirty = false;
+
+        handle_request(
+            DaemonRequest::GetHistory {
+                worktree_id: "nonexistent".into(),
+            },
+            &resp_tx,
+            &mut workspaces,
+            &event_tx,
+            &supervisor_tx,
+            &mut state_dirty,
+        )
+        .await;
+
+        let resp = resp_rx.try_recv().unwrap();
+        match resp {
+            DaemonResponse::Ok { data } => {
+                // Should return empty events when no file exists
+                let data = data.unwrap();
+                let events = data["events"].as_str().unwrap();
+                assert!(events.is_empty());
+            }
+            other => panic!("expected Ok with empty events, got {:?}", other),
+        }
+    }
 }

@@ -68,9 +68,7 @@ pub async fn run(args: AgentTuiArgs) -> Result<()> {
         });
         // Write agent-status file immediately so the sidebar sees "waiting"
         if let Some(ref wt) = args.worktree_id {
-            let status_dir = args.work_dir.join(".swarm").join("agent-status");
-            let _ = std::fs::create_dir_all(&status_dir);
-            let _ = std::fs::write(status_dir.join(wt), "waiting");
+            crate::core::agent_status::write_agent_status(&args.work_dir, wt, "waiting");
         }
         Some(prev.session_id)
     } else {
@@ -416,9 +414,7 @@ async fn event_loop(
                 let was_waiting = prev_status == SessionStatus::Waiting;
                 if became_waiting || was_waiting {
                     let status_str = if became_waiting { "waiting" } else { "running" };
-                    let status_dir = work_dir.join(".swarm").join("agent-status");
-                    let _ = std::fs::create_dir_all(&status_dir);
-                    let _ = std::fs::write(status_dir.join(wt_id), status_str);
+                    crate::core::agent_status::write_agent_status(&work_dir, wt_id, status_str);
                 }
             }
             prev_status = app.status.clone();
