@@ -456,7 +456,6 @@ async fn event_loop(
                             KeyCode::Char('q') => break,
                             KeyCode::Char('i') => {
                                 if app.status == SessionStatus::Done
-                                    || app.status == SessionStatus::Idle
                                     || app.status == SessionStatus::Waiting
                                 {
                                     app.input_mode = InputMode::Input;

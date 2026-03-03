@@ -59,8 +59,7 @@ pub enum SessionStatus {
     Streaming,
     /// Waiting for tool execution.
     ToolRunning,
-    /// Model turn complete, waiting for user or next turn.
-    Idle,
+
     /// Session finished, waiting for follow-up messages.
     Waiting,
     /// Session finished.
@@ -124,6 +123,8 @@ pub struct TuiApp {
     pub total_rendered_lines: u32,
     /// Conversation area rect from last render (for mouse hit-testing).
     pub conversation_area: Rect,
+    /// Whether the current turn included tool use (for status tracking).
+    turn_had_tool_use: bool,
 }
 
 impl TuiApp {
@@ -151,6 +152,7 @@ impl TuiApp {
             entry_line_map: Vec::new(),
             total_rendered_lines: 0,
             conversation_area: Rect::default(),
+            turn_had_tool_use: false,
         }
     }
 
@@ -217,6 +219,7 @@ impl TuiApp {
                         input.to_string()
                     };
                     self.tool_count += 1;
+                    self.turn_had_tool_use = true;
                     self.status = SessionStatus::ToolRunning;
                     self.entries.push(ConversationEntry::ToolCall {
                         tool: name.clone(),
@@ -257,7 +260,13 @@ impl TuiApp {
             SdkEvent::TurnComplete => {
                 self.flush_streaming_text();
                 self.turn_count += 1;
-                self.status = SessionStatus::Idle;
+                if self.turn_had_tool_use {
+                    // Tools were used — SDK will auto-continue with next turn.
+                    self.status = SessionStatus::ToolRunning;
+                }
+                // No tool use: keep current status (Streaming/Thinking) until
+                // Result or SessionWaiting arrives.
+                self.turn_had_tool_use = false;
             }
             SdkEvent::Result {
                 turns,
@@ -306,6 +315,7 @@ impl TuiApp {
     pub fn add_user_message(&mut self, text: String) {
         self.entries.push(ConversationEntry::User { text });
         self.status = SessionStatus::Streaming;
+        self.turn_had_tool_use = false;
     }
 
     // ── Input handling ──
@@ -813,7 +823,7 @@ mod tests {
         assert!(!app.is_streaming);
         assert_eq!(app.streaming_text, "");
         assert_eq!(app.turn_count, 1);
-        assert_eq!(app.status, SessionStatus::Idle);
+        assert_eq!(app.status, SessionStatus::Streaming); // keeps previous status until Result
         assert!(matches!(
             &app.entries[0],
             ConversationEntry::AssistantText { text } if text == "streamed text"

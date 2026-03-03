@@ -1,3 +1,4 @@
+use crate::core::review::{ReviewConfig, deserialize_review_configs};
 use crate::core::state::WorkerPhase;
 use crate::swarm_log;
 use apiari_common::ipc::{JsonlReader, JsonlWriter};
@@ -20,6 +21,12 @@ pub enum InboxMessage {
         repo: Option<String>,
         #[serde(default)]
         start_point: Option<String>,
+        #[serde(
+            default,
+            deserialize_with = "deserialize_review_configs",
+            alias = "review_config"
+        )]
+        review_configs: Option<Vec<ReviewConfig>>,
         timestamp: DateTime<Local>,
     },
     Send {
@@ -36,6 +43,13 @@ pub enum InboxMessage {
     Merge {
         id: String,
         worktree: String,
+        timestamp: DateTime<Local>,
+    },
+    Review {
+        id: String,
+        worktree: String,
+        #[serde(default)]
+        slug: Option<String>,
         timestamp: DateTime<Local>,
     },
 }
@@ -90,6 +104,12 @@ pub enum SwarmEvent {
         pr_url: String,
         pr_title: String,
         pr_number: u64,
+        timestamp: DateTime<Local>,
+    },
+    ReviewStarted {
+        worktree: String,
+        parent: String,
+        slug: String,
         timestamp: DateTime<Local>,
     },
 }
@@ -149,7 +169,24 @@ pub fn emit_event(work_dir: &Path, event: &SwarmEvent) -> Result<()> {
 
 // ── Unix Domain Socket IPC ────────────────────────────────
 
-/// Path to the swarm socket file.
+/// Global config directory for the swarm daemon.
+pub fn global_config_dir() -> std::path::PathBuf {
+    dirs::config_dir()
+        .expect("no config dir")
+        .join("swarm")
+}
+
+/// Path to the global swarm socket file.
+pub fn global_socket_path() -> std::path::PathBuf {
+    global_config_dir().join("swarm.sock")
+}
+
+/// Path to the global daemon PID file.
+pub fn global_pid_path() -> std::path::PathBuf {
+    global_config_dir().join("daemon.pid")
+}
+
+/// Path to the per-workspace swarm socket file (legacy).
 pub fn socket_path(work_dir: &Path) -> std::path::PathBuf {
     work_dir.join(".swarm").join("swarm.sock")
 }
@@ -240,22 +277,71 @@ pub async fn send_inbox(work_dir: &Path, msg: &InboxMessage) -> Result<()> {
     }
 }
 
-/// Remove a stale socket file (left over from a crashed TUI).
+/// Send a DaemonRequest to a specific socket path and return the response.
+fn send_daemon_request_to(
+    sock: &Path,
+    req: &crate::daemon::protocol::DaemonRequest,
+) -> Result<crate::daemon::protocol::DaemonResponse> {
+    let stream = std::os::unix::net::UnixStream::connect(sock).map_err(|e| {
+        color_eyre::eyre::eyre!("failed to connect to daemon socket: {}", e)
+    })?;
+
+    // Set read/write timeout
+    let timeout = std::time::Duration::from_secs(30);
+    stream.set_read_timeout(Some(timeout))?;
+    stream.set_write_timeout(Some(timeout))?;
+
+    let mut writer = std::io::BufWriter::new(&stream);
+    let mut line = serde_json::to_string(req)?;
+    line.push('\n');
+    std::io::Write::write_all(&mut writer, line.as_bytes())?;
+    std::io::Write::flush(&mut writer)?;
+
+    let mut reader = std::io::BufReader::new(&stream);
+    let mut resp_line = String::new();
+    std::io::BufRead::read_line(&mut reader, &mut resp_line)?;
+
+    let resp: crate::daemon::protocol::DaemonResponse =
+        serde_json::from_str(resp_line.trim())?;
+    Ok(resp)
+}
+
+/// Send a DaemonRequest to the daemon socket and return the response.
+/// Tries per-workspace socket first (for test isolation), then global.
+pub fn send_daemon_request(
+    work_dir: &Path,
+    req: &crate::daemon::protocol::DaemonRequest,
+) -> Result<crate::daemon::protocol::DaemonResponse> {
+    let local = socket_path(work_dir);
+    if local.exists() {
+        if let Ok(resp) = send_daemon_request_to(&local, req) {
+            return Ok(resp);
+        }
+    }
+    // Fall back to global socket
+    send_daemon_request_to(&global_socket_path(), req)
+}
+
+/// Remove a stale socket file (left over from a crashed daemon).
 /// Tries to connect; if it fails, the socket is stale and gets removed.
 pub fn cleanup_stale_socket(work_dir: &Path) {
-    let sock = socket_path(work_dir);
+    cleanup_stale_socket_at(&socket_path(work_dir));
+}
+
+/// Remove a stale socket file at the given path.
+pub fn cleanup_stale_socket_at(sock: &Path) {
     if !sock.exists() {
         return;
     }
 
     // Try a blocking connect to see if anyone is listening
-    match std::os::unix::net::UnixStream::connect(&sock) {
+    match std::os::unix::net::UnixStream::connect(sock) {
         Ok(_) => {
             // Someone is listening — not stale
         }
         Err(_) => {
             // No one listening — remove stale socket
-            let _ = std::fs::remove_file(&sock);
+            let _ = std::fs::remove_file(sock);
         }
     }
 }
@@ -313,6 +399,7 @@ mod tests {
             agent: "claude".to_string(),
             repo: Some("swarm".to_string()),
             start_point: None,
+            review_configs: None,
             timestamp: Local::now(),
         };
         let json = serde_json::to_string(&msg).unwrap();
@@ -427,6 +514,7 @@ mod tests {
             agent: "claude".to_string(),
             repo: Some("swarm".to_string()),
             start_point: None,
+            review_configs: None,
             timestamp: Local::now(),
         };
 
@@ -459,6 +547,7 @@ mod tests {
             agent: "claude".to_string(),
             repo: None,
             start_point: None,
+            review_configs: None,
             timestamp: Local::now(),
         };
         let msg2 = InboxMessage::Send {
@@ -697,5 +786,73 @@ mod tests {
         assert!(content.contains("creating"));
         assert!(content.contains("starting"));
         assert!(content.contains("hive-1"));
+    }
+
+    // ── Review message tests ──────────────────────────────
+
+    #[test]
+    fn test_review_message_round_trips() {
+        let msg = InboxMessage::Review {
+            id: "msg-5".to_string(),
+            worktree: "hive-3".to_string(),
+            slug: Some("code-review".to_string()),
+            timestamp: Local::now(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let restored: InboxMessage = serde_json::from_str(&json).unwrap();
+        match restored {
+            InboxMessage::Review {
+                worktree, slug, ..
+            } => {
+                assert_eq!(worktree, "hive-3");
+                assert_eq!(slug.as_deref(), Some("code-review"));
+            }
+            _ => panic!("expected Review variant"),
+        }
+    }
+
+    #[test]
+    fn test_review_message_without_slug() {
+        let msg = InboxMessage::Review {
+            id: "msg-6".to_string(),
+            worktree: "hive-4".to_string(),
+            slug: None,
+            timestamp: Local::now(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let restored: InboxMessage = serde_json::from_str(&json).unwrap();
+        match restored {
+            InboxMessage::Review { slug, .. } => {
+                assert!(slug.is_none());
+            }
+            _ => panic!("expected Review variant"),
+        }
+    }
+
+    #[test]
+    fn test_review_started_event_round_trips() {
+        let event = SwarmEvent::ReviewStarted {
+            worktree: "hive-3-review-code-review".to_string(),
+            parent: "hive-3".to_string(),
+            slug: "code-review".to_string(),
+            timestamp: Local::now(),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"event\":\"review_started\""));
+
+        let restored: SwarmEvent = serde_json::from_str(&json).unwrap();
+        match restored {
+            SwarmEvent::ReviewStarted {
+                worktree,
+                parent,
+                slug,
+                ..
+            } => {
+                assert_eq!(worktree, "hive-3-review-code-review");
+                assert_eq!(parent, "hive-3");
+                assert_eq!(slug, "code-review");
+            }
+            _ => panic!("expected ReviewStarted"),
+        }
     }
 }

@@ -237,19 +237,28 @@ pub fn detect_repos(dir: &Path) -> Result<Vec<PathBuf>> {
     }
 
     if !child_repos.is_empty() {
-        // Sort by recent commit count (most active first)
-        child_repos.sort_by(|a, b| {
-            let count = |repo: &Path| -> usize {
-                std::process::Command::new("git")
+        // Sort by recent commit count (most active first).
+        // Compute counts once upfront instead of spawning git per comparison.
+        let mut counted: Vec<(PathBuf, usize)> = child_repos
+            .into_iter()
+            .map(|repo| {
+                let c = std::process::Command::new("git")
                     .args(["rev-list", "--count", "--since=3 months ago", "HEAD"])
-                    .current_dir(repo)
+                    .current_dir(&repo)
                     .output()
                     .ok()
-                    .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse().ok())
-                    .unwrap_or(0)
-            };
-            count(b).cmp(&count(a))
-        });
+                    .and_then(|o| {
+                        String::from_utf8_lossy(&o.stdout)
+                            .trim()
+                            .parse()
+                            .ok()
+                    })
+                    .unwrap_or(0);
+                (repo, c)
+            })
+            .collect();
+        counted.sort_by(|a, b| b.1.cmp(&a.1));
+        child_repos = counted.into_iter().map(|(p, _)| p).collect();
         return Ok(child_repos);
     }
 
@@ -259,4 +268,9 @@ pub fn detect_repos(dir: &Path) -> Result<Vec<PathBuf>> {
         repos.push(dir.to_path_buf());
     }
     Ok(repos)
+}
+
+/// Generate a `swarm/<sanitized-prompt>-<suffix>` branch name.
+pub fn generate_branch_name(prompt: &str, suffix: &str) -> String {
+    format!("swarm/{}-{}", super::shell::sanitize(prompt), suffix)
 }

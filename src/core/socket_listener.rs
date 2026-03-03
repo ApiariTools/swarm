@@ -141,6 +141,7 @@ mod tests {
             agent: "claude".to_string(),
             repo: None,
             start_point: None,
+            review_configs: None,
             timestamp: Local::now(),
         };
 

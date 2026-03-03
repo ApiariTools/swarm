@@ -1,9 +1,25 @@
 use crate::core::agent::AgentKind;
-use crate::tui::app::PrInfo;
+use crate::core::review::{ReviewConfig, ReviewMode, deserialize_review_configs};
 use chrono::{DateTime, Local};
 use color_eyre::Result;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+
+/// PR info fetched from `gh`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PrInfo {
+    pub number: u64,
+    pub title: String,
+    pub state: String,
+    pub url: String,
+}
+
+impl PrInfo {
+    /// Returns true when this PR just transitioned to MERGED relative to `prev`.
+    pub fn is_newly_merged(&self, prev: Option<&PrInfo>) -> bool {
+        self.state == "MERGED" && prev.is_none_or(|p| p.state != "MERGED")
+    }
+}
 
 /// Worker lifecycle phase — the single source of truth for worker state.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -122,6 +138,34 @@ pub struct WorktreeState {
     /// worker is waiting for input.
     #[serde(default, skip_deserializing)]
     pub agent_session_status: Option<String>,
+    /// Review configs: what review workers to spawn when this worker opens a PR.
+    /// - `None` → fall back to reviews.toml auto list
+    /// - `Some(vec![])` → user chose no reviews, skip auto
+    /// - `Some(vec![...])` → spawn exactly these on PR
+    #[serde(
+        default,
+        deserialize_with = "deserialize_review_configs",
+        alias = "review_config"
+    )]
+    pub review_configs: Option<Vec<ReviewConfig>>,
+    /// If this IS a review worker, the parent worktree's ID.
+    #[serde(default)]
+    pub review_parent: Option<String>,
+    /// Review slug for this review worker (e.g. "code-review", "security-audit").
+    #[serde(default)]
+    pub review_slug: Option<String>,
+    /// Review mode for this review worker (review = read-only, act = can modify code).
+    #[serde(default)]
+    pub review_mode: Option<ReviewMode>,
+    /// Daemon mode: PID of the agent process.
+    #[serde(default)]
+    pub agent_pid: Option<u32>,
+    /// Session ID for resume across daemon restarts.
+    #[serde(default)]
+    pub session_id: Option<String>,
+    /// Number of auto-restarts (observability).
+    #[serde(default)]
+    pub restart_count: Option<u32>,
 }
 
 fn default_status() -> String {
@@ -184,6 +228,13 @@ mod tests {
             phase: WorkerPhase::Running,
             status: "running".to_string(),
             agent_session_status: None,
+            review_configs: None,
+            review_parent: None,
+            review_slug: None,
+            review_mode: None,
+            agent_pid: None,
+            session_id: None,
+            restart_count: None,
         }
     }
 
@@ -368,5 +419,98 @@ mod tests {
         // We test this in app.rs tests; here we verify the field round-trips
         let restored: WorktreeState = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.phase, WorkerPhase::Completed);
+    }
+
+    // ── review_configs backward compat tests ─────────────
+
+    #[test]
+    fn old_state_with_single_review_config_deserializes() {
+        // Old format: "review_config": { single ReviewConfig object }
+        let json = r#"{
+            "id": "test-1",
+            "branch": "swarm/test-1",
+            "prompt": "fix the bug",
+            "agent_kind": "claude",
+            "repo_path": "/tmp/repo",
+            "worktree_path": "/tmp/repo/.swarm/wt/test-1",
+            "created_at": "2025-01-01T00:00:00-05:00",
+            "agent": {"pane_id": "%1"},
+            "terminals": [],
+            "summary": null,
+            "status": "running",
+            "review_config": {
+                "prompt": {"kind": "built_in", "slug": "code-review"},
+                "agent": null,
+                "mode": "review"
+            }
+        }"#;
+        let restored: WorktreeState = serde_json::from_str(json).expect("deserialize old format");
+        let configs = restored.review_configs.expect("should be Some");
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].prompt.slug(), "code-review");
+    }
+
+    #[test]
+    fn new_state_with_review_configs_array_deserializes() {
+        let json = r#"{
+            "id": "test-1",
+            "branch": "swarm/test-1",
+            "prompt": "fix the bug",
+            "agent_kind": "claude",
+            "repo_path": "/tmp/repo",
+            "worktree_path": "/tmp/repo/.swarm/wt/test-1",
+            "created_at": "2025-01-01T00:00:00-05:00",
+            "agent": {"pane_id": "%1"},
+            "terminals": [],
+            "summary": null,
+            "status": "running",
+            "review_configs": [
+                {"prompt": {"kind": "built_in", "slug": "code-review"}, "agent": null, "mode": "review"},
+                {"prompt": {"kind": "built_in", "slug": "security-audit"}, "agent": null, "mode": "review"}
+            ]
+        }"#;
+        let restored: WorktreeState = serde_json::from_str(json).expect("deserialize new format");
+        let configs = restored.review_configs.expect("should be Some");
+        assert_eq!(configs.len(), 2);
+    }
+
+    #[test]
+    fn state_with_empty_review_configs_array() {
+        let json = r#"{
+            "id": "test-1",
+            "branch": "swarm/test-1",
+            "prompt": "fix the bug",
+            "agent_kind": "claude",
+            "repo_path": "/tmp/repo",
+            "worktree_path": "/tmp/repo/.swarm/wt/test-1",
+            "created_at": "2025-01-01T00:00:00-05:00",
+            "agent": {"pane_id": "%1"},
+            "terminals": [],
+            "summary": null,
+            "status": "running",
+            "review_configs": []
+        }"#;
+        let restored: WorktreeState = serde_json::from_str(json).expect("deserialize empty array");
+        let configs = restored.review_configs.expect("should be Some (empty)");
+        assert!(configs.is_empty());
+    }
+
+    #[test]
+    fn state_without_review_configs_field() {
+        let json = r#"{
+            "id": "test-1",
+            "branch": "swarm/test-1",
+            "prompt": "fix the bug",
+            "agent_kind": "claude",
+            "repo_path": "/tmp/repo",
+            "worktree_path": "/tmp/repo/.swarm/wt/test-1",
+            "created_at": "2025-01-01T00:00:00-05:00",
+            "agent": {"pane_id": "%1"},
+            "terminals": [],
+            "summary": null,
+            "status": "running"
+        }"#;
+        let restored: WorktreeState = serde_json::from_str(json).expect("deserialize missing field");
+        assert!(restored.review_configs.is_none());
     }
 }

@@ -306,7 +306,7 @@ fn draw_status_bar(frame: &mut Frame, area: Rect, app: &TuiApp) {
             };
             (s, theme::status_running())
         }
-        SessionStatus::Idle => ("● idle".to_string(), theme::status_idle()),
+
         SessionStatus::Waiting => {
             let dot = if (app.tick_count / 8).is_multiple_of(2) {
                 "○"
@@ -342,7 +342,6 @@ fn draw_status_bar(frame: &mut Frame, area: Rect, app: &TuiApp) {
     let hint = if app.focused_tool.is_some() {
         format!(" {}tab:next s-tab:prev enter:toggle esc:done ", scroll_hint)
     } else if app.status == SessionStatus::Done
-        || app.status == SessionStatus::Idle
         || app.status == SessionStatus::Waiting
     {
         format!(" {}tab:tool u/d:page c:tools i:input q:quit ", scroll_hint)

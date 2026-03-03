@@ -20,6 +20,8 @@ pub const FROST: Color = Color::Rgb(220, 220, 225); // bright text
 pub const SLATE: Color = Color::Rgb(140, 145, 155); // cool gray for headers
 pub const STEEL: Color = Color::Rgb(100, 105, 115); // medium cool gray for borders
 pub const ICE: Color = Color::Rgb(175, 180, 190); // light cool gray for labels
+pub const FOCUS_BG: Color = Color::Rgb(55, 47, 37); // warm tint for focused panel headers
+pub const TOOL_FOCUS_BG: Color = Color::Rgb(50, 47, 42); // subtle tint for focused tool entry
 
 // ── Styles ─────────────────────────────────────────────────
 
