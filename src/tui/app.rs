@@ -3382,4 +3382,231 @@ mod tests {
 
         assert_eq!(app.worktrees[0].phase, WorkerPhase::Running);
     }
+
+    // --- drain_file_inbox tests ---
+
+    #[test]
+    fn test_drain_file_inbox_reads_and_dispatches() {
+        let dir = tempfile::tempdir().unwrap();
+        let work_dir = dir.path().to_path_buf();
+        std::fs::create_dir_all(work_dir.join(".swarm")).unwrap();
+
+        let msg1 = ipc::InboxMessage::Send {
+            id: "msg-1".to_string(),
+            worktree: "hive-1".to_string(),
+            message: "first message".to_string(),
+            timestamp: Local::now(),
+        };
+        let msg2 = ipc::InboxMessage::Send {
+            id: "msg-2".to_string(),
+            worktree: "hive-1".to_string(),
+            message: "second message".to_string(),
+            timestamp: Local::now(),
+        };
+        ipc::write_inbox(&work_dir, &msg1).unwrap();
+        ipc::write_inbox(&work_dir, &msg2).unwrap();
+
+        let mut app = test_app(work_dir.clone(), vec![]);
+        app.worktrees
+            .push(make_test_worktree("hive-1", AgentKind::ClaudeTui));
+
+        // Drain should read and dispatch both messages
+        app.drain_file_inbox();
+
+        let (agent_msgs, _) = ipc::read_agent_inbox(&work_dir, "hive-1", 0).unwrap();
+        assert_eq!(agent_msgs.len(), 2);
+        assert_eq!(agent_msgs[0].message, "first message");
+        assert_eq!(agent_msgs[1].message, "second message");
+    }
+
+    #[test]
+    fn test_drain_file_inbox_advances_position() {
+        let dir = tempfile::tempdir().unwrap();
+        let work_dir = dir.path().to_path_buf();
+        std::fs::create_dir_all(work_dir.join(".swarm")).unwrap();
+
+        let mut app = test_app(work_dir.clone(), vec![]);
+        app.worktrees
+            .push(make_test_worktree("hive-1", AgentKind::ClaudeTui));
+
+        // Write first message and drain
+        ipc::write_inbox(
+            &work_dir,
+            &ipc::InboxMessage::Send {
+                id: "msg-1".to_string(),
+                worktree: "hive-1".to_string(),
+                message: "first".to_string(),
+                timestamp: Local::now(),
+            },
+        )
+        .unwrap();
+        app.drain_file_inbox();
+        let pos_after_first = app.last_inbox_pos;
+        assert!(pos_after_first > 0);
+
+        // Write second message and drain
+        ipc::write_inbox(
+            &work_dir,
+            &ipc::InboxMessage::Send {
+                id: "msg-2".to_string(),
+                worktree: "hive-1".to_string(),
+                message: "second".to_string(),
+                timestamp: Local::now(),
+            },
+        )
+        .unwrap();
+        app.drain_file_inbox();
+
+        // Position should advance further
+        assert!(app.last_inbox_pos > pos_after_first);
+
+        // Both messages should have been dispatched across two drains
+        let (agent_msgs, _) = ipc::read_agent_inbox(&work_dir, "hive-1", 0).unwrap();
+        assert_eq!(agent_msgs.len(), 2);
+    }
+
+    #[test]
+    fn test_drain_file_inbox_no_crash_missing_inbox() {
+        let dir = tempfile::tempdir().unwrap();
+        let work_dir = dir.path().to_path_buf();
+        // Don't create .swarm/ dir — inbox file doesn't exist
+
+        let mut app = test_app(work_dir, vec![]);
+        app.drain_file_inbox(); // should not panic
+        assert_eq!(app.last_inbox_pos, 0);
+    }
+
+    #[test]
+    fn test_drain_file_inbox_skips_already_processed() {
+        let dir = tempfile::tempdir().unwrap();
+        let work_dir = dir.path().to_path_buf();
+        std::fs::create_dir_all(work_dir.join(".swarm")).unwrap();
+
+        let mut app = test_app(work_dir.clone(), vec![]);
+        app.worktrees
+            .push(make_test_worktree("hive-1", AgentKind::ClaudeTui));
+
+        // Write and drain once
+        ipc::write_inbox(
+            &work_dir,
+            &ipc::InboxMessage::Send {
+                id: "msg-1".to_string(),
+                worktree: "hive-1".to_string(),
+                message: "old message".to_string(),
+                timestamp: Local::now(),
+            },
+        )
+        .unwrap();
+        app.drain_file_inbox();
+
+        // Drain again — nothing new to process
+        let pos_before = app.last_inbox_pos;
+        app.drain_file_inbox();
+        assert_eq!(app.last_inbox_pos, pos_before);
+
+        // Only the first message was dispatched
+        let (agent_msgs, _) = ipc::read_agent_inbox(&work_dir, "hive-1", 0).unwrap();
+        assert_eq!(agent_msgs.len(), 1);
+    }
+
+    // --- IPC Merge dispatch tests ---
+
+    #[test]
+    fn test_ipc_merge_unknown_worktree_no_crash() {
+        let dir = tempfile::tempdir().unwrap();
+        let work_dir = dir.path().to_path_buf();
+
+        let mut app = test_app(work_dir, vec![]);
+        app.worktrees
+            .push(make_test_worktree("hive-1", AgentKind::Claude));
+
+        let msg = ipc::InboxMessage::Merge {
+            id: "msg-1".to_string(),
+            worktree: "nonexistent-99".to_string(),
+            timestamp: Local::now(),
+        };
+
+        // Should not panic and should not affect existing worktrees
+        app.handle_inbox_message(msg);
+        assert_eq!(app.worktrees.len(), 1);
+        assert_eq!(app.worktrees[0].id, "hive-1");
+    }
+
+    // --- IPC Create repo defaulting tests ---
+
+    #[test]
+    fn test_ipc_create_single_repo_defaults_without_repo_flag() {
+        // When there's exactly one repo and the Create message omits --repo,
+        // the repo matching logic should default to the single repo (not error).
+        // The downstream create_worktree_with_agent will fail (no tmux/git),
+        // but the error should NOT be about repo matching.
+        let dir = tempfile::tempdir().unwrap();
+        let work_dir = dir.path().to_path_buf();
+        std::fs::create_dir_all(work_dir.join(".swarm")).unwrap();
+
+        let repo = work_dir.join("my-repo");
+        let mut app = test_app(work_dir, vec![repo]);
+
+        let msg = ipc::InboxMessage::Create {
+            id: "msg-1".to_string(),
+            prompt: "fix something".to_string(),
+            agent: "claude".to_string(),
+            repo: None,
+            start_point: None,
+            timestamp: Local::now(),
+        };
+
+        app.handle_inbox_message(msg);
+
+        // If there's a flash, it should NOT be about missing --repo
+        if let Some((flash, _)) = &app.status_message {
+            assert!(
+                !flash.contains("--repo required"),
+                "should not require --repo with single repo, got: {}",
+                flash
+            );
+        }
+    }
+
+    // --- Branch name generation edge cases ---
+
+    #[test]
+    fn test_branch_name_empty_prompt() {
+        let name = generate_branch_name("", 1);
+        // Empty prompt sanitizes to empty string, suffix still appended
+        assert_eq!(name, "swarm/-1");
+    }
+
+    #[test]
+    fn test_branch_name_unicode() {
+        let name = generate_branch_name("\u{4fee}\u{590d}\u{767b}\u{5f55} bug", 1);
+        // sanitize() uses is_alphanumeric() which accepts Unicode letters/digits,
+        // so CJK characters survive. Non-alphanumeric chars (space) become hyphens.
+        assert!(name.starts_with("swarm/"));
+        assert!(name.ends_with("-1"));
+        assert!(name.contains("bug"));
+        // The space becomes a hyphen
+        assert!(name.contains("-bug-"));
+    }
+
+    #[test]
+    fn test_worktree_dir_name_consistency_with_special_chars() {
+        let branch = generate_branch_name("add user auth (v2)", 5);
+        let dir = generate_worktree_dir_name("add user auth (v2)", 5);
+        assert_eq!(branch, format!("swarm/{}", dir));
+    }
+
+    #[test]
+    fn test_branch_name_all_special_chars() {
+        let name = generate_branch_name("!@#$%^&*()", 1);
+        // All chars become hyphens, then leading/trailing hyphens stripped
+        assert!(name.starts_with("swarm/"));
+        assert!(name.ends_with("-1"));
+    }
+
+    #[test]
+    fn test_generate_branch_name_preserves_numbers() {
+        let name = generate_branch_name("fix issue 42", 7);
+        assert_eq!(name, "swarm/fix-issue-42-7");
+    }
 }
