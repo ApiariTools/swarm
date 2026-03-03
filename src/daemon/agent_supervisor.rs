@@ -285,7 +285,5 @@ fn log_agent_event(logger: &EventLogger, event: &AgentEventWire) {
 
 /// Write the agent status file for hive to read.
 fn write_agent_status(work_dir: &std::path::Path, worktree_id: &str, status: &str) {
-    let status_dir = work_dir.join(".swarm").join("agent-status");
-    let _ = std::fs::create_dir_all(&status_dir);
-    let _ = std::fs::write(status_dir.join(worktree_id), status);
+    crate::core::agent_status::write_agent_status(work_dir, worktree_id, status);
 }

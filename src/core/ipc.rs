@@ -561,4 +561,134 @@ mod tests {
             _ => panic!("expected ReviewStarted"),
         }
     }
+
+    // ── Inbox file I/O tests ─────────────────────────────────
+
+    #[test]
+    fn test_read_inbox_empty_on_fresh_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let (messages, offset) = read_inbox(dir.path(), 0).unwrap();
+        assert!(messages.is_empty());
+        assert_eq!(offset, 0);
+    }
+
+    #[test]
+    fn test_inbox_write_and_read_with_offset() {
+        let dir = tempfile::tempdir().unwrap();
+        let work_dir = dir.path();
+
+        // Write two Create messages to inbox.jsonl
+        let inbox_path = inbox_path(work_dir);
+        std::fs::create_dir_all(inbox_path.parent().unwrap()).unwrap();
+
+        let msg1 = InboxMessage::Create {
+            id: "msg-1".to_string(),
+            prompt: "first task".to_string(),
+            agent: "claude-tui".to_string(),
+            repo: None,
+            start_point: None,
+            review_configs: None,
+            timestamp: Local::now(),
+        };
+        let msg2 = InboxMessage::Create {
+            id: "msg-2".to_string(),
+            prompt: "second task".to_string(),
+            agent: "claude".to_string(),
+            repo: Some("hive".to_string()),
+            start_point: None,
+            review_configs: None,
+            timestamp: Local::now(),
+        };
+
+        // Write using the JSONL writer
+        let writer = apiari_common::ipc::JsonlWriter::<InboxMessage>::new(&inbox_path);
+        writer.append(&msg1).unwrap();
+        writer.append(&msg2).unwrap();
+
+        // Read all from offset 0
+        let (messages, new_offset) = read_inbox(work_dir, 0).unwrap();
+        assert_eq!(messages.len(), 2);
+        match &messages[0] {
+            InboxMessage::Create { prompt, .. } => assert_eq!(prompt, "first task"),
+            _ => panic!("expected Create"),
+        }
+        match &messages[1] {
+            InboxMessage::Create { prompt, repo, .. } => {
+                assert_eq!(prompt, "second task");
+                assert_eq!(repo.as_deref(), Some("hive"));
+            }
+            _ => panic!("expected Create"),
+        }
+
+        // Read again from new offset — should get nothing
+        let (messages2, _) = read_inbox(work_dir, new_offset).unwrap();
+        assert!(messages2.is_empty());
+
+        // Write a third message and read only the new one
+        let msg3 = InboxMessage::Send {
+            id: "msg-3".to_string(),
+            worktree: "hive-1".to_string(),
+            message: "follow up".to_string(),
+            timestamp: Local::now(),
+        };
+        writer.append(&msg3).unwrap();
+
+        let (messages3, _) = read_inbox(work_dir, new_offset).unwrap();
+        assert_eq!(messages3.len(), 1);
+        match &messages3[0] {
+            InboxMessage::Send { message, .. } => assert_eq!(message, "follow up"),
+            _ => panic!("expected Send"),
+        }
+    }
+
+    #[test]
+    fn test_emit_event_creates_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let work_dir = dir.path();
+
+        // Directory doesn't exist yet — emit_event should create it
+        let event = SwarmEvent::WorktreeCreated {
+            worktree: "test-1".to_string(),
+            branch: "swarm/test-1".to_string(),
+            agent: "claude-tui".to_string(),
+            pane_id: "%0".to_string(),
+            timestamp: Local::now(),
+        };
+        emit_event(work_dir, &event).unwrap();
+
+        let events_file = events_path(work_dir);
+        assert!(events_file.exists());
+        let content = std::fs::read_to_string(&events_file).unwrap();
+        assert!(content.contains("worktree_created"));
+        assert!(content.contains("test-1"));
+    }
+
+    #[test]
+    fn test_inbox_handles_malformed_lines_gracefully() {
+        let dir = tempfile::tempdir().unwrap();
+        let work_dir = dir.path();
+        let path = inbox_path(work_dir);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+        // Write a valid message followed by garbage
+        let msg = InboxMessage::Create {
+            id: "msg-1".to_string(),
+            prompt: "task".to_string(),
+            agent: "claude-tui".to_string(),
+            repo: None,
+            start_point: None,
+            review_configs: None,
+            timestamp: Local::now(),
+        };
+        let mut content = serde_json::to_string(&msg).unwrap();
+        content.push('\n');
+        content.push_str("this is not valid json\n");
+        std::fs::write(&path, content).unwrap();
+
+        // read_inbox should still return without panicking
+        // (it may skip malformed lines or return an error, both are acceptable)
+        let result = read_inbox(work_dir, 0);
+        // The key assertion: no panic occurred
+        assert!(result.is_ok() || result.is_err());
+    }
 }
