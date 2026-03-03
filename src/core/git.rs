@@ -237,19 +237,28 @@ pub fn detect_repos(dir: &Path) -> Result<Vec<PathBuf>> {
     }
 
     if !child_repos.is_empty() {
-        // Sort by recent commit count (most active first)
-        child_repos.sort_by(|a, b| {
-            let count = |repo: &Path| -> usize {
-                std::process::Command::new("git")
+        // Sort by recent commit count (most active first).
+        // Compute counts once upfront instead of spawning git per comparison.
+        let mut counted: Vec<(PathBuf, usize)> = child_repos
+            .into_iter()
+            .map(|repo| {
+                let c = std::process::Command::new("git")
                     .args(["rev-list", "--count", "--since=3 months ago", "HEAD"])
-                    .current_dir(repo)
+                    .current_dir(&repo)
                     .output()
                     .ok()
-                    .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse().ok())
-                    .unwrap_or(0)
-            };
-            count(b).cmp(&count(a))
-        });
+                    .and_then(|o| {
+                        String::from_utf8_lossy(&o.stdout)
+                            .trim()
+                            .parse()
+                            .ok()
+                    })
+                    .unwrap_or(0);
+                (repo, c)
+            })
+            .collect();
+        counted.sort_by(|a, b| b.1.cmp(&a.1));
+        child_repos = counted.into_iter().map(|(p, _)| p).collect();
         return Ok(child_repos);
     }
 
@@ -259,4 +268,76 @@ pub fn detect_repos(dir: &Path) -> Result<Vec<PathBuf>> {
         repos.push(dir.to_path_buf());
     }
     Ok(repos)
+}
+
+/// Generate a `swarm/<sanitized-prompt>-<suffix>` branch name.
+pub fn generate_branch_name(prompt: &str, suffix: &str) -> String {
+    format!("swarm/{}-{}", super::shell::sanitize(prompt), suffix)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── Branch name generation tests ─────────────────────────
+
+    #[test]
+    fn test_branch_name_sanitizes_spaces() {
+        let name = generate_branch_name("fix the login bug", "a1b2");
+        assert_eq!(name, "swarm/fix-the-login-bug-a1b2");
+    }
+
+    #[test]
+    fn test_branch_name_truncates_long_prompts() {
+        let long_prompt = "a".repeat(60);
+        let name = generate_branch_name(&long_prompt, "zzzz");
+        // sanitize truncates to 40 chars, then format adds "swarm/" prefix and "-zzzz" suffix
+        assert!(name.starts_with("swarm/"));
+        assert!(name.ends_with("-zzzz"));
+        // The sanitized portion (between "swarm/" and "-zzzz") should be at most 40 chars
+        let middle = &name["swarm/".len()..name.len() - "-zzzz".len()];
+        assert!(middle.len() <= 40);
+    }
+
+    #[test]
+    fn test_branch_name_removes_special_chars() {
+        let name = generate_branch_name("add user auth (v2) @fast!", "c3d4");
+        // Special chars become hyphens, then leading/trailing hyphens stripped by sanitize
+        // "!" at end -> "-" -> stripped by trim_matches('-')
+        assert_eq!(name, "swarm/add-user-auth--v2---fast-c3d4");
+        // Verify no special characters remain in the branch name (besides / and -)
+        let after_prefix = &name["swarm/".len()..];
+        assert!(after_prefix
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-'));
+    }
+
+    #[test]
+    fn test_branch_name_appends_unique_suffix() {
+        let name1 = generate_branch_name("same prompt", "aaaa");
+        let name2 = generate_branch_name("same prompt", "bbbb");
+        assert_ne!(name1, name2);
+        assert!(name1.ends_with("-aaaa"));
+        assert!(name2.ends_with("-bbbb"));
+    }
+
+    #[test]
+    fn test_branch_name_empty_prompt() {
+        let name = generate_branch_name("", "x1y2");
+        // sanitize("") returns "", so we get "swarm/-x1y2"
+        assert_eq!(name, "swarm/-x1y2");
+    }
+
+    #[test]
+    fn test_branch_name_unicode_prompt() {
+        let name = generate_branch_name("修复 bug 🐛", "abcd");
+        assert!(name.starts_with("swarm/"));
+        assert!(name.ends_with("-abcd"));
+        // Unicode is not alphanumeric in ASCII sense, so becomes hyphens
+        // sanitize strips leading/trailing hyphens
+        let after_prefix = &name["swarm/".len()..];
+        assert!(after_prefix
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-'));
+    }
 }
