@@ -99,6 +99,9 @@ enum Commands {
         #[command(subcommand)]
         action: DaemonAction,
     },
+    /// Debug: spawn claude via SDK and print events (no daemon)
+    #[command(name = "debug-spawn")]
+    DebugSpawn,
 }
 
 #[derive(Subcommand)]
@@ -187,6 +190,7 @@ async fn main() -> Result<()> {
             });
             daemon_tui::run_remote(addr, token).await
         }
+        Some(Commands::DebugSpawn) => cmd_debug_spawn(work_dir).await,
         Some(Commands::Daemon { action }) => match action {
             DaemonAction::Start { foreground, bind } => {
                 daemon::start(work_dir, foreground, bind).await
@@ -248,6 +252,98 @@ async fn run_default_tui(work_dir: std::path::PathBuf) -> Result<()> {
 /// Check if the swarm daemon is running (global daemon).
 fn is_daemon_running(_work_dir: &std::path::Path) -> bool {
     daemon::read_global_pid().is_some_and(daemon::is_process_alive)
+}
+
+/// Debug command: spawn claude via SDK (same code path as daemon) and print events.
+/// Incrementally adds daemon infrastructure to isolate what breaks child spawning.
+async fn cmd_debug_spawn(work_dir: std::path::PathBuf) -> Result<()> {
+    eprintln!("[debug-spawn] Step 1: init logging");
+    core::log::init(&work_dir);
+
+    eprintln!("[debug-spawn] Step 2: skip global env mutation (child spawn clears CLAUDECODE)");
+
+    eprintln!("[debug-spawn] Step 3: ignore SIGPIPE");
+    unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN); }
+
+    eprintln!("[debug-spawn] Step 4: set up signal handlers");
+    let _sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let _sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+
+    eprintln!("[debug-spawn] Step 5: create channels");
+    let (event_tx, _) = tokio::sync::broadcast::channel::<daemon::protocol::DaemonResponse>(1024);
+    let (_supervisor_tx, _supervisor_rx) = tokio::sync::mpsc::unbounded_channel::<daemon::agent_supervisor::SupervisorEvent>();
+
+    eprintln!("[debug-spawn] Step 6: start socket server");
+    let (_request_rx, _socket_handle) =
+        daemon::socket_server::start(event_tx.clone(), None, None)?;
+
+    // Use an existing worktree directory if one exists, like the daemon does
+    let wt_dir = std::fs::read_dir(work_dir.join(".swarm/wt"))
+        .ok()
+        .and_then(|mut rd| rd.find_map(|e| e.ok().map(|e| e.path())))
+        .unwrap_or(work_dir);
+    eprintln!("[debug-spawn] Step 7: spawn claude via SDK inside tokio::spawn (working_dir={})...", wt_dir.display());
+    let handle = tokio::spawn(async move {
+        let client = apiari_claude_sdk::ClaudeClient::new();
+        let opts = apiari_claude_sdk::SessionOptions {
+            dangerously_skip_permissions: true,
+            include_partial_messages: true,
+            working_dir: Some(wt_dir),
+            ..Default::default()
+        };
+
+        let mut session = match client.spawn(opts).await {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("[debug-spawn] spawn failed: {e}");
+                return 0u64;
+            }
+        };
+
+        eprintln!("[debug-spawn] Spawned. Sending message...");
+
+        if let Err(e) = session
+            .send_message("Say hello in exactly 3 words. Nothing else.")
+            .await
+        {
+            eprintln!("[debug-spawn] send failed: {e}");
+            return 0;
+        }
+
+        eprintln!("[debug-spawn] Message sent. Reading events (stdin kept open)...");
+
+        let mut count = 0u64;
+        loop {
+            match session.next_event().await {
+                Ok(Some(event)) => {
+                    count += 1;
+                    let is_result = event.is_result();
+                    eprintln!("[debug-spawn] event #{count}");
+                    if is_result {
+                        break;
+                    }
+                }
+                Ok(None) => {
+                    eprintln!("[debug-spawn] EOF after {count} events");
+                    break;
+                }
+                Err(e) => {
+                    eprintln!("[debug-spawn] ERROR after {count} events: {e}");
+                    break;
+                }
+            }
+        }
+        count
+    });
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(15), handle).await;
+    match result {
+        Ok(Ok(count)) => eprintln!("[debug-spawn] Done: {count} events"),
+        Ok(Err(e)) => eprintln!("[debug-spawn] PANIC: {e:?}"),
+        Err(_) => eprintln!("[debug-spawn] TIMEOUT after 15s"),
+    }
+
+    Ok(())
 }
 
 // ── IPC Subcommands ────────────────────────────────────────

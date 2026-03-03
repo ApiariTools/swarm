@@ -33,6 +33,10 @@ pub trait ManagedAgent: Send {
 
     /// Returns `true` if the agent has finished.
     fn is_finished(&self) -> bool;
+
+    /// Wait for the agent process to exit and return captured stderr (if any).
+    /// Used for diagnostics when the agent exits unexpectedly.
+    async fn wait_for_stderr(&mut self) -> Option<String>;
 }
 
 /// Options for spawning a managed agent.
@@ -121,29 +125,35 @@ impl ManagedAgent for ClaudeManagedAgent {
     }
 
     async fn next_event(&mut self) -> Result<Option<AgentEventWire>> {
-        let session = match &mut self.state {
-            ClaudeState::Running(session) => session,
-            ClaudeState::Waiting | ClaudeState::Finished => return Ok(None),
-        };
+        loop {
+            let next = match &mut self.state {
+                ClaudeState::Running(session) => session.next_event().await,
+                ClaudeState::Waiting | ClaudeState::Finished => return Ok(None),
+            };
 
-        match session.next_event().await {
-            Ok(Some(event)) => {
-                let wire = translate_claude_event(&event);
-                // Capture session_id from Result
-                if let apiari_claude_sdk::Event::Result(ref result) = event {
-                    self.session_id = Some(result.session_id.clone());
-                    // Transition to Waiting after Result
-                    self.state = ClaudeState::Waiting;
+            match next {
+                Ok(Some(event)) => {
+                    // Capture session_id from Result.
+                    if let apiari_claude_sdk::Event::Result(ref result) = event {
+                        self.session_id = Some(result.session_id.clone());
+                        // Transition to Waiting after Result.
+                        self.state = ClaudeState::Waiting;
+                    }
+
+                    // Skip non-user-facing events (system/user/rate-limit) without
+                    // signaling EOF to the supervisor.
+                    if let Some(wire) = translate_claude_event(&event) {
+                        return Ok(Some(wire));
+                    }
                 }
-                Ok(wire)
-            }
-            Ok(None) => {
-                self.state = ClaudeState::Finished;
-                Ok(None)
-            }
-            Err(e) => {
-                self.state = ClaudeState::Finished;
-                Err(e.into())
+                Ok(None) => {
+                    self.state = ClaudeState::Finished;
+                    return Ok(None);
+                }
+                Err(e) => {
+                    self.state = ClaudeState::Finished;
+                    return Err(e.into());
+                }
             }
         }
     }
@@ -187,6 +197,14 @@ impl ManagedAgent for ClaudeManagedAgent {
 
     fn is_finished(&self) -> bool {
         matches!(self.state, ClaudeState::Finished)
+    }
+
+    async fn wait_for_stderr(&mut self) -> Option<String> {
+        if let ClaudeState::Running(ref mut session) = self.state {
+            session.wait_for_stderr().await.ok().flatten()
+        } else {
+            None
+        }
     }
 }
 
@@ -341,35 +359,38 @@ impl ManagedAgent for CodexManagedAgent {
     }
 
     async fn next_event(&mut self) -> Result<Option<AgentEventWire>> {
-        let execution = match &mut self.state {
-            CodexState::Running(exec) => exec,
-            CodexState::Waiting | CodexState::Finished => return Ok(None),
-        };
+        loop {
+            let (next, execution_finished) = match &mut self.state {
+                CodexState::Running(exec) => (exec.next_event().await, exec.is_finished()),
+                CodexState::Waiting | CodexState::Finished => return Ok(None),
+            };
 
-        match execution.next_event().await {
-            Ok(Some(event)) => {
-                // Track thread_id
-                if let apiari_codex_sdk::Event::ThreadStarted { ref thread_id } = event {
-                    self.thread_id = Some(thread_id.clone());
+            match next {
+                Ok(Some(event)) => {
+                    // Track thread_id.
+                    if let apiari_codex_sdk::Event::ThreadStarted { ref thread_id } = event {
+                        self.thread_id = Some(thread_id.clone());
+                    }
+
+                    // Check if execution is done.
+                    if execution_finished {
+                        self.state = CodexState::Waiting;
+                    }
+
+                    // Skip non-user-facing events without signaling EOF.
+                    if let Some(wire) = translate_codex_event(&event) {
+                        return Ok(Some(wire));
+                    }
                 }
-
-                let wire = translate_codex_event(&event);
-
-                // Check if execution is done
-                if execution.is_finished() {
+                Ok(None) => {
+                    // EOF — execution finished.
                     self.state = CodexState::Waiting;
+                    return Ok(None);
                 }
-
-                Ok(wire)
-            }
-            Ok(None) => {
-                // EOF — execution finished
-                self.state = CodexState::Waiting;
-                Ok(None)
-            }
-            Err(e) => {
-                self.state = CodexState::Finished;
-                Err(e.into())
+                Err(e) => {
+                    self.state = CodexState::Finished;
+                    return Err(e.into());
+                }
             }
         }
     }
@@ -413,6 +434,11 @@ impl ManagedAgent for CodexManagedAgent {
 
     fn is_finished(&self) -> bool {
         matches!(self.state, CodexState::Finished)
+    }
+
+    async fn wait_for_stderr(&mut self) -> Option<String> {
+        // Codex SDK doesn't expose stderr currently
+        None
     }
 }
 

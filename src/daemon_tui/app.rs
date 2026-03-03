@@ -177,7 +177,7 @@ impl WorkerConversation {
         }
     }
 
-    fn flush_streaming_text(&mut self) {
+    pub fn flush_streaming_text(&mut self) {
         if !self.streaming_text.is_empty() {
             let text = std::mem::take(&mut self.streaming_text);
             self.entries.push(ConversationEntry::AssistantText { text });
@@ -1181,5 +1181,54 @@ mod tests {
         let entries = parse_history_events(content);
         assert_eq!(entries.len(), 1);
         assert!(matches!(&entries[0], HistoryEntry::Event(AgentEventWire::Error { message }) if message == "something broke"));
+    }
+
+    /// End-to-end test: parse history → feed to handle_agent_event → verify conversation
+    #[test]
+    fn history_loads_into_conversation_entries() {
+        let mut app = DaemonTuiApp::new(PathBuf::from("/tmp"));
+
+        let content = r#"{"type":"start","timestamp":"2025-01-01T00:00:00Z","prompt":"do stuff","model":"claude"}
+{"type":"assistant_text","timestamp":"2025-01-01T00:00:01Z","text":"I'll help you."}
+{"type":"tool_use","timestamp":"2025-01-01T00:00:02Z","tool":"Read","input":"src/main.rs"}
+{"type":"tool_result","timestamp":"2025-01-01T00:00:03Z","tool":"Read","output":"fn main() {}","is_error":false}
+{"type":"assistant_text","timestamp":"2025-01-01T00:00:04Z","text":"Done!"}
+{"type":"session_result","timestamp":"2025-01-01T00:00:05Z","turns":1,"cost_usd":0.05,"session_id":"s1"}
+"#;
+
+        let entries = parse_history_events(content);
+        assert_eq!(entries.len(), 5, "should parse 5 entries (start is skipped)");
+
+        let wt_id = "test-worker";
+        for entry in &entries {
+            match entry {
+                HistoryEntry::Event(event) => {
+                    app.handle_agent_event(wt_id, event);
+                }
+                HistoryEntry::UserMessage(text) => {
+                    let conv = app
+                        .conversations
+                        .entry(wt_id.to_string())
+                        .or_insert_with(WorkerConversation::new);
+                    conv.entries.push(ConversationEntry::User {
+                        text: text.clone(),
+                    });
+                }
+            }
+        }
+
+        let conv = app.conversations.get(wt_id).unwrap();
+        // After SessionResult, flush_streaming_text is called, so all text should be in entries
+        assert!(
+            !conv.entries.is_empty(),
+            "conversation should have entries after loading history"
+        );
+        // Should have: AssistantText("I'll help you."), ToolCall(Read), AssistantText("Done!")
+        assert_eq!(conv.entries.len(), 3, "entries: {:?}", conv.entries.iter().map(|e| match e {
+            ConversationEntry::AssistantText { text } => format!("Text({})", &text[..text.len().min(20)]),
+            ConversationEntry::ToolCall { tool, .. } => format!("Tool({})", tool),
+            ConversationEntry::User { text } => format!("User({})", &text[..text.len().min(20)]),
+            ConversationEntry::Status { text } => format!("Status({})", &text[..text.len().min(20)]),
+        }).collect::<Vec<_>>());
     }
 }

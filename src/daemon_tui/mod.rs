@@ -172,11 +172,21 @@ async fn event_loop(
     client: &mut DaemonClient,
     mut repo_task: Option<tokio::task::JoinHandle<Vec<PathBuf>>>,
 ) -> Result<()> {
+    // Track consecutive reconnect failures for daemon health detection
+    let mut reconnect_failures: u32 = 0;
+
+    // Track reader task so we can abort it on reconnect (prevents stale
+    // EOF errors from the old connection triggering unnecessary reconnects).
+    let mut reader_task: Option<tokio::task::JoinHandle<()>> = None;
+
     // Spawn daemon reader task
     let (daemon_tx, mut daemon_rx) = mpsc::unbounded_channel();
     if let Some(reader) = client.take_reader() {
-        tokio::spawn(daemon_reader_task(reader, daemon_tx.clone()));
+        reader_task = Some(tokio::spawn(daemon_reader_task(reader, daemon_tx.clone())));
     }
+
+    // Last time we sent a ListWorkers request (for periodic refresh)
+    let mut last_worker_request = std::time::Instant::now();
 
     // Async terminal event stream (non-blocking, backed by internal thread)
     let mut event_stream = EventStream::new();
@@ -185,17 +195,42 @@ async fn event_loop(
     let mut tick = tokio::time::interval(Duration::from_millis(250));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+    let mut draw_count: u32 = 0;
     loop {
         // Draw if state has changed
         if app.needs_redraw {
             terminal.draw(|frame| render::draw(frame, app))?;
             app.needs_redraw = false;
+            draw_count += 1;
+            // Log first few draws with state summary for diagnostics
+            if draw_count <= 5 {
+                let sel_id = app.selected_worker().map(|w| w.id.as_str()).unwrap_or("none");
+                let conv_entries = app
+                    .selected_conversation()
+                    .map(|c| c.entries.len())
+                    .unwrap_or(0);
+                let streaming = app
+                    .selected_conversation()
+                    .map(|c| c.streaming_text.len())
+                    .unwrap_or(0);
+                tui_log!(
+                    &app.work_dir,
+                    "draw #{}: connected={} workers={} selected={} entries={} streaming_bytes={}",
+                    draw_count,
+                    app.connected,
+                    app.workers.len(),
+                    sel_id,
+                    conv_entries,
+                    streaming
+                );
+            }
         }
 
         // Lazy-load history for the selected worker on first view
         if let Some(w) = app.selected_worker() {
             let wt_id = w.id.clone();
             if app.connected && !app.history_loaded.contains(&wt_id) {
+                tui_log!(&app.work_dir, "requesting history for {}", wt_id);
                 app.history_loaded.insert(wt_id.clone());
                 app.pending_history.push_back(wt_id.clone());
                 if let Err(e) = client
@@ -246,10 +281,19 @@ async fn event_loop(
                         handle_daemon_response(app, resp);
                     }
                     Err(e) => {
-                        tui_log!(&app.work_dir, "reader task error: {}", e);
-                        app.connected = false;
-                        app.reconnect_at = Some(std::time::Instant::now());
-                        app.set_status(format!("disconnected: {}", e));
+                        // Only trigger disconnect if the current reader task
+                        // is the one reporting the error (not an aborted stale one).
+                        let is_current = reader_task
+                            .as_ref()
+                            .is_some_and(|t| !t.is_finished());
+                        if is_current || reader_task.is_none() {
+                            tui_log!(&app.work_dir, "reader error (current): {}", e);
+                            app.connected = false;
+                            app.reconnect_at = Some(std::time::Instant::now());
+                            app.set_status(format!("disconnected: {}", e));
+                        } else {
+                            tui_log!(&app.work_dir, "reader error (stale, ignoring): {}", e);
+                        }
                     }
                 }
                 app.needs_redraw = true;
@@ -274,22 +318,55 @@ async fn event_loop(
                     app.needs_redraw = true;
                 }
 
+                // Periodic worker refresh: if connected but workers list is empty,
+                // re-request every 2s (handles race with daemon workspace registration).
+                if app.connected
+                    && app.workers.is_empty()
+                    && last_worker_request.elapsed() >= Duration::from_secs(2)
+                {
+                    last_worker_request = std::time::Instant::now();
+                    tui_log!(&app.work_dir, "worker refresh (empty list, re-requesting)");
+                    fire_and_forget(
+                        client,
+                        app,
+                        DaemonRequest::ListWorkers {
+                            workspace: Some(app.work_dir.clone()),
+                        },
+                    )
+                    .await;
+                }
+
                 // Reconnection attempts
                 if !app.connected
                     && let Some(at) = app.reconnect_at
                     && at.elapsed() >= Duration::from_millis(500)
                 {
                     app.reconnect_at = Some(std::time::Instant::now());
-                    tui_log!(&app.work_dir, "reconnect attempt...");
-                    match try_reconnect(app, client, &daemon_tx).await {
+                    tui_log!(&app.work_dir, "reconnect attempt #{}", reconnect_failures + 1);
+                    match try_reconnect(app, client, &daemon_tx, &mut reader_task).await {
                         Ok(()) => {
                             app.connected = true;
                             app.reconnect_at = None;
+                            reconnect_failures = 0;
                             tui_log!(&app.work_dir, "connected + subscribed");
                             app.set_status("connected".to_string());
                         }
                         Err(e) => {
-                            tui_log!(&app.work_dir, "reconnect failed: {}", e);
+                            reconnect_failures += 1;
+                            tui_log!(&app.work_dir, "reconnect failed ({}): {}", reconnect_failures, e);
+
+                            // After 10 consecutive failures (~5s), the daemon is
+                            // likely stuck. Restart it and reset the counter.
+                            if reconnect_failures == 10 {
+                                tui_log!(&app.work_dir, "daemon unresponsive, restarting...");
+                                app.set_status("daemon unresponsive, restarting...".to_string());
+                                restart_daemon(&app.work_dir);
+                                reconnect_failures = 0;
+                                // Give daemon time to start before retrying
+                                app.reconnect_at = Some(
+                                    std::time::Instant::now() + Duration::from_secs(1),
+                                );
+                            }
                         }
                     }
                 }
@@ -944,11 +1021,46 @@ fn handle_send_error(app: &mut DaemonTuiApp, e: color_eyre::Report) {
     app.set_status(format!("disconnected: {}", e));
 }
 
+/// Kill and restart the daemon process. Used when the daemon is unresponsive
+/// (accepting connections but not processing requests).
+fn restart_daemon(work_dir: &std::path::Path) {
+    // Kill existing daemon
+    if let Some(pid) = crate::daemon::read_global_pid() {
+        unsafe {
+            libc::kill(pid as i32, libc::SIGKILL);
+        }
+    }
+
+    // Start a fresh daemon in the background
+    let exe = std::env::current_exe()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "swarm".to_string());
+
+    let log_dir = work_dir.join(".swarm");
+    std::fs::create_dir_all(&log_dir).ok();
+    let daemon_log = std::fs::File::create(log_dir.join("daemon-stderr.log"))
+        .unwrap_or_else(|_| std::fs::File::open("/dev/null").unwrap());
+
+    let _ = std::process::Command::new(&exe)
+        .args([
+            "-d",
+            &work_dir.to_string_lossy(),
+            "daemon",
+            "start",
+            "--foreground",
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::from(daemon_log))
+        .spawn();
+}
+
 /// Attempt to reconnect to the daemon, spawning a new reader task.
 async fn try_reconnect(
     app: &mut DaemonTuiApp,
     client: &mut DaemonClient,
     daemon_tx: &mpsc::UnboundedSender<Result<DaemonResponse>>,
+    reader_task: &mut Option<tokio::task::JoinHandle<()>>,
 ) -> Result<()> {
     let new_client = tokio::time::timeout(
         Duration::from_millis(500),
@@ -977,9 +1089,14 @@ async fn try_reconnect(
         })
         .await?;
 
+    // Abort old reader task (prevents stale EOF from triggering reconnect)
+    if let Some(task) = reader_task.take() {
+        task.abort();
+    }
+
     // Spawn new reader task on the same channel
     if let Some(reader) = client.take_reader() {
-        tokio::spawn(daemon_reader_task(reader, daemon_tx.clone()));
+        *reader_task = Some(tokio::spawn(daemon_reader_task(reader, daemon_tx.clone())));
     }
 
     // Reset conversation state so history re-loads on select
@@ -995,10 +1112,20 @@ fn handle_daemon_response(app: &mut DaemonTuiApp, resp: DaemonResponse) {
     match resp {
         DaemonResponse::Ok { data } => {
             if let Some(ref d) = data {
+                let keys: Vec<&String> = d.as_object().map(|o| o.keys().collect()).unwrap_or_default();
+                tui_log!(&app.work_dir, "Ok response with data keys: {:?}", keys);
+
                 // History response
                 if let Some(content) = d.get("events").and_then(|v| v.as_str()) {
                     if let Some(wt_id) = app.pending_history.pop_front() {
                         let entries = app::parse_history_events(content);
+                        tui_log!(
+                            &app.work_dir,
+                            "history for {}: {} bytes, {} entries parsed",
+                            wt_id,
+                            content.len(),
+                            entries.len()
+                        );
                         for entry in &entries {
                             match entry {
                                 app::HistoryEntry::Event(event) => {
@@ -1017,6 +1144,22 @@ fn handle_daemon_response(app: &mut DaemonTuiApp, resp: DaemonResponse) {
                                 }
                             }
                         }
+                        // Flush any remaining streaming text into entries
+                        // (history may end mid-stream without a TurnComplete).
+                        if let Some(conv) = app.conversations.get_mut(&wt_id) {
+                            conv.flush_streaming_text();
+                            tui_log!(
+                                &app.work_dir,
+                                "history loaded for {}: {} conversation entries",
+                                wt_id,
+                                conv.entries.len()
+                            );
+                        }
+                    } else {
+                        tui_log!(
+                            &app.work_dir,
+                            "WARNING: history response but pending_history is empty!"
+                        );
                     }
                     return;
                 }
@@ -1030,9 +1173,17 @@ fn handle_daemon_response(app: &mut DaemonTuiApp, resp: DaemonResponse) {
             app.set_status(format!("error: {}", message));
         }
         DaemonResponse::Workers { workers } => {
+            let ids: Vec<&str> = workers.iter().map(|w| w.id.as_str()).take(10).collect();
+            tui_log!(
+                &app.work_dir,
+                "workers list: {} workers (first 10: {:?})",
+                workers.len(),
+                ids
+            );
             app.update_worker_list(workers);
         }
         DaemonResponse::AgentEvent { worktree_id, event } => {
+            tui_log!(&app.work_dir, "live event for {}: {:?}", worktree_id, std::mem::discriminant(&event));
             app.handle_agent_event(&worktree_id, &event);
         }
         DaemonResponse::StateChanged {

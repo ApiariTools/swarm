@@ -218,6 +218,67 @@ async fn drain_timeout_preserves_partial_reads() {
     server.abort();
 }
 
+/// Verify that the server stays responsive to Ping requests even while
+/// concurrent blocking work (simulating PR polling) runs in the background.
+/// This is a regression test for the daemon becoming unresponsive when
+/// poll_prs() ran blocking `gh` subprocesses on the event loop.
+#[tokio::test]
+async fn server_responsive_during_blocking_work() {
+    let dir = tempfile::tempdir().unwrap();
+    let sock_path = dir.path().join("responsive-test.sock");
+
+    let (event_tx, _) = tokio::sync::broadcast::channel::<(String, String)>(64);
+    let listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
+
+    let event_tx_clone = event_tx.clone();
+    let server_task = tokio::spawn(async move {
+        loop {
+            let (stream, _) = match listener.accept().await {
+                Ok(s) => s,
+                Err(_) => break,
+            };
+            let event_rx = event_tx_clone.subscribe();
+            tokio::spawn(handle_test_connection(stream, event_rx));
+        }
+    });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Connect and subscribe
+    let stream = UnixStream::connect(&sock_path).await.unwrap();
+    let (read_half, write_half) = stream.into_split();
+    let mut reader = BufReader::new(read_half);
+    let mut writer = write_half;
+
+    let resp = send_recv(&mut reader, &mut writer, r#"{"action":"subscribe"}"#).await;
+    assert!(resp.contains("ok"), "subscribe should work");
+
+    // Simulate heavy blocking work running concurrently (like PR polling)
+    let blocking_task = tokio::task::spawn_blocking(|| {
+        std::thread::sleep(Duration::from_secs(2));
+    });
+
+    // Pings should still complete quickly while the blocking task runs
+    for i in 0..5 {
+        let start = std::time::Instant::now();
+        let resp = send_recv(&mut reader, &mut writer, r#"{"action":"ping"}"#).await;
+        let elapsed = start.elapsed();
+        assert!(
+            resp.contains("ok"),
+            "ping {} should return ok, got: {}",
+            i, resp
+        );
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "ping {} took {:?} — server should respond in under 500ms",
+            i, elapsed
+        );
+    }
+
+    blocking_task.abort();
+    server_task.abort();
+}
+
 // ── Test helpers ────────────────────────────────────────────
 
 async fn handle_test_connection(

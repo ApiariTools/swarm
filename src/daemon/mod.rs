@@ -241,6 +241,14 @@ pub fn status(_work_dir: &Path) -> Result<()> {
     }
 }
 
+/// Get the current size of a workspace's inbox.jsonl (for seeking to end on startup).
+fn inbox_file_size(ws_path: &Path) -> u64 {
+    let inbox_path = ws_path.join(".swarm").join("inbox.jsonl");
+    std::fs::metadata(&inbox_path)
+        .map(|m| m.len())
+        .unwrap_or(0)
+}
+
 // ── Workspace registration ───────────────────────────────
 
 /// Register a workspace: canonicalize path, detect repos, load existing state.
@@ -289,13 +297,15 @@ async fn register_workspace(
     }
 
     let worker_count = workers.len();
+    // Seek to end of inbox so we don't replay old messages on restart
+    let inbox_pos = inbox_file_size(&canonical);
     workspaces.insert(
         canonical.clone(),
         WorkspaceState {
             path: canonical.clone(),
             repos,
             workers,
-            inbox_offset: 0,
+            inbox_offset: inbox_pos,
         },
     );
 
@@ -321,6 +331,11 @@ async fn run_daemon(
     if let Some(ref wd) = initial_work_dir {
         crate::core::log::init(wd);
     }
+
+    // Do not mutate process-global environment here. In Rust 2024,
+    // `std::env::remove_var` is `unsafe` because it races with other threads.
+    // Child agent processes clear Claude-specific vars per-spawn in the SDK
+    // transport (`Command::env_remove(...)`), which is the thread-safe path.
 
     // Ignore SIGPIPE — the daemon may be spawned with a piped stderr that
     // closes when the parent (TUI process) drops the child handle. Without
@@ -361,10 +376,11 @@ async fn run_daemon(
     let mut inbox_poll = tokio::time::interval(inbox_poll_interval);
     inbox_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-    // PR polling
+    // PR polling (runs in background to avoid blocking the select loop)
     let pr_poll_interval = std::time::Duration::from_secs(30);
     let mut pr_poll = tokio::time::interval(pr_poll_interval);
     pr_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut pending_pr_poll: Option<tokio::task::JoinHandle<Vec<PrPollResult>>> = None;
 
     // Daemon is ready to accept connections immediately.
     eprintln!("[swarm] Daemon ready, accepting connections.");
@@ -410,11 +426,12 @@ async fn run_daemon(
                 }
                 let worker_count = workers.len();
                 let repo_count = repos.len();
+                let inbox_pos = inbox_file_size(&canonical);
                 let ws = WorkspaceState {
                     path: canonical.clone(),
                     repos,
                     workers,
-                    inbox_offset: 0,
+                    inbox_offset: inbox_pos,
                 };
                 eprintln!(
                     "[swarm] Registered workspace: {} ({} repos, {} existing workers)",
@@ -430,14 +447,21 @@ async fn run_daemon(
 
     loop {
         // Check if deferred workspace registration completed
-        if let Some(ref task) = pending_register {
-            if task.is_finished() {
-                if let Some(task) = pending_register.take() {
-                    if let Ok(Some((path, ws))) = task.await {
-                        workspaces.insert(path, ws);
-                    }
-                }
-            }
+        if let Some(ref task) = pending_register
+            && task.is_finished()
+            && let Some(task) = pending_register.take()
+            && let Ok(Some((path, ws))) = task.await
+        {
+            workspaces.insert(path, ws);
+        }
+
+        // Check if background PR poll completed
+        if let Some(ref task) = pending_pr_poll
+            && task.is_finished()
+            && let Some(task) = pending_pr_poll.take()
+            && let Ok(results) = task.await
+        {
+            apply_pr_poll_results(results, &mut workspaces, &mut state_dirty);
         }
 
         tokio::select! {
@@ -542,10 +566,29 @@ async fn run_daemon(
                 }
             }
 
-            // PR polling
+            // PR polling — spawn in background so we don't block the select loop.
+            // Each `gh pr list` call can take seconds; with many workers this
+            // would make the daemon unresponsive to socket requests.
             _ = pr_poll.tick() => {
-                for ws in workspaces.values_mut() {
-                    poll_prs(&mut ws.workers, &ws.path, &mut state_dirty);
+                if pending_pr_poll.is_none() {
+                    let jobs: Vec<PrPollJob> = workspaces.values()
+                        .flat_map(|ws| {
+                            ws.workers.values()
+                                .filter(|w| w.phase.is_active())
+                                .map(|w| PrPollJob {
+                                    worker_id: w.id.clone(),
+                                    branch: w.branch.clone(),
+                                    repo_path: w.repo_path.clone(),
+                                    had_pr: w.pr.is_some(),
+                                    workspace_path: ws.path.clone(),
+                                })
+                        })
+                        .collect();
+                    if !jobs.is_empty() {
+                        pending_pr_poll = Some(tokio::task::spawn_blocking(move || {
+                            poll_prs_background(jobs)
+                        }));
+                    }
                 }
             }
         }
@@ -757,8 +800,9 @@ async fn handle_request(
                 w.message_tx = Some(msg_tx);
             }
 
-            tokio::spawn(async move {
+            let join_handle = tokio::spawn(async move {
                 // Spawn the initial agent
+                swarm_log!("[daemon] Agent {} — spawning process...", wt_id);
                 let handle_result = agent_supervisor::spawn_agent(
                     agent_supervisor::SpawnAgentOpts {
                         worktree_id: &wt_id,
@@ -786,6 +830,14 @@ async fn handle_request(
                     }
                 };
 
+                // Log the Start event so events.jsonl is created immediately
+                handle.logger.log_start(&agent_prompt, None);
+                swarm_log!(
+                    "[daemon] Agent {} spawned successfully (kind={:?})",
+                    wt_id,
+                    agent_kind
+                );
+
                 // Signal that we're running
                 let _ = sv_tx.send(SupervisorEvent::PhaseChanged {
                     worktree_id: wt_id.clone(),
@@ -794,6 +846,7 @@ async fn handle_request(
                 });
 
                 // Initial event loop
+                swarm_log!("[daemon] Agent {} — entering event loop", wt_id);
                 let mut restart_count = 0u32;
                 let (phase, _session_id) = agent_supervisor::agent_event_loop(
                     &mut handle,
@@ -809,6 +862,12 @@ async fn handle_request(
                 )
                 .await;
 
+                swarm_log!(
+                    "[daemon] Agent {} — event loop exited with phase {:?}",
+                    wt_id,
+                    phase
+                );
+
                 // If the agent is waiting, listen for follow-up messages
                 if phase == WorkerPhase::Waiting {
                     loop {
@@ -816,6 +875,13 @@ async fn handle_request(
                             Some(msg) => msg,
                             None => break,
                         };
+
+                        handle.logger.log_user_message(&message);
+                        swarm_log!(
+                            "[daemon] Sending follow-up message to {} ({} bytes)",
+                            wt_id,
+                            message.len()
+                        );
 
                         if let Err(e) = handle.agent.send_message(&message).await {
                             swarm_log!(
@@ -855,6 +921,17 @@ async fn handle_request(
                             break;
                         }
                     }
+                }
+            });
+            // Log if the agent task panics
+            let panic_wt_id = worktree_id.clone();
+            tokio::spawn(async move {
+                if let Err(e) = join_handle.await {
+                    swarm_log!(
+                        "[daemon] PANIC: Agent {} task panicked: {:?}",
+                        panic_wt_id,
+                        e
+                    );
                 }
             });
 
@@ -1167,23 +1244,36 @@ fn save_daemon_state(work_dir: &Path, workers: &HashMap<String, ManagedWorker>) 
     }
 }
 
-/// Poll PRs for all active workers in a workspace.
-fn poll_prs(
-    workers: &mut HashMap<String, ManagedWorker>,
-    work_dir: &Path,
-    state_dirty: &mut bool,
-) {
-    for worker in workers.values_mut() {
-        if !worker.phase.is_active() {
-            continue;
-        }
+// ── Background PR polling ────────────────────────────────
 
+/// Input for a single PR poll job (sent to the background thread).
+struct PrPollJob {
+    worker_id: String,
+    branch: String,
+    repo_path: PathBuf,
+    /// Whether this worker already had a PR before this poll.
+    had_pr: bool,
+    workspace_path: PathBuf,
+}
+
+/// Result of a single PR poll (returned from the background thread).
+struct PrPollResult {
+    worker_id: String,
+    workspace_path: PathBuf,
+    pr: PrInfo,
+    is_new: bool,
+}
+
+/// Run PR polling on a blocking thread. Each worker gets one `gh pr list` call.
+fn poll_prs_background(jobs: Vec<PrPollJob>) -> Vec<PrPollResult> {
+    let mut results = Vec::new();
+    for job in &jobs {
         let output = std::process::Command::new("gh")
             .args([
                 "pr",
                 "list",
                 "--head",
-                &worker.branch,
+                &job.branch,
                 "--state",
                 "all",
                 "--json",
@@ -1191,7 +1281,7 @@ fn poll_prs(
                 "--limit",
                 "1",
             ])
-            .current_dir(&worker.repo_path)
+            .current_dir(&job.repo_path)
             .output();
 
         if let Ok(output) = output
@@ -1207,30 +1297,48 @@ fn poll_prs(
                     state: pr["state"].as_str().unwrap_or("").to_string(),
                     url: pr["url"].as_str().unwrap_or("").to_string(),
                 };
-
-                let is_new = worker.pr.is_none();
-                if is_new {
-                    swarm_log!(
-                        "[daemon] PR detected for {}: #{} \"{}\"",
-                        worker.id,
-                        new_pr.number,
-                        new_pr.title
-                    );
-                    let _ = ipc::emit_event(
-                        work_dir,
-                        &ipc::SwarmEvent::PrDetected {
-                            worktree: worker.id.clone(),
-                            pr_url: new_pr.url.clone(),
-                            pr_title: new_pr.title.clone(),
-                            pr_number: new_pr.number,
-                            timestamp: Local::now(),
-                        },
-                    );
-                }
-
-                worker.pr = Some(new_pr);
-                *state_dirty = true;
+                results.push(PrPollResult {
+                    worker_id: job.worker_id.clone(),
+                    workspace_path: job.workspace_path.clone(),
+                    pr: new_pr,
+                    is_new: !job.had_pr,
+                });
             }
+        }
+    }
+    results
+}
+
+/// Apply PR poll results back to workspace state (runs on the main event loop).
+fn apply_pr_poll_results(
+    results: Vec<PrPollResult>,
+    workspaces: &mut HashMap<PathBuf, WorkspaceState>,
+    state_dirty: &mut bool,
+) {
+    for result in results {
+        if let Some(ws) = workspaces.get_mut(&result.workspace_path)
+            && let Some(worker) = ws.workers.get_mut(&result.worker_id)
+        {
+            if result.is_new {
+                swarm_log!(
+                    "[daemon] PR detected for {}: #{} \"{}\"",
+                    worker.id,
+                    result.pr.number,
+                    result.pr.title
+                );
+                let _ = ipc::emit_event(
+                    &result.workspace_path,
+                    &ipc::SwarmEvent::PrDetected {
+                        worktree: worker.id.clone(),
+                        pr_url: result.pr.url.clone(),
+                        pr_title: result.pr.title.clone(),
+                        pr_number: result.pr.number,
+                        timestamp: Local::now(),
+                    },
+                );
+            }
+            worker.pr = Some(result.pr);
+            *state_dirty = true;
         }
     }
 }
@@ -1599,5 +1707,94 @@ mod tests {
             }
             other => panic!("expected Error about agent, got {:?}", other),
         }
+    }
+
+    // ── Background PR poll tests ─────────────────────────
+
+    #[test]
+    fn apply_pr_poll_results_updates_worker() {
+        let mut workspaces = HashMap::new();
+        let ws_path = PathBuf::from("/tmp/ws");
+        let ws = test_workspace("/tmp/ws", vec![("w-1", None)]);
+        assert!(ws.workers.get("w-1").unwrap().pr.is_none());
+        workspaces.insert(ws_path.clone(), ws);
+
+        let results = vec![PrPollResult {
+            worker_id: "w-1".to_string(),
+            workspace_path: ws_path.clone(),
+            pr: PrInfo {
+                number: 42,
+                title: "test pr".to_string(),
+                state: "OPEN".to_string(),
+                url: "https://github.com/test/repo/pull/42".to_string(),
+            },
+            is_new: true,
+        }];
+
+        let mut state_dirty = false;
+        apply_pr_poll_results(results, &mut workspaces, &mut state_dirty);
+
+        let worker = workspaces.get(&ws_path).unwrap().workers.get("w-1").unwrap();
+        assert!(worker.pr.is_some());
+        assert_eq!(worker.pr.as_ref().unwrap().number, 42);
+        assert!(state_dirty);
+    }
+
+    #[test]
+    fn apply_pr_poll_results_ignores_missing_worker() {
+        let mut workspaces = HashMap::new();
+        let ws_path = PathBuf::from("/tmp/ws");
+        workspaces.insert(ws_path.clone(), test_workspace("/tmp/ws", vec![("w-1", None)]));
+
+        let results = vec![PrPollResult {
+            worker_id: "nonexistent".to_string(),
+            workspace_path: ws_path,
+            pr: PrInfo {
+                number: 1,
+                title: "x".to_string(),
+                state: "OPEN".to_string(),
+                url: "https://example.com".to_string(),
+            },
+            is_new: true,
+        }];
+
+        let mut state_dirty = false;
+        apply_pr_poll_results(results, &mut workspaces, &mut state_dirty);
+        assert!(!state_dirty);
+    }
+
+    #[test]
+    fn apply_pr_poll_results_ignores_missing_workspace() {
+        let mut workspaces = HashMap::new();
+
+        let results = vec![PrPollResult {
+            worker_id: "w-1".to_string(),
+            workspace_path: PathBuf::from("/tmp/nonexistent"),
+            pr: PrInfo {
+                number: 1,
+                title: "x".to_string(),
+                state: "OPEN".to_string(),
+                url: "https://example.com".to_string(),
+            },
+            is_new: true,
+        }];
+
+        let mut state_dirty = false;
+        apply_pr_poll_results(results, &mut workspaces, &mut state_dirty);
+        assert!(!state_dirty);
+    }
+
+    #[test]
+    fn poll_prs_background_returns_empty_for_no_repo() {
+        // PrPollJob with nonexistent repo_path — gh will fail, should return empty
+        let jobs = vec![PrPollJob {
+            worker_id: "test".to_string(),
+            branch: "swarm/test".to_string(),
+            repo_path: PathBuf::from("/tmp/nonexistent-repo-12345"),
+            had_pr: false,
+            workspace_path: PathBuf::from("/tmp/ws"),
+        }];
+        let results = poll_prs_background(jobs);
+        assert!(results.is_empty());
     }
 }
