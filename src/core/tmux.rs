@@ -267,6 +267,39 @@ pub fn split_pane_horizontal(target: &str, dir: &str, percent: u32) -> Result<St
     Ok(String::from_utf8(output.stdout)?.trim().to_string())
 }
 
+/// Split a pane horizontally, running a command directly instead of a shell.
+/// The pane runs `cmd` and closes when the command exits.
+pub fn split_pane_horizontal_with_cmd(
+    target: &str,
+    dir: &str,
+    percent: u32,
+    cmd: &str,
+) -> Result<String> {
+    let pct_str = percent.to_string();
+    let mut args = vec![
+        "split-window",
+        "-h",
+        "-t",
+        target,
+        "-c",
+        dir,
+        "-P",
+        "-F",
+        "#{pane_id}",
+    ];
+    if percent > 0 && percent < 100 {
+        args.push("-p");
+        args.push(&pct_str);
+    }
+    args.push(cmd);
+    let output = Command::new("tmux").args(&args).output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(eyre!("failed to split pane horizontal: {}", stderr));
+    }
+    Ok(String::from_utf8(output.stdout)?.trim().to_string())
+}
+
 /// Split a pane vertically (new pane below). Returns `%pane_id`.
 pub fn split_pane_vertical(target: &str, dir: &str) -> Result<String> {
     let output = Command::new("tmux")
@@ -280,6 +313,30 @@ pub fn split_pane_vertical(target: &str, dir: &str) -> Result<String> {
             "-P",
             "-F",
             "#{pane_id}",
+        ])
+        .output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(eyre!("failed to split pane vertical: {}", stderr));
+    }
+    Ok(String::from_utf8(output.stdout)?.trim().to_string())
+}
+
+/// Split a pane vertically, running a command directly instead of a shell.
+/// The pane runs `cmd` and closes when the command exits.
+pub fn split_pane_vertical_with_cmd(target: &str, dir: &str, cmd: &str) -> Result<String> {
+    let output = Command::new("tmux")
+        .args([
+            "split-window",
+            "-v",
+            "-t",
+            target,
+            "-c",
+            dir,
+            "-P",
+            "-F",
+            "#{pane_id}",
+            cmd,
         ])
         .output()?;
     if !output.status.success() {
@@ -364,97 +421,24 @@ pub fn pane_exists(pane_id: &str) -> bool {
 }
 
 /// Apply session styling: pane borders, colors, background, disable status bar.
+/// Batches all options into a single `tmux source-file` call (1 subprocess instead of 8).
 pub fn apply_session_style(session: &str) -> Result<()> {
-    // Default pane style: dimmed (non-selected panes recede visually).
-    // Per-pane overrides brighten the selected worktree's panes.
-    let _ = Command::new("tmux")
-        .args([
-            "set-option",
-            "-t",
-            session,
-            "window-style",
-            "bg=#141210,fg=#3a3835,dim",
-        ])
-        .output();
-    // Active pane (sidebar, or whichever has tmux focus) stays bright
-    let _ = Command::new("tmux")
-        .args([
-            "set-option",
-            "-t",
-            session,
-            "window-active-style",
-            "bg=#302c26,fg=#dcdce1,nodim",
-        ])
-        .output();
-    // Padded borders for visible gaps between panes
-    let _ = Command::new("tmux")
-        .args(["set-option", "-t", session, "pane-border-lines", "padded"])
-        .output();
-    // Enable pane border status (shows titles)
-    let _ = Command::new("tmux")
-        .args(["set-option", "-t", session, "pane-border-status", "top"])
-        .output();
-    // Set pane border format: selection-aware conditional
-    // Sidebar panes (@sidebar=1) get no border title at all.
-    // Selected panes get a full-width colored line; non-selected get a dimmed small swatch.
-    let border_fmt = concat!(
-        "#{?#{@sidebar},,",
-        "#{?#{@selected},",
-        "#[fg=#{@color}]\u{2501}\u{2501} #{pane_title} ",
-        "\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}",
-        "\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}",
-        "\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}",
-        "\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}",
-        "\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}",
-        "\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}",
-        "\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}",
-        "\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}",
-        "\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}",
-        "\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}",
-        "\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}",
-        "\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}",
-        "\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}",
-        "\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}",
-        "\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}",
-        "\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}",
-        "#[default]",
-        ",",
-        " #[fg=#{@color}]\u{2588}\u{2588}#[default]#[fg=#5a5550] #{pane_title} #[default]}",
-        "}",
+    let commands = format!(
+        "\
+set-option -q -t {s} window-style 'bg=#302c26,fg=#5a5550'
+set-option -q -t {s} window-active-style 'bg=#1e1b18,fg=#dcdce1'
+set-option -q -t {s} pane-border-lines padded
+set-option -q -t {s} pane-border-status top
+set-option -q -t {s} pane-border-format '#[fg=#5a5550]\u{2501}\u{2501} #{{pane_title}} #[default]'
+set-option -q -t {s} pane-border-style 'fg=#4a4540,bg=#302c26'
+set-option -q -t {s} pane-active-border-style 'fg=#ffb74d,bg=#282520'
+set-option -q -t {s} status off",
+        s = session
     );
-    let _ = Command::new("tmux")
-        .args([
-            "set-option",
-            "-t",
-            session,
-            "pane-border-format",
-            border_fmt,
-        ])
-        .output();
-    // Inactive pane border color (WAX gray)
-    let _ = Command::new("tmux")
-        .args([
-            "set-option",
-            "-t",
-            session,
-            "pane-border-style",
-            "fg=#3c3830,bg=#282520",
-        ])
-        .output();
-    // Active pane border color (HONEY amber)
-    let _ = Command::new("tmux")
-        .args([
-            "set-option",
-            "-t",
-            session,
-            "pane-active-border-style",
-            "fg=#ffb74d,bg=#282520",
-        ])
-        .output();
-    // Disable the tmux status bar
-    let _ = Command::new("tmux")
-        .args(["set-option", "-t", session, "status", "off"])
-        .output();
+    // Ignore errors: some options (like pane-border-lines padded) may not be
+    // supported on all tmux versions. source-file runs all commands even if
+    // one fails, but returns non-zero — which is fine here.
+    let _ = source_commands(&commands);
     Ok(())
 }
 
@@ -467,26 +451,51 @@ pub fn set_pane_style(pane_id: &str, style: &str) -> Result<()> {
     Ok(())
 }
 
-/// Set a pane's @color option (used by pane-border-format for colored titles).
-pub fn set_pane_color(pane_id: &str, hex_color: &str) -> Result<()> {
-    Command::new("tmux")
-        .args(["set-option", "-p", "-t", pane_id, "@color", hex_color])
-        .output()?;
-    Ok(())
-}
-
-/// Set a pane's @selected user option (used by border format conditional).
-pub fn set_pane_selected(pane_id: &str, selected: bool) -> Result<()> {
+/// Set a pane's border style (per-pane override for pane-border-style).
+/// Ensures the border color is correct even when the pane is not tmux-focused.
+pub fn set_pane_border_style(pane_id: &str, style: &str) -> Result<()> {
     Command::new("tmux")
         .args([
             "set-option",
             "-p",
             "-t",
             pane_id,
-            "@selected",
-            if selected { "1" } else { "0" },
+            "pane-border-style",
+            style,
         ])
         .output()?;
+    Ok(())
+}
+
+/// Set a pane's border format directly (per-pane override).
+/// This avoids fragile tmux conditionals by hardcoding the color in the format string.
+pub fn set_pane_border_format(pane_id: &str, format: &str) -> Result<()> {
+    Command::new("tmux")
+        .args([
+            "set-option",
+            "-p",
+            "-t",
+            pane_id,
+            "pane-border-format",
+            format,
+        ])
+        .output()?;
+    Ok(())
+}
+
+/// Execute multiple tmux commands in a single subprocess by writing them to a temp file
+/// and sourcing it. Much more efficient than spawning one process per command.
+pub fn source_commands(commands: &str) -> Result<()> {
+    let tmp_path = format!("/tmp/swarm-tmux-{}.conf", std::process::id());
+    std::fs::write(&tmp_path, commands)?;
+    let output = Command::new("tmux")
+        .args(["source-file", &tmp_path])
+        .output()?;
+    let _ = std::fs::remove_file(&tmp_path);
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(eyre!("tmux source-file failed: {}", stderr));
+    }
     Ok(())
 }
 
@@ -754,31 +763,3 @@ pub fn send_keys_to_pane(pane_id: &str, text: &str) -> Result<()> {
     Ok(())
 }
 
-/// Capture the visible content of a tmux pane.
-pub fn capture_pane_content(pane_id: &str) -> Result<String> {
-    let output = Command::new("tmux")
-        .args(["capture-pane", "-p", "-t", pane_id])
-        .output()?;
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
-}
-
-/// Check if a pane appears to have a ready shell prompt on its last non-empty line.
-pub fn pane_has_shell_prompt(pane_id: &str) -> bool {
-    let content = match capture_pane_content(pane_id) {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
-    let last_line = content
-        .lines()
-        .rev()
-        .find(|l| !l.trim().is_empty())
-        .unwrap_or("");
-    last_line.contains("$ ")
-        || last_line.contains("% ")
-        || last_line.contains("➜")
-        || last_line.contains("❯")
-        || last_line.contains("❮")
-        || last_line.ends_with('$')
-        || last_line.ends_with('%')
-        || last_line.ends_with('>')
-}
