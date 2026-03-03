@@ -237,19 +237,28 @@ pub fn detect_repos(dir: &Path) -> Result<Vec<PathBuf>> {
     }
 
     if !child_repos.is_empty() {
-        // Sort by recent commit count (most active first)
-        child_repos.sort_by(|a, b| {
-            let count = |repo: &Path| -> usize {
-                std::process::Command::new("git")
+        // Sort by recent commit count (most active first).
+        // Compute counts once upfront instead of spawning git per comparison.
+        let mut counted: Vec<(PathBuf, usize)> = child_repos
+            .into_iter()
+            .map(|repo| {
+                let c = std::process::Command::new("git")
                     .args(["rev-list", "--count", "--since=3 months ago", "HEAD"])
-                    .current_dir(repo)
+                    .current_dir(&repo)
                     .output()
                     .ok()
-                    .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse().ok())
-                    .unwrap_or(0)
-            };
-            count(b).cmp(&count(a))
-        });
+                    .and_then(|o| {
+                        String::from_utf8_lossy(&o.stdout)
+                            .trim()
+                            .parse()
+                            .ok()
+                    })
+                    .unwrap_or(0);
+                (repo, c)
+            })
+            .collect();
+        counted.sort_by(|a, b| b.1.cmp(&a.1));
+        child_repos = counted.into_iter().map(|(p, _)| p).collect();
         return Ok(child_repos);
     }
 
@@ -259,4 +268,155 @@ pub fn detect_repos(dir: &Path) -> Result<Vec<PathBuf>> {
         repos.push(dir.to_path_buf());
     }
     Ok(repos)
+}
+
+/// Generate a `swarm/<sanitized-prompt>-<suffix>` branch name.
+pub fn generate_branch_name(prompt: &str, suffix: &str) -> String {
+    format!("swarm/{}-{}", super::shell::sanitize(prompt), suffix)
+}
+
+/// Read the agent status file for a given worktree.
+///
+/// Returns `None` if the file does not exist or cannot be read.
+pub fn read_agent_status(work_dir: &std::path::Path, worktree_id: &str) -> Option<String> {
+    let status_path = work_dir
+        .join(".swarm")
+        .join("agent-status")
+        .join(worktree_id);
+    std::fs::read_to_string(status_path)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Write the agent status file for a given worktree.
+pub fn write_agent_status(work_dir: &std::path::Path, worktree_id: &str, status: &str) {
+    let status_dir = work_dir.join(".swarm").join("agent-status");
+    let _ = std::fs::create_dir_all(&status_dir);
+    let _ = std::fs::write(status_dir.join(worktree_id), status);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── generate_branch_name tests ──
+
+    #[test]
+    fn test_branch_name_sanitizes_spaces() {
+        let name = generate_branch_name("fix the login bug", "a1b2");
+        assert_eq!(name, "swarm/fix-the-login-bug-a1b2");
+    }
+
+    #[test]
+    fn test_branch_name_truncates_long_prompts() {
+        let long_prompt = "a".repeat(60);
+        let name = generate_branch_name(&long_prompt, "x1y2");
+        // sanitize truncates to 40 chars, then we add "swarm/" prefix and "-x1y2" suffix
+        assert!(name.starts_with("swarm/"));
+        assert!(name.ends_with("-x1y2"));
+        // The sanitized portion should be at most 40 chars
+        let middle = name.strip_prefix("swarm/").unwrap().strip_suffix("-x1y2").unwrap();
+        assert!(middle.len() <= 40);
+    }
+
+    #[test]
+    fn test_branch_name_removes_special_chars() {
+        let name = generate_branch_name("add user auth (v2)!", "c3d4");
+        // sanitize("add user auth (v2)!") -> "add-user-auth--v2" (trailing hyphens stripped)
+        assert_eq!(name, "swarm/add-user-auth--v2-c3d4");
+        // Should not contain parens, exclamation, etc.
+        assert!(!name.contains('('));
+        assert!(!name.contains(')'));
+        assert!(!name.contains('!'));
+    }
+
+    #[test]
+    fn test_branch_name_appends_unique_suffix() {
+        let name1 = generate_branch_name("fix bug", "aaaa");
+        let name2 = generate_branch_name("fix bug", "bbbb");
+        assert_ne!(name1, name2);
+        assert!(name1.ends_with("-aaaa"));
+        assert!(name2.ends_with("-bbbb"));
+    }
+
+    #[test]
+    fn test_branch_name_empty_prompt() {
+        let name = generate_branch_name("", "1234");
+        // sanitize("") returns "", so we get "swarm/-1234"
+        assert_eq!(name, "swarm/-1234");
+    }
+
+    #[test]
+    fn test_branch_name_unicode_prompt() {
+        // Non-ASCII chars are not alphanumeric in Rust's char::is_alphanumeric
+        // for ASCII-range, but Unicode letters are alphanumeric
+        let name = generate_branch_name("café résumé", "abcd");
+        assert!(name.starts_with("swarm/"));
+        assert!(name.ends_with("-abcd"));
+        // Should not contain spaces
+        assert!(!name.contains(' '));
+    }
+
+    // ── agent status file tests ──
+
+    #[test]
+    fn test_agent_status_none_when_file_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let status = read_agent_status(dir.path(), "nonexistent-worker");
+        assert!(status.is_none());
+    }
+
+    #[test]
+    fn test_agent_status_waiting_parsed() {
+        let dir = tempfile::tempdir().unwrap();
+        write_agent_status(dir.path(), "worker-1", "waiting");
+        let status = read_agent_status(dir.path(), "worker-1");
+        assert_eq!(status.as_deref(), Some("waiting"));
+    }
+
+    #[test]
+    fn test_agent_status_running_parsed() {
+        let dir = tempfile::tempdir().unwrap();
+        write_agent_status(dir.path(), "worker-2", "running");
+        let status = read_agent_status(dir.path(), "worker-2");
+        assert_eq!(status.as_deref(), Some("running"));
+    }
+
+    #[test]
+    fn test_agent_status_unknown_value_handled() {
+        let dir = tempfile::tempdir().unwrap();
+        write_agent_status(dir.path(), "worker-3", "some-unexpected-value");
+        // Should still return the value — it's the caller's job to interpret
+        let status = read_agent_status(dir.path(), "worker-3");
+        assert_eq!(status.as_deref(), Some("some-unexpected-value"));
+    }
+
+    #[test]
+    fn test_agent_status_empty_file_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        write_agent_status(dir.path(), "worker-4", "");
+        let status = read_agent_status(dir.path(), "worker-4");
+        assert!(status.is_none());
+    }
+
+    #[test]
+    fn test_agent_status_overwrites_previous() {
+        let dir = tempfile::tempdir().unwrap();
+        write_agent_status(dir.path(), "worker-5", "running");
+        assert_eq!(read_agent_status(dir.path(), "worker-5").as_deref(), Some("running"));
+
+        write_agent_status(dir.path(), "worker-5", "waiting");
+        assert_eq!(read_agent_status(dir.path(), "worker-5").as_deref(), Some("waiting"));
+    }
+
+    #[test]
+    fn test_agent_status_separate_workers() {
+        let dir = tempfile::tempdir().unwrap();
+        write_agent_status(dir.path(), "worker-a", "running");
+        write_agent_status(dir.path(), "worker-b", "waiting");
+
+        assert_eq!(read_agent_status(dir.path(), "worker-a").as_deref(), Some("running"));
+        assert_eq!(read_agent_status(dir.path(), "worker-b").as_deref(), Some("waiting"));
+    }
 }
