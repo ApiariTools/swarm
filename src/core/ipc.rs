@@ -562,4 +562,121 @@ mod tests {
             _ => panic!("expected ReviewStarted"),
         }
     }
+
+    // ── Inbox file read/write tests ──────────────────────────
+
+    #[test]
+    fn test_read_inbox_returns_empty_when_no_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let (messages, offset) = read_inbox(dir.path(), 0).unwrap();
+        assert!(messages.is_empty());
+        assert_eq!(offset, 0);
+    }
+
+    #[test]
+    fn test_read_inbox_round_trips_through_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let work_dir = dir.path();
+
+        // Write messages to inbox using the JsonlWriter
+        let inbox = inbox_path(work_dir);
+        let writer = apiari_common::ipc::JsonlWriter::<InboxMessage>::new(inbox);
+        let msg1 = InboxMessage::Create {
+            id: "msg-1".to_string(),
+            prompt: "fix the bug".to_string(),
+            agent: "claude-tui".to_string(),
+            repo: None,
+            start_point: None,
+            review_configs: None,
+            timestamp: Local::now(),
+        };
+        let msg2 = InboxMessage::Send {
+            id: "msg-2".to_string(),
+            worktree: "hive-1".to_string(),
+            message: "check the PR".to_string(),
+            timestamp: Local::now(),
+        };
+        writer.append(&msg1).unwrap();
+        writer.append(&msg2).unwrap();
+
+        // Read them back
+        let (messages, new_offset) = read_inbox(work_dir, 0).unwrap();
+        assert_eq!(messages.len(), 2);
+
+        match &messages[0] {
+            InboxMessage::Create { prompt, .. } => assert_eq!(prompt, "fix the bug"),
+            other => panic!("expected Create, got {:?}", other),
+        }
+        match &messages[1] {
+            InboxMessage::Send { worktree, message, .. } => {
+                assert_eq!(worktree, "hive-1");
+                assert_eq!(message, "check the PR");
+            }
+            other => panic!("expected Send, got {:?}", other),
+        }
+
+        // Reading again from the new offset returns nothing
+        let (messages2, _) = read_inbox(work_dir, new_offset).unwrap();
+        assert!(messages2.is_empty());
+    }
+
+    #[test]
+    fn test_read_inbox_incremental_offset() {
+        let dir = tempfile::tempdir().unwrap();
+        let work_dir = dir.path();
+
+        let inbox = inbox_path(work_dir);
+        let writer = apiari_common::ipc::JsonlWriter::<InboxMessage>::new(inbox);
+
+        // Write first message
+        writer.append(&InboxMessage::Close {
+            id: "msg-1".to_string(),
+            worktree: "hive-1".to_string(),
+            timestamp: Local::now(),
+        }).unwrap();
+
+        let (messages, offset1) = read_inbox(work_dir, 0).unwrap();
+        assert_eq!(messages.len(), 1);
+
+        // Write second message
+        writer.append(&InboxMessage::Merge {
+            id: "msg-2".to_string(),
+            worktree: "hive-2".to_string(),
+            timestamp: Local::now(),
+        }).unwrap();
+
+        // Read from previous offset — should only get the new message
+        let (messages2, _offset2) = read_inbox(work_dir, offset1).unwrap();
+        assert_eq!(messages2.len(), 1);
+        match &messages2[0] {
+            InboxMessage::Merge { worktree, .. } => assert_eq!(worktree, "hive-2"),
+            other => panic!("expected Merge, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_emit_and_read_multiple_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let work_dir = dir.path();
+
+        emit_event(work_dir, &SwarmEvent::WorktreeCreated {
+            worktree: "hive-1".to_string(),
+            branch: "swarm/fix-bug-a1b2".to_string(),
+            agent: "claude-tui".to_string(),
+            pane_id: "daemon".to_string(),
+            timestamp: Local::now(),
+        }).unwrap();
+
+        emit_event(work_dir, &SwarmEvent::WorktreeClosed {
+            worktree: "hive-1".to_string(),
+            timestamp: Local::now(),
+        }).unwrap();
+
+        let events_file = work_dir.join(".swarm").join("events.jsonl");
+        let content = std::fs::read_to_string(&events_file).unwrap();
+        let lines: Vec<&str> = content.trim().lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("worktree_created"));
+        assert!(lines[1].contains("worktree_closed"));
+    }
 }

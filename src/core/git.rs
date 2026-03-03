@@ -274,3 +274,62 @@ pub fn detect_repos(dir: &Path) -> Result<Vec<PathBuf>> {
 pub fn generate_branch_name(prompt: &str, suffix: &str) -> String {
     format!("swarm/{}-{}", super::shell::sanitize(prompt), suffix)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── generate_branch_name tests ───────────────────────────
+
+    #[test]
+    fn test_branch_name_sanitizes_spaces() {
+        let name = generate_branch_name("Fix the login bug", "a1b2");
+        assert_eq!(name, "swarm/fix-the-login-bug-a1b2");
+    }
+
+    #[test]
+    fn test_branch_name_truncates_long_prompts() {
+        let long_prompt = "a".repeat(60);
+        let name = generate_branch_name(&long_prompt, "x1y2");
+        // sanitize truncates to 40, plus "swarm/" prefix and "-x1y2" suffix
+        assert!(name.starts_with("swarm/"));
+        assert!(name.ends_with("-x1y2"));
+        // The sanitized portion should be at most 40 chars
+        let middle = name.strip_prefix("swarm/").unwrap().strip_suffix("-x1y2").unwrap();
+        assert!(middle.len() <= 40);
+    }
+
+    #[test]
+    fn test_branch_name_removes_special_chars() {
+        let name = generate_branch_name("add user auth (v2)!", "c3d4");
+        assert_eq!(name, "swarm/add-user-auth--v2-c3d4");
+        // No parens, no exclamation marks
+        assert!(!name.contains('('));
+        assert!(!name.contains(')'));
+        assert!(!name.contains('!'));
+    }
+
+    #[test]
+    fn test_branch_name_appends_unique_suffix() {
+        let name1 = generate_branch_name("fix bug", "aaaa");
+        let name2 = generate_branch_name("fix bug", "bbbb");
+        assert!(name1.ends_with("-aaaa"));
+        assert!(name2.ends_with("-bbbb"));
+        assert_ne!(name1, name2);
+    }
+
+    #[test]
+    fn test_branch_name_empty_prompt() {
+        let name = generate_branch_name("", "e5f6");
+        // sanitize("") returns "", so we get "swarm/-e5f6"
+        assert_eq!(name, "swarm/-e5f6");
+    }
+
+    #[test]
+    fn test_branch_name_unicode_prompt() {
+        let name = generate_branch_name("修复登录错误", "u1v2");
+        assert!(name.starts_with("swarm/"));
+        assert!(name.ends_with("-u1v2"));
+        // Unicode chars are not alphanumeric in ASCII, so they become hyphens then get trimmed
+    }
+}
