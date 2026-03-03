@@ -1600,4 +1600,636 @@ mod tests {
             other => panic!("expected Error about agent, got {:?}", other),
         }
     }
+
+    // ── IPC dispatch tests ───────────────────────────────────
+
+    #[tokio::test]
+    async fn test_ipc_create_unknown_agent_returns_error() {
+        let (mut resp_rx, resp_tx, mut workspaces, event_tx, supervisor_tx) = test_harness();
+        let mut state_dirty = false;
+
+        let dir = tempfile::tempdir().unwrap();
+        workspaces.insert(
+            dir.path().to_path_buf(),
+            test_workspace(dir.path().to_str().unwrap(), vec![]),
+        );
+
+        handle_request(
+            DaemonRequest::CreateWorker {
+                prompt: "fix something".into(),
+                agent: "nonexistent-agent".into(),
+                repo: None,
+                start_point: None,
+                review_configs: None,
+                workspace: Some(dir.path().to_path_buf()),
+            },
+            &resp_tx,
+            &mut workspaces,
+            &event_tx,
+            &supervisor_tx,
+            &mut state_dirty,
+        )
+        .await;
+
+        let resp = resp_rx.try_recv().unwrap();
+        match resp {
+            DaemonResponse::Error { message } => {
+                assert!(
+                    message.contains("unknown agent"),
+                    "expected 'unknown agent' error, got: {}",
+                    message
+                );
+            }
+            other => panic!("expected Error, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_ipc_create_no_workspaces_returns_error() {
+        let (mut resp_rx, resp_tx, mut workspaces, event_tx, supervisor_tx) = test_harness();
+        let mut state_dirty = false;
+
+        // No workspaces registered, no workspace specified
+        handle_request(
+            DaemonRequest::CreateWorker {
+                prompt: "fix something".into(),
+                agent: "claude-tui".into(),
+                repo: None,
+                start_point: None,
+                review_configs: None,
+                workspace: None,
+            },
+            &resp_tx,
+            &mut workspaces,
+            &event_tx,
+            &supervisor_tx,
+            &mut state_dirty,
+        )
+        .await;
+
+        let resp = resp_rx.try_recv().unwrap();
+        match resp {
+            DaemonResponse::Error { message } => {
+                assert!(
+                    message.contains("no workspaces registered"),
+                    "expected 'no workspaces' error, got: {}",
+                    message
+                );
+            }
+            other => panic!("expected Error, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_ipc_create_unknown_repo_no_crash() {
+        let (mut resp_rx, resp_tx, mut workspaces, event_tx, supervisor_tx) = test_harness();
+        let mut state_dirty = false;
+
+        let dir = tempfile::tempdir().unwrap();
+        // Use canonical path so resolve_workspace can find it
+        let canonical = std::fs::canonicalize(dir.path()).unwrap();
+        let mut ws = test_workspace(canonical.to_str().unwrap(), vec![]);
+        ws.repos = vec![PathBuf::from("/tmp/known-repo")];
+        workspaces.insert(canonical.clone(), ws);
+
+        handle_request(
+            DaemonRequest::CreateWorker {
+                prompt: "fix something".into(),
+                agent: "claude-tui".into(),
+                repo: Some("bogus-repo".into()),
+                start_point: None,
+                review_configs: None,
+                workspace: Some(canonical),
+            },
+            &resp_tx,
+            &mut workspaces,
+            &event_tx,
+            &supervisor_tx,
+            &mut state_dirty,
+        )
+        .await;
+
+        let resp = resp_rx.try_recv().unwrap();
+        match resp {
+            DaemonResponse::Error { message } => {
+                assert!(
+                    message.contains("unknown repo"),
+                    "expected 'unknown repo' error, got: {}",
+                    message
+                );
+            }
+            other => panic!("expected Error, got {:?}", other),
+        }
+        // No panic — test passes if we get here
+    }
+
+    #[tokio::test]
+    async fn test_ipc_send_delivers_to_worktree() {
+        let (mut resp_rx, resp_tx, mut workspaces, event_tx, supervisor_tx) = test_harness();
+        let mut state_dirty = false;
+
+        let dir = tempfile::tempdir().unwrap();
+
+        // Create a worker with a message channel
+        let (msg_tx, mut msg_rx) = mpsc::unbounded_channel::<String>();
+        let mut worker = test_worker("hive-send-1", None);
+        worker.message_tx = Some(msg_tx);
+
+        let mut ws = test_workspace(dir.path().to_str().unwrap(), vec![]);
+        ws.workers.insert("hive-send-1".into(), worker);
+        workspaces.insert(dir.path().to_path_buf(), ws);
+
+        handle_request(
+            DaemonRequest::SendMessage {
+                worktree_id: "hive-send-1".into(),
+                message: "please review the PR".into(),
+            },
+            &resp_tx,
+            &mut workspaces,
+            &event_tx,
+            &supervisor_tx,
+            &mut state_dirty,
+        )
+        .await;
+
+        let resp = resp_rx.try_recv().unwrap();
+        assert!(
+            matches!(resp, DaemonResponse::Ok { .. }),
+            "expected Ok, got {:?}",
+            resp
+        );
+
+        // Verify the message was delivered via the channel
+        let received = msg_rx.try_recv().unwrap();
+        assert_eq!(received, "please review the PR");
+    }
+
+    #[tokio::test]
+    async fn test_ipc_send_unknown_worktree_handled() {
+        let (mut resp_rx, resp_tx, mut workspaces, event_tx, supervisor_tx) = test_harness();
+        let mut state_dirty = false;
+
+        let dir = tempfile::tempdir().unwrap();
+        workspaces.insert(
+            dir.path().to_path_buf(),
+            test_workspace(dir.path().to_str().unwrap(), vec![("hive-1", None)]),
+        );
+
+        handle_request(
+            DaemonRequest::SendMessage {
+                worktree_id: "does-not-exist".into(),
+                message: "hello".into(),
+            },
+            &resp_tx,
+            &mut workspaces,
+            &event_tx,
+            &supervisor_tx,
+            &mut state_dirty,
+        )
+        .await;
+
+        let resp = resp_rx.try_recv().unwrap();
+        match resp {
+            DaemonResponse::Error { message } => {
+                assert!(message.contains("unknown worker"));
+            }
+            other => panic!("expected Error, got {:?}", other),
+        }
+        // No panic — gracefully handled
+    }
+
+    #[tokio::test]
+    async fn test_ipc_close_removes_worktree() {
+        let (mut resp_rx, resp_tx, mut workspaces, event_tx, supervisor_tx) = test_harness();
+        let mut state_dirty = false;
+
+        let dir = tempfile::tempdir().unwrap();
+        workspaces.insert(
+            dir.path().to_path_buf(),
+            test_workspace(
+                dir.path().to_str().unwrap(),
+                vec![("hive-close-1", None), ("hive-close-2", None)],
+            ),
+        );
+
+        // Verify worker exists
+        assert!(workspaces[dir.path()]
+            .workers
+            .contains_key("hive-close-1"));
+        assert_eq!(workspaces[dir.path()].workers.len(), 2);
+
+        handle_request(
+            DaemonRequest::CloseWorker {
+                worktree_id: "hive-close-1".into(),
+            },
+            &resp_tx,
+            &mut workspaces,
+            &event_tx,
+            &supervisor_tx,
+            &mut state_dirty,
+        )
+        .await;
+
+        let resp = resp_rx.try_recv().unwrap();
+        assert!(
+            matches!(resp, DaemonResponse::Ok { .. }),
+            "expected Ok, got {:?}",
+            resp
+        );
+
+        // Worker should be removed
+        assert!(
+            !workspaces[dir.path()]
+                .workers
+                .contains_key("hive-close-1"),
+            "worker should have been removed after close"
+        );
+        // Other worker should remain
+        assert!(workspaces[dir.path()]
+            .workers
+            .contains_key("hive-close-2"));
+        assert!(state_dirty, "state_dirty should be set after close");
+    }
+
+    #[tokio::test]
+    async fn test_ipc_merge_unknown_worker_returns_error() {
+        let (mut resp_rx, resp_tx, mut workspaces, event_tx, supervisor_tx) = test_harness();
+        let mut state_dirty = false;
+
+        handle_request(
+            DaemonRequest::MergeWorker {
+                worktree_id: "nonexistent".into(),
+            },
+            &resp_tx,
+            &mut workspaces,
+            &event_tx,
+            &supervisor_tx,
+            &mut state_dirty,
+        )
+        .await;
+
+        let resp = resp_rx.try_recv().unwrap();
+        match resp {
+            DaemonResponse::Error { message } => {
+                assert!(message.contains("unknown worker"));
+            }
+            other => panic!("expected Error, got {:?}", other),
+        }
+    }
+
+    // ── resolve_repo unit tests ─────────────────────────────
+
+    #[test]
+    fn test_resolve_repo_single_repo_no_name() {
+        let repos = vec![PathBuf::from("/tmp/my-project")];
+        let result = resolve_repo(&repos, None);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), PathBuf::from("/tmp/my-project"));
+    }
+
+    #[test]
+    fn test_resolve_repo_no_repos() {
+        let repos: Vec<PathBuf> = vec![];
+        let result = resolve_repo(&repos, None);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("no git repos"),
+            "expected 'no git repos' error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_resolve_repo_multiple_repos_no_name() {
+        let repos = vec![
+            PathBuf::from("/tmp/repo-a"),
+            PathBuf::from("/tmp/repo-b"),
+        ];
+        let result = resolve_repo(&repos, None);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("multiple repos"),
+            "expected 'multiple repos' error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_resolve_repo_unknown_name() {
+        // resolve_repo uses git::repo_name which calls `git rev-parse --show-toplevel`.
+        // For paths that aren't real repos, repo_name returns "unknown".
+        // We test the error path when the name doesn't match.
+        let repos = vec![PathBuf::from("/tmp/repo-a")];
+        let result = resolve_repo(&repos, Some("bogus"));
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("unknown repo 'bogus'"),
+            "expected unknown repo error, got: {}",
+            err
+        );
+    }
+
+    // ── resolve_workspace unit tests ─────────────────────────
+
+    #[test]
+    fn test_resolve_workspace_no_workspaces() {
+        let workspaces: HashMap<PathBuf, WorkspaceState> = HashMap::new();
+        let result = resolve_workspace(&workspaces, None);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("no workspaces registered"));
+    }
+
+    #[test]
+    fn test_resolve_workspace_single_auto() {
+        let mut workspaces: HashMap<PathBuf, WorkspaceState> = HashMap::new();
+        workspaces.insert(
+            PathBuf::from("/tmp/project"),
+            test_workspace("/tmp/project", vec![]),
+        );
+        let result = resolve_workspace(&workspaces, None);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), PathBuf::from("/tmp/project"));
+    }
+
+    #[test]
+    fn test_resolve_workspace_multiple_no_path() {
+        let mut workspaces: HashMap<PathBuf, WorkspaceState> = HashMap::new();
+        workspaces.insert(
+            PathBuf::from("/tmp/p1"),
+            test_workspace("/tmp/p1", vec![]),
+        );
+        workspaces.insert(
+            PathBuf::from("/tmp/p2"),
+            test_workspace("/tmp/p2", vec![]),
+        );
+        let result = resolve_workspace(&workspaces, None);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("multiple workspaces"));
+    }
+
+    // ── Inbox file integration tests ─────────────────────────
+
+    #[test]
+    fn test_inbox_write_and_read_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let work_dir = dir.path();
+
+        // Write messages to inbox using the JSONL writer
+        let inbox_path = work_dir.join(".swarm").join("inbox.jsonl");
+        std::fs::create_dir_all(inbox_path.parent().unwrap()).unwrap();
+
+        let msg1 = ipc::InboxMessage::Create {
+            id: "msg-1".into(),
+            prompt: "fix the login bug".into(),
+            agent: "claude-tui".into(),
+            repo: Some("swarm".into()),
+            start_point: None,
+            review_configs: None,
+            timestamp: Local::now(),
+        };
+        let msg2 = ipc::InboxMessage::Send {
+            id: "msg-2".into(),
+            worktree: "hive-1".into(),
+            message: "check the tests".into(),
+            timestamp: Local::now(),
+        };
+
+        let mut line1 = serde_json::to_string(&msg1).unwrap();
+        line1.push('\n');
+        let mut line2 = serde_json::to_string(&msg2).unwrap();
+        line2.push('\n');
+
+        std::fs::write(&inbox_path, format!("{}{}", line1, line2)).unwrap();
+
+        // Read them back
+        let (messages, offset) = ipc::read_inbox(work_dir, 0).unwrap();
+        assert_eq!(messages.len(), 2);
+
+        // Verify first message
+        match &messages[0] {
+            ipc::InboxMessage::Create { prompt, agent, .. } => {
+                assert_eq!(prompt, "fix the login bug");
+                assert_eq!(agent, "claude-tui");
+            }
+            _ => panic!("expected Create"),
+        }
+
+        // Verify second message
+        match &messages[1] {
+            ipc::InboxMessage::Send {
+                worktree, message, ..
+            } => {
+                assert_eq!(worktree, "hive-1");
+                assert_eq!(message, "check the tests");
+            }
+            _ => panic!("expected Send"),
+        }
+
+        // Reading again from the same offset returns nothing new
+        let (messages2, _) = ipc::read_inbox(work_dir, offset).unwrap();
+        assert!(messages2.is_empty());
+    }
+
+    #[test]
+    fn test_inbox_read_empty_returns_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        // No inbox file exists
+        let (messages, offset) = ipc::read_inbox(dir.path(), 0).unwrap();
+        assert!(messages.is_empty());
+        assert_eq!(offset, 0);
+    }
+
+    // ── translate_inbox_message coverage ─────────────────────
+
+    #[test]
+    fn test_translate_inbox_close() {
+        let msg = ipc::InboxMessage::Close {
+            id: "msg-3".into(),
+            worktree: "hive-close".into(),
+            timestamp: Local::now(),
+        };
+        let req = protocol::translate_inbox_message(&msg);
+        match req {
+            DaemonRequest::CloseWorker { worktree_id } => {
+                assert_eq!(worktree_id, "hive-close");
+            }
+            _ => panic!("expected CloseWorker"),
+        }
+    }
+
+    #[test]
+    fn test_translate_inbox_merge() {
+        let msg = ipc::InboxMessage::Merge {
+            id: "msg-4".into(),
+            worktree: "hive-merge".into(),
+            timestamp: Local::now(),
+        };
+        let req = protocol::translate_inbox_message(&msg);
+        match req {
+            DaemonRequest::MergeWorker { worktree_id } => {
+                assert_eq!(worktree_id, "hive-merge");
+            }
+            _ => panic!("expected MergeWorker"),
+        }
+    }
+
+    #[test]
+    fn test_translate_inbox_review() {
+        let msg = ipc::InboxMessage::Review {
+            id: "msg-5".into(),
+            worktree: "hive-review".into(),
+            slug: Some("security-audit".into()),
+            timestamp: Local::now(),
+        };
+        let req = protocol::translate_inbox_message(&msg);
+        match req {
+            DaemonRequest::Review { worktree_id, slug } => {
+                assert_eq!(worktree_id, "hive-review");
+                assert_eq!(slug.as_deref(), Some("security-audit"));
+            }
+            _ => panic!("expected Review"),
+        }
+    }
+
+    // ── State persistence tests ──────────────────────────────
+
+    #[test]
+    fn test_save_daemon_state_writes_workers() {
+        let dir = tempfile::tempdir().unwrap();
+        let work_dir = dir.path();
+
+        let mut workers = HashMap::new();
+        workers.insert("hive-s1".into(), test_worker("hive-s1", None));
+        workers.insert("hive-s2".into(), test_worker("hive-s2", None));
+
+        save_daemon_state(work_dir, &workers);
+
+        let loaded = state::load_state(work_dir).unwrap().unwrap();
+        assert_eq!(loaded.worktrees.len(), 2);
+
+        let ids: Vec<&str> = loaded.worktrees.iter().map(|w| w.id.as_str()).collect();
+        assert!(ids.contains(&"hive-s1"));
+        assert!(ids.contains(&"hive-s2"));
+    }
+
+    #[test]
+    fn test_save_daemon_state_empty_workers() {
+        let dir = tempfile::tempdir().unwrap();
+        let work_dir = dir.path();
+
+        let workers = HashMap::new();
+        save_daemon_state(work_dir, &workers);
+
+        let loaded = state::load_state(work_dir).unwrap().unwrap();
+        assert!(loaded.worktrees.is_empty());
+    }
+
+    #[test]
+    fn test_to_worktree_state_phase_to_status() {
+        let mut worker = test_worker("hive-phase", None);
+
+        // Active phase -> status "running"
+        worker.phase = WorkerPhase::Running;
+        let ws = worker.to_worktree_state();
+        assert_eq!(ws.status, "running");
+
+        // Starting phase -> status "running"
+        worker.phase = WorkerPhase::Starting;
+        let ws = worker.to_worktree_state();
+        assert_eq!(ws.status, "running");
+
+        // Completed phase -> status "done"
+        worker.phase = WorkerPhase::Completed;
+        let ws = worker.to_worktree_state();
+        assert_eq!(ws.status, "done");
+
+        // Failed phase -> status "done"
+        worker.phase = WorkerPhase::Failed;
+        let ws = worker.to_worktree_state();
+        assert_eq!(ws.status, "done");
+    }
+
+    #[test]
+    fn test_to_worktree_state_agent_session_status() {
+        let mut worker = test_worker("hive-sess", None);
+
+        worker.phase = WorkerPhase::Running;
+        let ws = worker.to_worktree_state();
+        assert_eq!(ws.agent_session_status.as_deref(), Some("running"));
+
+        worker.phase = WorkerPhase::Waiting;
+        let ws = worker.to_worktree_state();
+        assert_eq!(ws.agent_session_status.as_deref(), Some("waiting"));
+
+        worker.phase = WorkerPhase::Completed;
+        let ws = worker.to_worktree_state();
+        assert!(ws.agent_session_status.is_none());
+
+        worker.phase = WorkerPhase::Creating;
+        let ws = worker.to_worktree_state();
+        assert!(ws.agent_session_status.is_none());
+    }
+
+    // ── Unregister workspace tests ───────────────────────────
+
+    #[tokio::test]
+    async fn test_unregister_workspace_removes_it() {
+        let (mut resp_rx, resp_tx, mut workspaces, event_tx, supervisor_tx) = test_harness();
+        let mut state_dirty = false;
+
+        let dir = tempfile::tempdir().unwrap();
+        let canonical = std::fs::canonicalize(dir.path()).unwrap();
+        workspaces.insert(
+            canonical.clone(),
+            test_workspace(canonical.to_str().unwrap(), vec![]),
+        );
+        assert_eq!(workspaces.len(), 1);
+
+        handle_request(
+            DaemonRequest::UnregisterWorkspace {
+                path: dir.path().to_path_buf(),
+            },
+            &resp_tx,
+            &mut workspaces,
+            &event_tx,
+            &supervisor_tx,
+            &mut state_dirty,
+        )
+        .await;
+
+        let resp = resp_rx.try_recv().unwrap();
+        assert!(matches!(resp, DaemonResponse::Ok { .. }));
+        assert!(workspaces.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_unregister_workspace_not_found() {
+        let (mut resp_rx, resp_tx, mut workspaces, event_tx, supervisor_tx) = test_harness();
+        let mut state_dirty = false;
+
+        handle_request(
+            DaemonRequest::UnregisterWorkspace {
+                path: PathBuf::from("/tmp/nonexistent"),
+            },
+            &resp_tx,
+            &mut workspaces,
+            &event_tx,
+            &supervisor_tx,
+            &mut state_dirty,
+        )
+        .await;
+
+        let resp = resp_rx.try_recv().unwrap();
+        match resp {
+            DaemonResponse::Error { message } => {
+                assert!(message.contains("workspace not registered"));
+            }
+            other => panic!("expected Error, got {:?}", other),
+        }
+    }
 }

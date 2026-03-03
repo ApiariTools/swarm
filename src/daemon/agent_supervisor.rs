@@ -284,9 +284,108 @@ fn log_agent_event(logger: &EventLogger, event: &AgentEventWire) {
     }
 }
 
+/// Path to the agent status file for a given worktree.
+fn agent_status_path(work_dir: &std::path::Path, worktree_id: &str) -> std::path::PathBuf {
+    work_dir
+        .join(".swarm")
+        .join("agent-status")
+        .join(worktree_id)
+}
+
 /// Write the agent status file for hive to read.
 fn write_agent_status(work_dir: &std::path::Path, worktree_id: &str, status: &str) {
-    let status_dir = work_dir.join(".swarm").join("agent-status");
-    let _ = std::fs::create_dir_all(&status_dir);
-    let _ = std::fs::write(status_dir.join(worktree_id), status);
+    let path = agent_status_path(work_dir, worktree_id);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(path, status);
+}
+
+/// Read the agent status file. Returns `None` if the file doesn't exist
+/// or can't be read. Used by hive/keeper to check worker status.
+#[allow(dead_code)]
+pub fn read_agent_status(work_dir: &std::path::Path, worktree_id: &str) -> Option<String> {
+    let path = agent_status_path(work_dir, worktree_id);
+    std::fs::read_to_string(path).ok().map(|s| s.trim().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_agent_status_none_when_file_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = read_agent_status(dir.path(), "nonexistent-worker");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_agent_status_waiting_parsed() {
+        let dir = tempfile::tempdir().unwrap();
+        write_agent_status(dir.path(), "worker-1", "waiting");
+        let result = read_agent_status(dir.path(), "worker-1");
+        assert_eq!(result.as_deref(), Some("waiting"));
+    }
+
+    #[test]
+    fn test_agent_status_running_parsed() {
+        let dir = tempfile::tempdir().unwrap();
+        write_agent_status(dir.path(), "worker-2", "running");
+        let result = read_agent_status(dir.path(), "worker-2");
+        assert_eq!(result.as_deref(), Some("running"));
+    }
+
+    #[test]
+    fn test_agent_status_unknown_value_handled() {
+        let dir = tempfile::tempdir().unwrap();
+        write_agent_status(dir.path(), "worker-3", "some-unknown-value");
+        let result = read_agent_status(dir.path(), "worker-3");
+        // Unknown values are returned as-is — callers decide how to handle them
+        assert_eq!(result.as_deref(), Some("some-unknown-value"));
+    }
+
+    #[test]
+    fn test_agent_status_overwrite() {
+        let dir = tempfile::tempdir().unwrap();
+        write_agent_status(dir.path(), "worker-4", "running");
+        assert_eq!(
+            read_agent_status(dir.path(), "worker-4").as_deref(),
+            Some("running")
+        );
+
+        write_agent_status(dir.path(), "worker-4", "waiting");
+        assert_eq!(
+            read_agent_status(dir.path(), "worker-4").as_deref(),
+            Some("waiting")
+        );
+    }
+
+    #[test]
+    fn test_agent_status_separate_workers() {
+        let dir = tempfile::tempdir().unwrap();
+        write_agent_status(dir.path(), "worker-a", "running");
+        write_agent_status(dir.path(), "worker-b", "waiting");
+
+        assert_eq!(
+            read_agent_status(dir.path(), "worker-a").as_deref(),
+            Some("running")
+        );
+        assert_eq!(
+            read_agent_status(dir.path(), "worker-b").as_deref(),
+            Some("waiting")
+        );
+    }
+
+    #[test]
+    fn test_agent_status_trims_whitespace() {
+        let dir = tempfile::tempdir().unwrap();
+        // Manually write with trailing newline
+        let path = agent_status_path(dir.path(), "worker-ws");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "running\n").unwrap();
+
+        let result = read_agent_status(dir.path(), "worker-ws");
+        assert_eq!(result.as_deref(), Some("running"));
+    }
 }
