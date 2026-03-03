@@ -1,14 +1,5 @@
 //! Shell quoting and sanitization helpers.
 
-/// Wrap a string in single quotes for safe embedding in a shell command.
-///
-/// Single quotes inside the string are handled via the `'\''` idiom:
-/// end the current single-quoted segment, insert an escaped single quote,
-/// then start a new single-quoted segment.
-pub fn shell_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
-}
-
 /// Sanitize a string for use as a branch name or directory name.
 ///
 /// - Lowercases everything
@@ -30,26 +21,6 @@ pub fn sanitize(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_shell_quote_simple() {
-        assert_eq!(shell_quote("hello"), "'hello'");
-    }
-
-    #[test]
-    fn test_shell_quote_with_spaces() {
-        assert_eq!(shell_quote("hello world"), "'hello world'");
-    }
-
-    #[test]
-    fn test_shell_quote_with_single_quotes() {
-        assert_eq!(shell_quote("it's fine"), "'it'\\''s fine'");
-    }
-
-    #[test]
-    fn test_shell_quote_empty() {
-        assert_eq!(shell_quote(""), "''");
-    }
 
     #[test]
     fn test_sanitize_basic() {
