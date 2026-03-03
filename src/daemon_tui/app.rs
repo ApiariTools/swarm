@@ -640,12 +640,55 @@ fn truncate_output(output: &str, max_lines: usize) -> String {
     }
 }
 
-/// Parse events.jsonl content into conversation entries.
-pub fn parse_history_events(content: &str) -> Vec<AgentEventWire> {
+/// A history entry: either a wire event or a user message (which needs
+/// different handling since user messages aren't part of the streaming protocol).
+pub enum HistoryEntry {
+    Event(AgentEventWire),
+    UserMessage(String),
+}
+
+/// Parse events.jsonl content into displayable history entries.
+///
+/// The file stores `AgentEvent` (with timestamps), but the TUI conversation
+/// works with `AgentEventWire` (streaming protocol). Convert on the fly.
+pub fn parse_history_events(content: &str) -> Vec<HistoryEntry> {
+    use crate::agent_tui::events::AgentEvent;
+
     content
         .lines()
         .filter(|line| !line.trim().is_empty())
-        .filter_map(|line| serde_json::from_str::<AgentEventWire>(line).ok())
+        .filter_map(|line| {
+            let event: AgentEvent = serde_json::from_str(line).ok()?;
+            match event {
+                AgentEvent::AssistantText { text, .. } => {
+                    Some(HistoryEntry::Event(AgentEventWire::TextDelta { text }))
+                }
+                AgentEvent::ToolUse { tool, input, .. } => {
+                    Some(HistoryEntry::Event(AgentEventWire::ToolUse { tool, input }))
+                }
+                AgentEvent::ToolResult {
+                    output, is_error, ..
+                } => Some(HistoryEntry::Event(AgentEventWire::ToolResult {
+                    output,
+                    is_error,
+                })),
+                AgentEvent::SessionResult {
+                    turns,
+                    cost_usd,
+                    session_id,
+                    ..
+                } => Some(HistoryEntry::Event(AgentEventWire::SessionResult {
+                    turns,
+                    cost_usd,
+                    session_id,
+                })),
+                AgentEvent::Error { message, .. } => {
+                    Some(HistoryEntry::Event(AgentEventWire::Error { message }))
+                }
+                AgentEvent::UserMessage { text, .. } => Some(HistoryEntry::UserMessage(text)),
+                AgentEvent::Start { .. } => None,
+            }
+        })
         .collect()
 }
 
@@ -1090,5 +1133,53 @@ mod tests {
         let conv = app.conversations.get("hive-1").unwrap();
         assert_eq!(conv.streaming_text, "hello");
         assert!(conv.is_streaming);
+    }
+
+    // ── History parsing tests ──
+
+    #[test]
+    fn parse_history_events_from_agent_event_format() {
+        // events.jsonl stores AgentEvent (with timestamps), not AgentEventWire
+        let content = r#"{"type":"assistant_text","timestamp":"2025-01-01T00:00:00Z","text":"hello world"}
+{"type":"tool_use","timestamp":"2025-01-01T00:00:01Z","tool":"Bash","input":"ls -la"}
+{"type":"tool_result","timestamp":"2025-01-01T00:00:02Z","tool":"Bash","output":"file.txt","is_error":false}
+{"type":"session_result","timestamp":"2025-01-01T00:00:03Z","turns":5,"cost_usd":0.10,"session_id":"sess-1"}
+"#;
+        let entries = parse_history_events(content);
+        assert_eq!(entries.len(), 4);
+        assert!(matches!(&entries[0], HistoryEntry::Event(AgentEventWire::TextDelta { text }) if text == "hello world"));
+        assert!(matches!(&entries[1], HistoryEntry::Event(AgentEventWire::ToolUse { tool, .. }) if tool == "Bash"));
+        assert!(matches!(&entries[2], HistoryEntry::Event(AgentEventWire::ToolResult { output, is_error: false, .. }) if output == "file.txt"));
+        assert!(matches!(&entries[3], HistoryEntry::Event(AgentEventWire::SessionResult { turns: 5, .. })));
+    }
+
+    #[test]
+    fn parse_history_events_includes_user_messages() {
+        let content = r#"{"type":"assistant_text","timestamp":"2025-01-01T00:00:00Z","text":"done"}
+{"type":"user_message","timestamp":"2025-01-01T00:00:01Z","text":"thanks"}
+{"type":"assistant_text","timestamp":"2025-01-01T00:00:02Z","text":"welcome"}
+"#;
+        let entries = parse_history_events(content);
+        assert_eq!(entries.len(), 3);
+        assert!(matches!(&entries[1], HistoryEntry::UserMessage(text) if text == "thanks"));
+    }
+
+    #[test]
+    fn parse_history_events_skips_start_markers() {
+        let content = r#"{"type":"start","timestamp":"2025-01-01T00:00:00Z","prompt":"do thing","model":"claude"}
+{"type":"assistant_text","timestamp":"2025-01-01T00:00:01Z","text":"ok"}
+"#;
+        let entries = parse_history_events(content);
+        assert_eq!(entries.len(), 1);
+        assert!(matches!(&entries[0], HistoryEntry::Event(AgentEventWire::TextDelta { .. })));
+    }
+
+    #[test]
+    fn parse_history_events_handles_errors() {
+        let content = r#"{"type":"error","timestamp":"2025-01-01T00:00:00Z","message":"something broke"}
+"#;
+        let entries = parse_history_events(content);
+        assert_eq!(entries.len(), 1);
+        assert!(matches!(&entries[0], HistoryEntry::Event(AgentEventWire::Error { message }) if message == "something broke"));
     }
 }

@@ -998,9 +998,24 @@ fn handle_daemon_response(app: &mut DaemonTuiApp, resp: DaemonResponse) {
                 // History response
                 if let Some(content) = d.get("events").and_then(|v| v.as_str()) {
                     if let Some(wt_id) = app.pending_history.pop_front() {
-                        let events = app::parse_history_events(content);
-                        for event in &events {
-                            app.handle_agent_event(&wt_id, event);
+                        let entries = app::parse_history_events(content);
+                        for entry in &entries {
+                            match entry {
+                                app::HistoryEntry::Event(event) => {
+                                    app.handle_agent_event(&wt_id, event);
+                                }
+                                app::HistoryEntry::UserMessage(text) => {
+                                    let conv = app
+                                        .conversations
+                                        .entry(wt_id.clone())
+                                        .or_insert_with(app::WorkerConversation::new);
+                                    conv.entries.push(
+                                        crate::agent_tui::app::ConversationEntry::User {
+                                            text: text.clone(),
+                                        },
+                                    );
+                                }
+                            }
                         }
                     }
                     return;
