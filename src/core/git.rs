@@ -274,3 +274,58 @@ pub fn detect_repos(dir: &Path) -> Result<Vec<PathBuf>> {
 pub fn generate_branch_name(prompt: &str, suffix: &str) -> String {
     format!("swarm/{}-{}", super::shell::sanitize(prompt), suffix)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── Branch name generation tests ─────────────────────────
+
+    #[test]
+    fn test_branch_name_sanitizes_spaces() {
+        let name = generate_branch_name("fix the login bug", "a1b2");
+        assert_eq!(name, "swarm/fix-the-login-bug-a1b2");
+    }
+
+    #[test]
+    fn test_branch_name_truncates_long_prompts() {
+        let long_prompt = "a]".repeat(50); // 100 chars before sanitize
+        let name = generate_branch_name(&long_prompt, "x9z8");
+        // sanitize truncates to 40, then "swarm/" prefix and "-x9z8" suffix are added
+        assert!(name.len() <= "swarm/".len() + 40 + "-x9z8".len());
+        assert!(name.starts_with("swarm/"));
+        assert!(name.ends_with("-x9z8"));
+    }
+
+    #[test]
+    fn test_branch_name_removes_special_chars() {
+        let name = generate_branch_name("add user auth (v2)!", "f00d");
+        // Special chars become hyphens, sanitize strips leading/trailing hyphens
+        // "add user auth (v2)!" → "add-user-auth--v2-" → trimmed → "add-user-auth--v2"
+        assert_eq!(name, "swarm/add-user-auth--v2-f00d");
+        assert!(!name.contains('('));
+        assert!(!name.contains(')'));
+        assert!(!name.contains('!'));
+    }
+
+    #[test]
+    fn test_branch_name_appends_unique_suffix() {
+        let name1 = generate_branch_name("fix bug", "aaaa");
+        let name2 = generate_branch_name("fix bug", "bbbb");
+        assert!(name1.ends_with("-aaaa"));
+        assert!(name2.ends_with("-bbbb"));
+        assert_ne!(name1, name2);
+    }
+
+    #[test]
+    fn test_branch_name_lowercases() {
+        let name = generate_branch_name("Fix The BUG", "ab12");
+        assert_eq!(name, "swarm/fix-the-bug-ab12");
+    }
+
+    #[test]
+    fn test_branch_name_empty_prompt() {
+        let name = generate_branch_name("", "1234");
+        assert_eq!(name, "swarm/-1234");
+    }
+}

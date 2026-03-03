@@ -284,8 +284,90 @@ fn log_agent_event(logger: &EventLogger, event: &AgentEventWire) {
 }
 
 /// Write the agent status file for hive to read.
-fn write_agent_status(work_dir: &std::path::Path, worktree_id: &str, status: &str) {
+pub(crate) fn write_agent_status(work_dir: &std::path::Path, worktree_id: &str, status: &str) {
     let status_dir = work_dir.join(".swarm").join("agent-status");
     let _ = std::fs::create_dir_all(&status_dir);
     let _ = std::fs::write(status_dir.join(worktree_id), status);
+}
+
+/// Read the agent status file. Returns `None` if the file does not exist.
+pub(crate) fn read_agent_status(
+    work_dir: &std::path::Path,
+    worktree_id: &str,
+) -> Option<String> {
+    let path = work_dir
+        .join(".swarm")
+        .join("agent-status")
+        .join(worktree_id);
+    std::fs::read_to_string(path).ok().map(|s| s.trim().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_agent_status_none_when_file_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = read_agent_status(dir.path(), "nonexistent-worker");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_agent_status_waiting_parsed() {
+        let dir = tempfile::tempdir().unwrap();
+        write_agent_status(dir.path(), "worker-1", "waiting");
+        let result = read_agent_status(dir.path(), "worker-1");
+        assert_eq!(result.as_deref(), Some("waiting"));
+    }
+
+    #[test]
+    fn test_agent_status_running_parsed() {
+        let dir = tempfile::tempdir().unwrap();
+        write_agent_status(dir.path(), "worker-2", "running");
+        let result = read_agent_status(dir.path(), "worker-2");
+        assert_eq!(result.as_deref(), Some("running"));
+    }
+
+    #[test]
+    fn test_agent_status_unknown_value_handled() {
+        let dir = tempfile::tempdir().unwrap();
+        write_agent_status(dir.path(), "worker-3", "some-unexpected-value");
+        let result = read_agent_status(dir.path(), "worker-3");
+        // Unknown values are returned as-is (not an error)
+        assert_eq!(result.as_deref(), Some("some-unexpected-value"));
+    }
+
+    #[test]
+    fn test_agent_status_overwrite() {
+        let dir = tempfile::tempdir().unwrap();
+        write_agent_status(dir.path(), "worker-4", "running");
+        assert_eq!(
+            read_agent_status(dir.path(), "worker-4").as_deref(),
+            Some("running")
+        );
+
+        // Overwrite with new status
+        write_agent_status(dir.path(), "worker-4", "waiting");
+        assert_eq!(
+            read_agent_status(dir.path(), "worker-4").as_deref(),
+            Some("waiting")
+        );
+    }
+
+    #[test]
+    fn test_agent_status_separate_workers() {
+        let dir = tempfile::tempdir().unwrap();
+        write_agent_status(dir.path(), "worker-a", "running");
+        write_agent_status(dir.path(), "worker-b", "waiting");
+
+        assert_eq!(
+            read_agent_status(dir.path(), "worker-a").as_deref(),
+            Some("running")
+        );
+        assert_eq!(
+            read_agent_status(dir.path(), "worker-b").as_deref(),
+            Some("waiting")
+        );
+    }
 }
