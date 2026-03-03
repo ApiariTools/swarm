@@ -74,6 +74,36 @@ pub fn merge_into_base(repo_path: &Path, branch: &str, base_branch: &str) -> Res
     Ok(())
 }
 
+/// Commit all changes in a worktree and merge the branch into the base branch.
+pub fn commit_all_and_merge(
+    repo_path: &Path,
+    worktree_path: &Path,
+    branch: &str,
+) -> Result<()> {
+    // Commit any pending changes
+    if has_changes(worktree_path)? {
+        commit_all(worktree_path, &format!("final commit on {}", branch))?;
+    }
+
+    // Determine base branch
+    let base = detect_base_branch(repo_path)?;
+    merge_into_base(repo_path, branch, &base)
+}
+
+/// Detect the default base branch (main or master).
+fn detect_base_branch(repo_path: &Path) -> Result<String> {
+    for candidate in &["main", "master"] {
+        let output = Command::new("git")
+            .args(["rev-parse", "--verify", candidate])
+            .current_dir(repo_path)
+            .output()?;
+        if output.status.success() {
+            return Ok(candidate.to_string());
+        }
+    }
+    Err(eyre!("could not detect base branch (tried main, master)"))
+}
+
 /// Check if a worktree has uncommitted changes.
 pub fn has_changes(worktree_path: &Path) -> Result<bool> {
     let output = Command::new("git")
