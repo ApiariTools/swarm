@@ -274,3 +274,56 @@ pub fn detect_repos(dir: &Path) -> Result<Vec<PathBuf>> {
 pub fn generate_branch_name(prompt: &str, suffix: &str) -> String {
     format!("swarm/{}-{}", super::shell::sanitize(prompt), suffix)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn branch_name_sanitizes_spaces() {
+        let name = generate_branch_name("fix the login bug", "a1b2");
+        assert_eq!(name, "swarm/fix-the-login-bug-a1b2");
+    }
+
+    #[test]
+    fn branch_name_truncates_long_prompts() {
+        let long_prompt = "a]".repeat(50); // 100 chars, sanitize truncates to 40
+        let name = generate_branch_name(&long_prompt, "x1y2");
+        // "swarm/" prefix + sanitized (max 40) + "-" + suffix
+        let after_prefix = name.strip_prefix("swarm/").unwrap();
+        let parts: Vec<&str> = after_prefix.rsplitn(2, '-').collect();
+        assert_eq!(parts[0], "x1y2");
+        // The sanitized portion should be <= 40 chars
+        assert!(parts[1].len() <= 40);
+    }
+
+    #[test]
+    fn branch_name_removes_special_chars() {
+        let name = generate_branch_name("add user auth (v2)!", "ff00");
+        // Special chars become hyphens; sanitize trims leading/trailing hyphens
+        // from the sanitized portion, so "(v2)!" -> "-v2--" -> trimmed "v2"
+        assert_eq!(name, "swarm/add-user-auth--v2-ff00");
+    }
+
+    #[test]
+    fn branch_name_appends_unique_suffix() {
+        let name1 = generate_branch_name("fix bug", "aaaa");
+        let name2 = generate_branch_name("fix bug", "bbbb");
+        assert!(name1.ends_with("-aaaa"));
+        assert!(name2.ends_with("-bbbb"));
+        assert_ne!(name1, name2);
+    }
+
+    #[test]
+    fn branch_name_with_empty_prompt() {
+        let name = generate_branch_name("", "c3d4");
+        // sanitize("") returns "", so we get "swarm/-c3d4"
+        assert_eq!(name, "swarm/-c3d4");
+    }
+
+    #[test]
+    fn branch_name_lowercases() {
+        let name = generate_branch_name("Fix The BUG", "abcd");
+        assert_eq!(name, "swarm/fix-the-bug-abcd");
+    }
+}

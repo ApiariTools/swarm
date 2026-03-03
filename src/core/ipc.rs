@@ -562,4 +562,166 @@ mod tests {
             _ => panic!("expected ReviewStarted"),
         }
     }
+
+    // ── JSONL inbox file-based read/write tests ─────────────
+
+    #[test]
+    fn test_inbox_read_empty_when_no_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let (messages, offset) = read_inbox(dir.path(), 0).unwrap();
+        assert!(messages.is_empty());
+        assert_eq!(offset, 0);
+    }
+
+    #[test]
+    fn test_inbox_read_after_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let work_dir = dir.path();
+
+        // Manually write a Create message to the inbox
+        let inbox_file = work_dir.join(".swarm").join("inbox.jsonl");
+        std::fs::create_dir_all(inbox_file.parent().unwrap()).unwrap();
+        let msg = InboxMessage::Create {
+            id: "test-1".to_string(),
+            prompt: "fix the bug".to_string(),
+            agent: "claude-tui".to_string(),
+            repo: None,
+            start_point: None,
+            review_configs: None,
+            timestamp: Local::now(),
+        };
+        let mut line = serde_json::to_string(&msg).unwrap();
+        line.push('\n');
+        std::fs::write(&inbox_file, &line).unwrap();
+
+        let (messages, new_offset) = read_inbox(work_dir, 0).unwrap();
+        assert_eq!(messages.len(), 1);
+        match &messages[0] {
+            InboxMessage::Create { prompt, agent, .. } => {
+                assert_eq!(prompt, "fix the bug");
+                assert_eq!(agent, "claude-tui");
+            }
+            _ => panic!("expected Create"),
+        }
+
+        // Reading again from new offset returns nothing
+        let (messages2, _) = read_inbox(work_dir, new_offset).unwrap();
+        assert!(messages2.is_empty());
+    }
+
+    #[test]
+    fn test_inbox_multiple_messages() {
+        let dir = tempfile::tempdir().unwrap();
+        let work_dir = dir.path();
+
+        let inbox_file = work_dir.join(".swarm").join("inbox.jsonl");
+        std::fs::create_dir_all(inbox_file.parent().unwrap()).unwrap();
+
+        let create_msg = InboxMessage::Create {
+            id: "msg-1".to_string(),
+            prompt: "task one".to_string(),
+            agent: "claude".to_string(),
+            repo: Some("myrepo".to_string()),
+            start_point: None,
+            review_configs: None,
+            timestamp: Local::now(),
+        };
+        let send_msg = InboxMessage::Send {
+            id: "msg-2".to_string(),
+            worktree: "hive-1".to_string(),
+            message: "please review".to_string(),
+            timestamp: Local::now(),
+        };
+        let close_msg = InboxMessage::Close {
+            id: "msg-3".to_string(),
+            worktree: "hive-1".to_string(),
+            timestamp: Local::now(),
+        };
+
+        let mut content = String::new();
+        content.push_str(&serde_json::to_string(&create_msg).unwrap());
+        content.push('\n');
+        content.push_str(&serde_json::to_string(&send_msg).unwrap());
+        content.push('\n');
+        content.push_str(&serde_json::to_string(&close_msg).unwrap());
+        content.push('\n');
+        std::fs::write(&inbox_file, &content).unwrap();
+
+        let (messages, _) = read_inbox(work_dir, 0).unwrap();
+        assert_eq!(messages.len(), 3);
+        assert!(matches!(&messages[0], InboxMessage::Create { .. }));
+        assert!(matches!(&messages[1], InboxMessage::Send { .. }));
+        assert!(matches!(&messages[2], InboxMessage::Close { .. }));
+    }
+
+    #[test]
+    fn test_inbox_offset_incremental_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let work_dir = dir.path();
+
+        let inbox_file = work_dir.join(".swarm").join("inbox.jsonl");
+        std::fs::create_dir_all(inbox_file.parent().unwrap()).unwrap();
+
+        // Write first message
+        let msg1 = InboxMessage::Create {
+            id: "msg-1".to_string(),
+            prompt: "first".to_string(),
+            agent: "claude-tui".to_string(),
+            repo: None,
+            start_point: None,
+            review_configs: None,
+            timestamp: Local::now(),
+        };
+        let mut line1 = serde_json::to_string(&msg1).unwrap();
+        line1.push('\n');
+        std::fs::write(&inbox_file, &line1).unwrap();
+
+        let (msgs, offset1) = read_inbox(work_dir, 0).unwrap();
+        assert_eq!(msgs.len(), 1);
+
+        // Append second message
+        let msg2 = InboxMessage::Send {
+            id: "msg-2".to_string(),
+            worktree: "wt-1".to_string(),
+            message: "second".to_string(),
+            timestamp: Local::now(),
+        };
+        let mut line2 = serde_json::to_string(&msg2).unwrap();
+        line2.push('\n');
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&inbox_file)
+            .unwrap();
+        file.write_all(line2.as_bytes()).unwrap();
+
+        // Read from previous offset — should only get the new message
+        let (msgs2, _) = read_inbox(work_dir, offset1).unwrap();
+        assert_eq!(msgs2.len(), 1);
+        assert!(matches!(&msgs2[0], InboxMessage::Send { .. }));
+    }
+
+    #[test]
+    fn test_emit_event_creates_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let work_dir = dir.path();
+
+        // events.jsonl doesn't exist yet
+        let events_file = work_dir.join(".swarm").join("events.jsonl");
+        assert!(!events_file.exists());
+
+        let event = SwarmEvent::WorktreeCreated {
+            worktree: "hive-1".to_string(),
+            branch: "swarm/fix-bug-a1b2".to_string(),
+            agent: "claude-tui".to_string(),
+            pane_id: "daemon".to_string(),
+            timestamp: Local::now(),
+        };
+        emit_event(work_dir, &event).unwrap();
+
+        assert!(events_file.exists());
+        let content = std::fs::read_to_string(&events_file).unwrap();
+        assert!(content.contains("worktree_created"));
+        assert!(content.contains("hive-1"));
+    }
 }
