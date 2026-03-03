@@ -237,19 +237,28 @@ pub fn detect_repos(dir: &Path) -> Result<Vec<PathBuf>> {
     }
 
     if !child_repos.is_empty() {
-        // Sort by recent commit count (most active first)
-        child_repos.sort_by(|a, b| {
-            let count = |repo: &Path| -> usize {
-                std::process::Command::new("git")
+        // Sort by recent commit count (most active first).
+        // Compute counts once upfront instead of spawning git per comparison.
+        let mut counted: Vec<(PathBuf, usize)> = child_repos
+            .into_iter()
+            .map(|repo| {
+                let c = std::process::Command::new("git")
                     .args(["rev-list", "--count", "--since=3 months ago", "HEAD"])
-                    .current_dir(repo)
+                    .current_dir(&repo)
                     .output()
                     .ok()
-                    .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse().ok())
-                    .unwrap_or(0)
-            };
-            count(b).cmp(&count(a))
-        });
+                    .and_then(|o| {
+                        String::from_utf8_lossy(&o.stdout)
+                            .trim()
+                            .parse()
+                            .ok()
+                    })
+                    .unwrap_or(0);
+                (repo, c)
+            })
+            .collect();
+        counted.sort_by(|a, b| b.1.cmp(&a.1));
+        child_repos = counted.into_iter().map(|(p, _)| p).collect();
         return Ok(child_repos);
     }
 
@@ -259,4 +268,75 @@ pub fn detect_repos(dir: &Path) -> Result<Vec<PathBuf>> {
         repos.push(dir.to_path_buf());
     }
     Ok(repos)
+}
+
+/// Generate a `swarm/<sanitized-prompt>-<suffix>` branch name.
+pub fn generate_branch_name(prompt: &str, suffix: &str) -> String {
+    format!("swarm/{}-{}", super::shell::sanitize(prompt), suffix)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── generate_branch_name tests ───────────────────────────
+
+    #[test]
+    fn test_branch_name_basic() {
+        let name = generate_branch_name("fix the bug", "a1b2");
+        assert_eq!(name, "swarm/fix-the-bug-a1b2");
+    }
+
+    #[test]
+    fn test_branch_name_sanitizes_spaces() {
+        let name = generate_branch_name("add user auth flow", "x9z8");
+        assert!(name.starts_with("swarm/"));
+        assert!(!name.contains(' '));
+        assert!(name.contains("add-user-auth-flow"));
+    }
+
+    #[test]
+    fn test_branch_name_truncates_long_prompts() {
+        let long_prompt = "a".repeat(100);
+        let name = generate_branch_name(&long_prompt, "abcd");
+        // sanitize() truncates to 40 chars, so the sanitized part is at most 40
+        let after_prefix = name.strip_prefix("swarm/").unwrap();
+        let parts: Vec<&str> = after_prefix.rsplitn(2, '-').collect();
+        assert_eq!(parts[0], "abcd"); // suffix
+        // The sanitized portion (before the last -suffix) should be <= 40 chars
+        assert!(parts[1].len() <= 40);
+    }
+
+    #[test]
+    fn test_branch_name_removes_special_chars() {
+        let name = generate_branch_name("fix (bug) #42 @urgent!", "zz00");
+        assert!(!name.contains('('));
+        assert!(!name.contains(')'));
+        assert!(!name.contains('#'));
+        assert!(!name.contains('@'));
+        assert!(!name.contains('!'));
+        assert!(name.ends_with("-zz00"));
+    }
+
+    #[test]
+    fn test_branch_name_appends_unique_suffix() {
+        let name1 = generate_branch_name("same prompt", "aaaa");
+        let name2 = generate_branch_name("same prompt", "bbbb");
+        assert_ne!(name1, name2);
+        assert!(name1.ends_with("-aaaa"));
+        assert!(name2.ends_with("-bbbb"));
+    }
+
+    #[test]
+    fn test_branch_name_lowercases() {
+        let name = generate_branch_name("Fix The BUG", "c3d4");
+        assert!(name.contains("fix-the-bug"));
+    }
+
+    #[test]
+    fn test_branch_name_empty_prompt() {
+        // Edge case: empty prompt just gives swarm/-suffix
+        let name = generate_branch_name("", "e5f6");
+        assert_eq!(name, "swarm/-e5f6");
+    }
 }
