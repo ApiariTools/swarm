@@ -1,12 +1,10 @@
 use crate::core::review::{ReviewConfig, deserialize_review_configs};
 use crate::core::state::WorkerPhase;
-use crate::swarm_log;
 use apiari_common::ipc::{JsonlReader, JsonlWriter};
 use chrono::{DateTime, Local};
 use color_eyre::Result;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
 /// Inbox message — external commands sent to the sidebar.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -114,28 +112,6 @@ pub enum SwarmEvent {
     },
 }
 
-/// A single transition log entry (human-readable audit trail).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TransitionEntry {
-    pub worktree: String,
-    pub from: WorkerPhase,
-    pub to: WorkerPhase,
-    pub timestamp: DateTime<Local>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-}
-
-fn transitions_path(work_dir: &Path) -> std::path::PathBuf {
-    work_dir.join(".swarm").join("transitions.jsonl")
-}
-
-/// Append a transition entry to `.swarm/transitions.jsonl`.
-pub fn log_transition(work_dir: &Path, entry: &TransitionEntry) -> Result<()> {
-    let writer = JsonlWriter::<TransitionEntry>::new(transitions_path(work_dir));
-    writer.append(entry)?;
-    Ok(())
-}
-
 fn inbox_path(work_dir: &Path) -> std::path::PathBuf {
     work_dir.join(".swarm").join("inbox.jsonl")
 }
@@ -151,13 +127,6 @@ pub fn read_inbox(work_dir: &Path, offset: u64) -> Result<(Vec<InboxMessage>, u6
     let mut reader = JsonlReader::<InboxMessage>::with_offset(path, offset);
     let messages = reader.poll()?;
     Ok((messages, reader.offset()))
-}
-
-/// Append a message to inbox.jsonl.
-pub fn write_inbox(work_dir: &Path, msg: &InboxMessage) -> Result<()> {
-    let writer = JsonlWriter::<InboxMessage>::new(inbox_path(work_dir));
-    writer.append(msg)?;
-    Ok(())
 }
 
 /// Append an event to events.jsonl.
@@ -189,92 +158,6 @@ pub fn global_pid_path() -> std::path::PathBuf {
 /// Path to the per-workspace swarm socket file (legacy).
 pub fn socket_path(work_dir: &Path) -> std::path::PathBuf {
     work_dir.join(".swarm").join("swarm.sock")
-}
-
-/// Acknowledgment sent by the socket server after processing a message.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InboxAck {
-    pub ok: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-}
-
-/// Try sending a message via the Unix domain socket.
-///
-/// Returns:
-/// - `Ok(true)` — message delivered and acknowledged
-/// - `Ok(false)` — socket unavailable (caller should fall back to JSONL)
-/// - `Err(...)` — real error (connection succeeded but something broke)
-pub async fn send_via_socket(work_dir: &Path, msg: &InboxMessage) -> Result<bool> {
-    let sock = socket_path(work_dir);
-    if !sock.exists() {
-        return Ok(false);
-    }
-
-    let stream = match tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        tokio::net::UnixStream::connect(&sock),
-    )
-    .await
-    {
-        Ok(Ok(stream)) => stream,
-        Ok(Err(_)) | Err(_) => return Ok(false), // connect failed or timed out
-    };
-
-    let (read_half, mut write_half) = stream.into_split();
-
-    // Send JSON line + shutdown write half
-    let mut line = serde_json::to_string(msg)?;
-    line.push('\n');
-    write_half.write_all(line.as_bytes()).await?;
-    write_half.shutdown().await?;
-
-    // Read ack with timeout
-    let mut reader = tokio::io::BufReader::new(read_half);
-    let mut ack_line = String::new();
-    match tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        reader.read_line(&mut ack_line),
-    )
-    .await
-    {
-        Ok(Ok(0)) => {
-            // Server closed without ack — treat as delivered (best effort)
-            Ok(true)
-        }
-        Ok(Ok(_)) => {
-            let ack: InboxAck = serde_json::from_str(ack_line.trim())?;
-            if ack.ok {
-                Ok(true)
-            } else {
-                Err(color_eyre::eyre::eyre!(
-                    "server nack: {}",
-                    ack.error.unwrap_or_default()
-                ))
-            }
-        }
-        Ok(Err(e)) => Err(e.into()),
-        Err(_) => {
-            // Timeout reading ack — assume delivered
-            Ok(true)
-        }
-    }
-}
-
-/// Send an inbox message: try socket first, fall back to JSONL file.
-pub async fn send_inbox(work_dir: &Path, msg: &InboxMessage) -> Result<()> {
-    match send_via_socket(work_dir, msg).await {
-        Ok(true) => Ok(()),
-        Ok(false) => {
-            // Socket unavailable — fall back to file
-            write_inbox(work_dir, msg)
-        }
-        Err(e) => {
-            // Socket error — log and fall back to file
-            swarm_log!("[swarm] socket send failed, falling back to file: {}", e);
-            write_inbox(work_dir, msg)
-        }
-    }
 }
 
 /// Send a DaemonRequest to a specific socket path and return the response.
@@ -320,12 +203,6 @@ pub fn send_daemon_request(
     }
     // Fall back to global socket
     send_daemon_request_to(&global_socket_path(), req)
-}
-
-/// Remove a stale socket file (left over from a crashed daemon).
-/// Tries to connect; if it fails, the socket is stale and gets removed.
-pub fn cleanup_stale_socket(work_dir: &Path) {
-    cleanup_stale_socket_at(&socket_path(work_dir));
 }
 
 /// Remove a stale socket file at the given path.
@@ -501,121 +378,6 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // --- IPC write/read cycle tests ---
-
-    #[test]
-    fn test_ipc_write_and_read_inbox() {
-        let dir = tempfile::tempdir().unwrap();
-        let work_dir = dir.path();
-
-        let msg = InboxMessage::Create {
-            id: "msg-1".to_string(),
-            prompt: "add tests".to_string(),
-            agent: "claude".to_string(),
-            repo: Some("swarm".to_string()),
-            start_point: None,
-            review_configs: None,
-            timestamp: Local::now(),
-        };
-
-        write_inbox(work_dir, &msg).unwrap();
-
-        let (messages, new_pos) = read_inbox(work_dir, 0).unwrap();
-        assert_eq!(messages.len(), 1);
-        assert!(new_pos > 0);
-
-        match &messages[0] {
-            InboxMessage::Create { prompt, .. } => {
-                assert_eq!(prompt, "add tests");
-            }
-            _ => panic!("expected Create"),
-        }
-
-        // Reading again from the new position should return nothing
-        let (messages2, _) = read_inbox(work_dir, new_pos).unwrap();
-        assert!(messages2.is_empty());
-    }
-
-    #[test]
-    fn test_ipc_multiple_messages_sequential() {
-        let dir = tempfile::tempdir().unwrap();
-        let work_dir = dir.path();
-
-        let msg1 = InboxMessage::Create {
-            id: "msg-1".to_string(),
-            prompt: "task one".to_string(),
-            agent: "claude".to_string(),
-            repo: None,
-            start_point: None,
-            review_configs: None,
-            timestamp: Local::now(),
-        };
-        let msg2 = InboxMessage::Send {
-            id: "msg-2".to_string(),
-            worktree: "hive-1".to_string(),
-            message: "hello".to_string(),
-            timestamp: Local::now(),
-        };
-        let msg3 = InboxMessage::Close {
-            id: "msg-3".to_string(),
-            worktree: "hive-1".to_string(),
-            timestamp: Local::now(),
-        };
-
-        write_inbox(work_dir, &msg1).unwrap();
-        write_inbox(work_dir, &msg2).unwrap();
-
-        // Read first batch
-        let (messages, pos) = read_inbox(work_dir, 0).unwrap();
-        assert_eq!(messages.len(), 2);
-
-        // Write a third, then read from where we left off
-        write_inbox(work_dir, &msg3).unwrap();
-        let (messages2, _) = read_inbox(work_dir, pos).unwrap();
-        assert_eq!(messages2.len(), 1);
-        match &messages2[0] {
-            InboxMessage::Close { worktree, .. } => assert_eq!(worktree, "hive-1"),
-            _ => panic!("expected Close"),
-        }
-    }
-
-    #[test]
-    fn test_ipc_read_empty_inbox() {
-        let dir = tempfile::tempdir().unwrap();
-        let work_dir = dir.path();
-        // Inbox file doesn't exist yet
-        let (messages, pos) = read_inbox(work_dir, 0).unwrap();
-        assert!(messages.is_empty());
-        assert_eq!(pos, 0);
-    }
-
-    #[test]
-    fn test_ipc_send_to_unknown_worktree_no_panic() {
-        // This tests that the Send message can be deserialized even when
-        // targeting a worktree that doesn't exist. The actual "no-op on
-        // unknown worktree" logic is in App::process_inbox, but this
-        // verifies the IPC layer handles it cleanly.
-        let dir = tempfile::tempdir().unwrap();
-        let work_dir = dir.path();
-
-        let msg = InboxMessage::Send {
-            id: "msg-1".to_string(),
-            worktree: "nonexistent-99".to_string(),
-            message: "this goes nowhere".to_string(),
-            timestamp: Local::now(),
-        };
-
-        write_inbox(work_dir, &msg).unwrap();
-        let (messages, _) = read_inbox(work_dir, 0).unwrap();
-        assert_eq!(messages.len(), 1);
-        match &messages[0] {
-            InboxMessage::Send { worktree, .. } => {
-                assert_eq!(worktree, "nonexistent-99");
-            }
-            _ => panic!("expected Send"),
-        }
-    }
-
     // --- Event emission tests ---
 
     #[test]
@@ -676,7 +438,7 @@ mod tests {
         assert_eq!(msgs2[0].message, "msg for worker 2");
     }
 
-    // ── PhaseChanged / PrDetected / TransitionEntry tests ──
+    // ── PhaseChanged / PrDetected tests ──
 
     #[test]
     fn test_phase_changed_event_round_trips() {
@@ -730,62 +492,6 @@ mod tests {
             }
             _ => panic!("expected PrDetected"),
         }
-    }
-
-    #[test]
-    fn test_transition_entry_round_trips() {
-        let entry = TransitionEntry {
-            worktree: "hive-1".to_string(),
-            from: WorkerPhase::Creating,
-            to: WorkerPhase::Starting,
-            timestamp: Local::now(),
-            reason: Some("pane created".to_string()),
-        };
-        let json = serde_json::to_string(&entry).unwrap();
-        let restored: TransitionEntry = serde_json::from_str(&json).unwrap();
-        assert_eq!(restored.worktree, "hive-1");
-        assert_eq!(restored.from, WorkerPhase::Creating);
-        assert_eq!(restored.to, WorkerPhase::Starting);
-        assert_eq!(restored.reason.as_deref(), Some("pane created"));
-    }
-
-    #[test]
-    fn test_transition_entry_without_reason() {
-        let entry = TransitionEntry {
-            worktree: "hive-1".to_string(),
-            from: WorkerPhase::Running,
-            to: WorkerPhase::Waiting,
-            timestamp: Local::now(),
-            reason: None,
-        };
-        let json = serde_json::to_string(&entry).unwrap();
-        // reason should be skipped in serialization
-        assert!(!json.contains("reason"));
-
-        let restored: TransitionEntry = serde_json::from_str(&json).unwrap();
-        assert!(restored.reason.is_none());
-    }
-
-    #[test]
-    fn test_log_transition_writes_to_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let work_dir = dir.path();
-
-        let entry = TransitionEntry {
-            worktree: "hive-1".to_string(),
-            from: WorkerPhase::Creating,
-            to: WorkerPhase::Starting,
-            timestamp: Local::now(),
-            reason: Some("test".to_string()),
-        };
-
-        log_transition(work_dir, &entry).unwrap();
-
-        let path = work_dir.join(".swarm").join("transitions.jsonl");
-        let content = std::fs::read_to_string(&path).unwrap();
-        assert!(content.contains("creating"));
-        assert!(content.contains("starting"));
-        assert!(content.contains("hive-1"));
     }
 
     // ── Review message tests ──────────────────────────────

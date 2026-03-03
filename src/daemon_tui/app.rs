@@ -44,6 +44,7 @@ pub struct PrDetailInfo {
     pub title: String,
     pub state: String,
     pub url: String,
+    #[allow(dead_code)] // used in tests; kept for future use
     pub worker_id: String,
 }
 

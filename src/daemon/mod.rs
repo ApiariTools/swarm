@@ -318,6 +318,9 @@ async fn run_daemon(
     auth_token: Option<String>,
 ) -> Result<()> {
     write_pid()?;
+    if let Some(ref wd) = initial_work_dir {
+        crate::core::log::init(wd);
+    }
     eprintln!("[swarm] Daemon starting (pid {})", std::process::id());
 
     // Set up signal handlers

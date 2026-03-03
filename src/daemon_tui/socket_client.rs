@@ -81,31 +81,6 @@ impl DaemonClient {
         Ok(())
     }
 
-    /// Send a request and wait for its response, skipping any interleaved
-    /// event messages (AgentEvent, StateChanged). Use this during init when
-    /// the connection is subscribed but we need request/response pairs.
-    pub async fn request_skipping_events(
-        &mut self,
-        req: &DaemonRequest,
-    ) -> Result<DaemonResponse> {
-        self.send(req).await?;
-        loop {
-            let resp = self.next_response().await?;
-            match &resp {
-                DaemonResponse::AgentEvent { .. } | DaemonResponse::StateChanged { .. } => {
-                    continue; // skip events, wait for the actual response
-                }
-                _ => return Ok(resp),
-            }
-        }
-    }
-
-    /// Send a request and wait for its response.
-    pub async fn request(&mut self, req: &DaemonRequest) -> Result<DaemonResponse> {
-        self.send(req).await?;
-        self.next_response().await
-    }
-
     /// Read the next response/event from the daemon.
     pub async fn next_response(&mut self) -> Result<DaemonResponse> {
         let mut line = String::new();

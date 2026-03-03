@@ -14,12 +14,6 @@ pub struct PrInfo {
     pub url: String,
 }
 
-impl PrInfo {
-    /// Returns true when this PR just transitioned to MERGED relative to `prev`.
-    pub fn is_newly_merged(&self, prev: Option<&PrInfo>) -> bool {
-        self.state == "MERGED" && prev.is_none_or(|p| p.state != "MERGED")
-    }
-}
 
 /// Worker lifecycle phase — the single source of truth for worker state.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -58,24 +52,6 @@ impl WorkerPhase {
         !self.is_terminal()
     }
 
-    /// Check whether a transition from this phase to `to` is valid.
-    pub fn can_transition_to(&self, to: &WorkerPhase) -> bool {
-        matches!(
-            (self, to),
-            (Self::Creating, Self::Starting)
-                | (Self::Creating, Self::Failed)
-                | (Self::Starting, Self::Running)
-                | (Self::Starting, Self::Failed)
-                | (Self::Starting, Self::Completed)
-                | (Self::Running, Self::Waiting)
-                | (Self::Running, Self::Completed)
-                | (Self::Waiting, Self::Running)
-                | (Self::Waiting, Self::Completed)
-                | (Self::Completed, Self::Starting) // agent relaunch
-                | (Self::Failed, Self::Starting) // agent relaunch after failure
-        )
-    }
-
     /// Human-readable label for display.
     pub fn label(&self) -> &str {
         match self {
@@ -101,12 +77,6 @@ pub struct PaneState {
     pub pane_id: String,
 }
 
-// Backward compat: deserialize old "tmux_target" field as "pane_id"
-impl PaneState {
-    pub fn new(pane_id: String) -> Self {
-        Self { pane_id }
-    }
-}
 
 /// Persisted worktree state (survives restarts).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -221,7 +191,7 @@ mod tests {
             repo_path: PathBuf::from("/tmp/repo"),
             worktree_path: PathBuf::from("/tmp/repo/.swarm/wt/test-1"),
             created_at: Local::now(),
-            agent: Some(PaneState::new("%1".to_string())),
+            agent: Some(PaneState { pane_id: "%1".to_string() }),
             terminals: vec![],
             summary: Some("fix bug in auth".to_string()),
             pr,
@@ -340,41 +310,6 @@ mod tests {
         assert!(WorkerPhase::Waiting.is_active());
         assert!(!WorkerPhase::Completed.is_active());
         assert!(!WorkerPhase::Failed.is_active());
-    }
-
-    #[test]
-    fn worker_phase_valid_transitions() {
-        // Creating →
-        assert!(WorkerPhase::Creating.can_transition_to(&WorkerPhase::Starting));
-        assert!(WorkerPhase::Creating.can_transition_to(&WorkerPhase::Failed));
-        // Starting →
-        assert!(WorkerPhase::Starting.can_transition_to(&WorkerPhase::Running));
-        assert!(WorkerPhase::Starting.can_transition_to(&WorkerPhase::Failed));
-        assert!(WorkerPhase::Starting.can_transition_to(&WorkerPhase::Completed));
-        // Running →
-        assert!(WorkerPhase::Running.can_transition_to(&WorkerPhase::Waiting));
-        assert!(WorkerPhase::Running.can_transition_to(&WorkerPhase::Completed));
-        // Waiting →
-        assert!(WorkerPhase::Waiting.can_transition_to(&WorkerPhase::Running));
-        assert!(WorkerPhase::Waiting.can_transition_to(&WorkerPhase::Completed));
-        // Completed →
-        assert!(WorkerPhase::Completed.can_transition_to(&WorkerPhase::Starting)); // relaunch
-    }
-
-    #[test]
-    fn worker_phase_invalid_transitions() {
-        // Creating cannot go to Running directly
-        assert!(!WorkerPhase::Creating.can_transition_to(&WorkerPhase::Running));
-        assert!(!WorkerPhase::Creating.can_transition_to(&WorkerPhase::Waiting));
-        assert!(!WorkerPhase::Creating.can_transition_to(&WorkerPhase::Completed));
-        // Running cannot go back to Starting
-        assert!(!WorkerPhase::Running.can_transition_to(&WorkerPhase::Starting));
-        assert!(!WorkerPhase::Running.can_transition_to(&WorkerPhase::Creating));
-        // Terminal phases can't transition
-        assert!(!WorkerPhase::Completed.can_transition_to(&WorkerPhase::Running));
-        assert!(!WorkerPhase::Completed.can_transition_to(&WorkerPhase::Failed));
-        assert!(!WorkerPhase::Failed.can_transition_to(&WorkerPhase::Running));
-        assert!(!WorkerPhase::Failed.can_transition_to(&WorkerPhase::Creating));
     }
 
     #[test]

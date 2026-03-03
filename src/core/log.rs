@@ -1,9 +1,9 @@
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
-static LOG_FILE: OnceLock<Mutex<File>> = OnceLock::new();
+static LOG_FILE: OnceLock<Mutex<std::fs::File>> = OnceLock::new();
 
 /// Open `.swarm/swarm.log` in append mode for the duration of the process.
 pub fn init(work_dir: &Path) {
