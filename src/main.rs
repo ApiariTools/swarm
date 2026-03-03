@@ -178,18 +178,23 @@ async fn run_sidebar(work_dir: std::path::PathBuf, agent: String) -> Result<()> 
             app.sidebar_pane_id = get_current_pane_id();
             if let Some(ref pane_id) = app.sidebar_pane_id {
                 let _ = core::tmux::set_pane_title(pane_id, "swarm");
-                // Mark as sidebar so pane-border-format renders no title for it
-                let _ = std::process::Command::new("tmux")
-                    .args(["set-option", "-p", "-t", pane_id, "@sidebar", "1"])
-                    .output();
-                // Keep sidebar bright even when window-style defaults to dimmed
-                let _ = core::tmux::set_pane_style(pane_id, "bg=#302c26,fg=#dcdce1,nodim");
+                // Sidebar gets empty border format (no title in border)
+                let _ = core::tmux::set_pane_border_format(pane_id, "");
+                // Keep sidebar bright with deepest dark background
+                let _ = core::tmux::set_pane_style(pane_id, "bg=#1e1b18,fg=#dcdce1,nodim");
             }
+            app.is_startup_relaunch = true;
             app.relaunch_dead_agents();
+            app.is_startup_relaunch = false;
             app.save_state();
             // Enforce correct layout sizes (sidebar may have drifted if
             // terminal was resized while detached, e.g. mobile SSH).
             app.rebalance_layout();
+            // Ensure sidebar has tmux focus so keyboard input reaches the TUI.
+            // relaunch/split can steal focus to agent panes.
+            if let Some(ref pane_id) = app.sidebar_pane_id {
+                let _ = core::tmux::select_pane(pane_id);
+            }
             tui::run(&mut app).await?;
         } else {
             // In a different tmux session — create swarm session if needed, switch to it
