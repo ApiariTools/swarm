@@ -4,5 +4,6 @@ pub mod ipc;
 pub mod log;
 pub mod merge;
 pub mod review;
+pub mod runner;
 pub mod shell;
 pub mod state;

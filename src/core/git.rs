@@ -274,3 +274,60 @@ pub fn detect_repos(dir: &Path) -> Result<Vec<PathBuf>> {
 pub fn generate_branch_name(prompt: &str, suffix: &str) -> String {
     format!("swarm/{}-{}", super::shell::sanitize(prompt), suffix)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── generate_branch_name tests ──
+
+    #[test]
+    fn test_branch_name_sanitizes_spaces() {
+        let name = generate_branch_name("fix the login bug", "a1b2");
+        assert_eq!(name, "swarm/fix-the-login-bug-a1b2");
+    }
+
+    #[test]
+    fn test_branch_name_truncates_long_prompts() {
+        let long_prompt = "a".repeat(60);
+        let name = generate_branch_name(&long_prompt, "xyz");
+        // sanitize() truncates to 40 chars, then format adds "swarm/" prefix and "-xyz" suffix
+        assert!(name.starts_with("swarm/"));
+        assert!(name.ends_with("-xyz"));
+        // The sanitized portion should be at most 40 chars
+        let without_prefix = name.strip_prefix("swarm/").unwrap();
+        let without_suffix = without_prefix.strip_suffix("-xyz").unwrap();
+        assert!(without_suffix.len() <= 40);
+    }
+
+    #[test]
+    fn test_branch_name_removes_special_chars() {
+        let name = generate_branch_name("add user auth (v2)", "f00d");
+        // Special chars become hyphens via sanitize()
+        assert_eq!(name, "swarm/add-user-auth--v2-f00d");
+        assert!(!name.contains('('));
+        assert!(!name.contains(')'));
+    }
+
+    #[test]
+    fn test_branch_name_appends_unique_suffix() {
+        let name1 = generate_branch_name("fix bug", "aaaa");
+        let name2 = generate_branch_name("fix bug", "bbbb");
+        assert_ne!(name1, name2);
+        assert!(name1.ends_with("-aaaa"));
+        assert!(name2.ends_with("-bbbb"));
+    }
+
+    #[test]
+    fn test_branch_name_always_has_swarm_prefix() {
+        let name = generate_branch_name("anything", "0000");
+        assert!(name.starts_with("swarm/"));
+    }
+
+    #[test]
+    fn test_branch_name_empty_prompt() {
+        let name = generate_branch_name("", "abcd");
+        // sanitize("") returns "", so we get "swarm/-abcd"
+        assert_eq!(name, "swarm/-abcd");
+    }
+}

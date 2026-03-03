@@ -1585,4 +1585,388 @@ mod tests {
             other => panic!("expected Error about agent, got {:?}", other),
         }
     }
+
+    // ── IPC dispatch tests ──────────────────────────────────
+
+    #[tokio::test]
+    async fn handle_request_create_unknown_agent() {
+        let (mut resp_rx, resp_tx, mut workspaces, event_tx, supervisor_tx) = test_harness();
+        let mut state_dirty = false;
+
+        // Register a workspace so we get past workspace resolution
+        workspaces.insert(
+            PathBuf::from("/tmp/ws"),
+            test_workspace("/tmp/ws", vec![]),
+        );
+
+        handle_request(
+            DaemonRequest::CreateWorker {
+                prompt: "test".into(),
+                agent: "nonexistent-agent-xyz".into(),
+                repo: None,
+                start_point: None,
+                review_configs: None,
+                workspace: Some(PathBuf::from("/tmp/ws")),
+            },
+            &resp_tx,
+            &mut workspaces,
+            &event_tx,
+            &supervisor_tx,
+            &mut state_dirty,
+        )
+        .await;
+
+        let resp = resp_rx.try_recv().unwrap();
+        match resp {
+            DaemonResponse::Error { message } => {
+                assert!(
+                    message.contains("unknown agent"),
+                    "expected 'unknown agent' error, got: {}",
+                    message
+                );
+            }
+            other => panic!("expected Error for unknown agent, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_request_create_no_workspace_registered() {
+        let (mut resp_rx, resp_tx, mut workspaces, event_tx, supervisor_tx) = test_harness();
+        let mut state_dirty = false;
+
+        // No workspaces registered at all
+        handle_request(
+            DaemonRequest::CreateWorker {
+                prompt: "test".into(),
+                agent: "claude-tui".into(),
+                repo: None,
+                start_point: None,
+                review_configs: None,
+                workspace: None,
+            },
+            &resp_tx,
+            &mut workspaces,
+            &event_tx,
+            &supervisor_tx,
+            &mut state_dirty,
+        )
+        .await;
+
+        let resp = resp_rx.try_recv().unwrap();
+        match resp {
+            DaemonResponse::Error { message } => {
+                assert!(
+                    message.contains("no workspaces registered"),
+                    "expected 'no workspaces' error, got: {}",
+                    message
+                );
+            }
+            other => panic!("expected Error for no workspace, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_request_create_unknown_repo() {
+        let (mut resp_rx, resp_tx, mut workspaces, event_tx, supervisor_tx) = test_harness();
+        let mut state_dirty = false;
+
+        // Workspace with no repos detected
+        workspaces.insert(
+            PathBuf::from("/tmp/ws"),
+            test_workspace("/tmp/ws", vec![]),
+        );
+
+        handle_request(
+            DaemonRequest::CreateWorker {
+                prompt: "test".into(),
+                agent: "claude-tui".into(),
+                repo: Some("nonexistent-repo".into()),
+                start_point: None,
+                review_configs: None,
+                workspace: Some(PathBuf::from("/tmp/ws")),
+            },
+            &resp_tx,
+            &mut workspaces,
+            &event_tx,
+            &supervisor_tx,
+            &mut state_dirty,
+        )
+        .await;
+
+        let resp = resp_rx.try_recv().unwrap();
+        match resp {
+            DaemonResponse::Error { message } => {
+                assert!(
+                    message.contains("unknown repo"),
+                    "expected 'unknown repo' error, got: {}",
+                    message
+                );
+            }
+            other => panic!("expected Error for unknown repo, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_request_close_removes_worker_from_list() {
+        let (mut resp_rx, resp_tx, mut workspaces, event_tx, supervisor_tx) = test_harness();
+        let mut state_dirty = false;
+
+        let dir = tempfile::tempdir().unwrap();
+        let ws_path = dir.path().to_path_buf();
+
+        // Create a workspace with a worker (give it a non-real worktree_path so
+        // git cleanup silently fails — that's fine for this test)
+        let mut ws = test_workspace(&ws_path.to_string_lossy(), vec![("hive-close-test", None)]);
+        ws.path = ws_path.clone();
+        workspaces.insert(ws_path.clone(), ws);
+
+        assert!(workspaces[&ws_path].workers.contains_key("hive-close-test"));
+
+        handle_request(
+            DaemonRequest::CloseWorker {
+                worktree_id: "hive-close-test".into(),
+            },
+            &resp_tx,
+            &mut workspaces,
+            &event_tx,
+            &supervisor_tx,
+            &mut state_dirty,
+        )
+        .await;
+
+        let resp = resp_rx.try_recv().unwrap();
+        assert!(
+            matches!(resp, DaemonResponse::Ok { .. }),
+            "expected Ok response for close"
+        );
+
+        // Worker should be removed
+        assert!(
+            !workspaces[&ws_path].workers.contains_key("hive-close-test"),
+            "worker should be removed after close"
+        );
+        assert!(state_dirty, "state should be marked dirty after close");
+    }
+
+    #[tokio::test]
+    async fn handle_request_merge_unknown_worker() {
+        let (mut resp_rx, resp_tx, mut workspaces, event_tx, supervisor_tx) = test_harness();
+        let mut state_dirty = false;
+
+        handle_request(
+            DaemonRequest::MergeWorker {
+                worktree_id: "nonexistent".into(),
+            },
+            &resp_tx,
+            &mut workspaces,
+            &event_tx,
+            &supervisor_tx,
+            &mut state_dirty,
+        )
+        .await;
+
+        let resp = resp_rx.try_recv().unwrap();
+        match resp {
+            DaemonResponse::Error { message } => {
+                assert!(message.contains("unknown worker"));
+            }
+            other => panic!("expected Error, got {:?}", other),
+        }
+    }
+
+    // ── IPC inbox JSONL end-to-end tests ──
+
+    #[test]
+    fn test_ipc_inbox_write_read_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let work_dir = dir.path();
+
+        // Write a Create message to inbox.jsonl
+        let inbox_path = work_dir.join(".swarm").join("inbox.jsonl");
+        std::fs::create_dir_all(inbox_path.parent().unwrap()).unwrap();
+
+        let msg = ipc::InboxMessage::Create {
+            id: "msg-ipc-1".into(),
+            prompt: "fix the auth bug".into(),
+            agent: "claude-tui".into(),
+            repo: Some("hive".into()),
+            start_point: None,
+            review_configs: None,
+            timestamp: Local::now(),
+        };
+        let mut line = serde_json::to_string(&msg).unwrap();
+        line.push('\n');
+        std::fs::write(&inbox_path, &line).unwrap();
+
+        // Read it back
+        let (messages, new_offset) = ipc::read_inbox(work_dir, 0).unwrap();
+        assert_eq!(messages.len(), 1);
+        match &messages[0] {
+            ipc::InboxMessage::Create { prompt, agent, repo, .. } => {
+                assert_eq!(prompt, "fix the auth bug");
+                assert_eq!(agent, "claude-tui");
+                assert_eq!(repo.as_deref(), Some("hive"));
+            }
+            _ => panic!("expected Create message"),
+        }
+
+        // Reading again from new offset returns nothing
+        let (messages2, _) = ipc::read_inbox(work_dir, new_offset).unwrap();
+        assert!(messages2.is_empty());
+    }
+
+    #[test]
+    fn test_ipc_inbox_multiple_messages() {
+        let dir = tempfile::tempdir().unwrap();
+        let work_dir = dir.path();
+
+        let inbox_path = work_dir.join(".swarm").join("inbox.jsonl");
+        std::fs::create_dir_all(inbox_path.parent().unwrap()).unwrap();
+
+        // Write multiple messages
+        let msgs = vec![
+            ipc::InboxMessage::Create {
+                id: "msg-1".into(),
+                prompt: "task one".into(),
+                agent: "claude-tui".into(),
+                repo: None,
+                start_point: None,
+                review_configs: None,
+                timestamp: Local::now(),
+            },
+            ipc::InboxMessage::Send {
+                id: "msg-2".into(),
+                worktree: "hive-1".into(),
+                message: "update tests".into(),
+                timestamp: Local::now(),
+            },
+            ipc::InboxMessage::Close {
+                id: "msg-3".into(),
+                worktree: "hive-2".into(),
+                timestamp: Local::now(),
+            },
+        ];
+
+        let mut content = String::new();
+        for msg in &msgs {
+            content.push_str(&serde_json::to_string(msg).unwrap());
+            content.push('\n');
+        }
+        std::fs::write(&inbox_path, &content).unwrap();
+
+        let (messages, _) = ipc::read_inbox(work_dir, 0).unwrap();
+        assert_eq!(messages.len(), 3);
+        assert!(matches!(&messages[0], ipc::InboxMessage::Create { .. }));
+        assert!(matches!(&messages[1], ipc::InboxMessage::Send { .. }));
+        assert!(matches!(&messages[2], ipc::InboxMessage::Close { .. }));
+    }
+
+    #[test]
+    fn test_ipc_translate_then_dispatch_create() {
+        // Verify that translating an inbox Create message produces a CreateWorker request
+        let msg = ipc::InboxMessage::Create {
+            id: "msg-t1".into(),
+            prompt: "implement feature".into(),
+            agent: "claude".into(),
+            repo: Some("swarm".into()),
+            start_point: None,
+            review_configs: None,
+            timestamp: Local::now(),
+        };
+
+        let req = protocol::translate_inbox_message(&msg);
+        match req {
+            DaemonRequest::CreateWorker {
+                prompt, agent, repo, workspace, ..
+            } => {
+                assert_eq!(prompt, "implement feature");
+                assert_eq!(agent, "claude");
+                assert_eq!(repo.as_deref(), Some("swarm"));
+                assert!(workspace.is_none(), "inbox translation should not set workspace");
+            }
+            _ => panic!("expected CreateWorker, got {:?}", req),
+        }
+    }
+
+    #[test]
+    fn test_ipc_translate_close() {
+        let msg = ipc::InboxMessage::Close {
+            id: "msg-c1".into(),
+            worktree: "hive-99".into(),
+            timestamp: Local::now(),
+        };
+
+        let req = protocol::translate_inbox_message(&msg);
+        match req {
+            DaemonRequest::CloseWorker { worktree_id } => {
+                assert_eq!(worktree_id, "hive-99");
+            }
+            _ => panic!("expected CloseWorker, got {:?}", req),
+        }
+    }
+
+    // ── resolve_repo / resolve_workspace unit tests ──
+
+    #[test]
+    fn resolve_repo_single_repo_no_name() {
+        let repos = vec![PathBuf::from("/tmp/my-repo")];
+        let result = resolve_repo(&repos, None);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), PathBuf::from("/tmp/my-repo"));
+    }
+
+    #[test]
+    fn resolve_repo_no_repos() {
+        let repos: Vec<PathBuf> = vec![];
+        let result = resolve_repo(&repos, None);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("no git repos detected"));
+    }
+
+    #[test]
+    fn resolve_repo_unknown_name() {
+        let repos = vec![PathBuf::from("/tmp/hive"), PathBuf::from("/tmp/swarm")];
+        let result = resolve_repo(&repos, Some("nonexistent"));
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("unknown repo 'nonexistent'"));
+    }
+
+    #[test]
+    fn resolve_workspace_single() {
+        let mut workspaces = HashMap::new();
+        workspaces.insert(
+            PathBuf::from("/tmp/ws"),
+            test_workspace("/tmp/ws", vec![]),
+        );
+        let result = resolve_workspace(&workspaces, None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn resolve_workspace_empty() {
+        let workspaces: HashMap<PathBuf, WorkspaceState> = HashMap::new();
+        let result = resolve_workspace(&workspaces, None);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("no workspaces registered"));
+    }
+
+    #[test]
+    fn resolve_workspace_multiple_no_selection() {
+        let mut workspaces = HashMap::new();
+        workspaces.insert(
+            PathBuf::from("/tmp/ws1"),
+            test_workspace("/tmp/ws1", vec![]),
+        );
+        workspaces.insert(
+            PathBuf::from("/tmp/ws2"),
+            test_workspace("/tmp/ws2", vec![]),
+        );
+        let result = resolve_workspace(&workspaces, None);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("multiple workspaces"));
+    }
 }
