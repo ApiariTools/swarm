@@ -53,7 +53,7 @@ pub enum InboxMessage {
 }
 
 fn default_agent() -> String {
-    "claude-tui".to_string()
+    "claude".to_string()
 }
 
 /// Events emitted by the sidebar for external consumers.
@@ -226,7 +226,7 @@ pub fn cleanup_stale_socket_at(sock: &Path) {
 
 // ── Per-Agent Inbox ───────────────────────────────────────
 
-/// A message sent to a specific agent's inbox (used by claude-tui).
+/// A message sent to a specific agent's inbox.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentInboxMessage {
     pub message: String,
@@ -353,7 +353,7 @@ mod tests {
     }
 
     #[test]
-    fn test_create_message_defaults_agent_to_claude_tui() {
+    fn test_create_message_defaults_agent_to_claude() {
         // Simulate a JSON message without the "agent" field
         let json = r#"{"action":"create","id":"x","prompt":"test","timestamp":"2025-01-01T00:00:00-05:00"}"#;
         let msg: InboxMessage = serde_json::from_str(json).unwrap();
@@ -364,7 +364,7 @@ mod tests {
                 start_point,
                 ..
             } => {
-                assert_eq!(agent, "claude-tui");
+                assert_eq!(agent, "claude");
                 assert!(repo.is_none());
                 assert!(start_point.is_none());
             }

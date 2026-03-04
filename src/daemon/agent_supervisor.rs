@@ -50,18 +50,13 @@ pub struct SpawnAgentOpts<'a> {
 
 /// Spawn a new agent and return a handle for interacting with it.
 pub async fn spawn_agent(opts: SpawnAgentOpts<'_>) -> color_eyre::Result<AgentHandle> {
-    let max_turns = match opts.kind {
-        AgentKind::Claude => Some(50),
-        _ => None,
-    };
-
     let spawn_opts = SpawnOptions {
         kind: opts.kind,
         prompt: opts.prompt.to_string(),
         working_dir: opts.worktree_path.to_path_buf(),
         dangerously_skip_permissions: opts.dangerously_skip_permissions,
         resume_session_id: opts.resume_session_id,
-        max_turns,
+        max_turns: None,
     };
 
     let agent = managed_agent::spawn_managed_agent(spawn_opts).await?;
@@ -163,10 +158,6 @@ pub async fn agent_event_loop(
 
                 // Re-spawn with session resume
                 let resume_id = handle.agent.session_id().map(String::from);
-                let max_turns = match kind {
-                    AgentKind::Claude => Some(50),
-                    _ => None,
-                };
 
                 let new_opts = SpawnOptions {
                     kind: kind.clone(),
@@ -174,7 +165,7 @@ pub async fn agent_event_loop(
                     working_dir: worktree_path.to_path_buf(),
                     dangerously_skip_permissions,
                     resume_session_id: resume_id,
-                    max_turns,
+                    max_turns: None,
                 };
 
                 match managed_agent::spawn_managed_agent(new_opts).await {
@@ -780,7 +771,7 @@ mod tests {
                 supervisor_tx: &sv_tx,
                 work_dir: dir.path(),
                 restart_count: &mut restart_count,
-                kind: AgentKind::ClaudeTui,
+                kind: AgentKind::Claude,
                 prompt: "test",
                 worktree_path: dir.path(),
                 dangerously_skip_permissions: true,

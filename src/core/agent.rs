@@ -4,19 +4,19 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentKind {
+    /// Claude Code agent (via SDK). Also deserializes from "claude-tui" for
+    /// backward compatibility with existing state files.
+    #[serde(alias = "claude-tui")]
     Claude,
     Codex,
-    #[serde(rename = "claude-tui")]
-    ClaudeTui,
 }
 
 impl AgentKind {
     /// Parse from string.
     pub fn from_str(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
-            "claude" => Some(Self::Claude),
+            "claude" | "claude-tui" => Some(Self::Claude),
             "codex" => Some(Self::Codex),
-            "claude-tui" => Some(Self::ClaudeTui),
             _ => None,
         }
     }
@@ -24,17 +24,15 @@ impl AgentKind {
     /// Display name.
     pub fn name(&self) -> &str {
         match self {
-            Self::Claude => "Claude Code",
+            Self::Claude => "Claude",
             Self::Codex => "Codex",
-            Self::ClaudeTui => "Claude TUI",
         }
     }
 
-    /// User-facing name for the daemon TUI (hides implementation details).
+    /// User-facing name for the daemon TUI.
     pub fn daemon_name(&self) -> &str {
         match self {
-            Self::Claude => "Claude Code",
-            Self::ClaudeTui => "Claude",
+            Self::Claude => "Claude",
             Self::Codex => "Codex",
         }
     }
@@ -44,7 +42,6 @@ impl AgentKind {
         match self {
             Self::Claude => "claude",
             Self::Codex => "codex",
-            Self::ClaudeTui => "claude-tui",
         }
     }
 
@@ -62,8 +59,21 @@ mod tests {
 
     #[test]
     fn daemon_name_values() {
-        assert_eq!(AgentKind::Claude.daemon_name(), "Claude Code");
-        assert_eq!(AgentKind::ClaudeTui.daemon_name(), "Claude");
+        assert_eq!(AgentKind::Claude.daemon_name(), "Claude");
         assert_eq!(AgentKind::Codex.daemon_name(), "Codex");
+    }
+
+    #[test]
+    fn from_str_backward_compat() {
+        // "claude-tui" should still parse as Claude
+        assert_eq!(AgentKind::from_str("claude-tui"), Some(AgentKind::Claude));
+        assert_eq!(AgentKind::from_str("claude"), Some(AgentKind::Claude));
+    }
+
+    #[test]
+    fn deserialize_claude_tui_alias() {
+        let json = r#""claude-tui""#;
+        let kind: AgentKind = serde_json::from_str(json).unwrap();
+        assert_eq!(kind, AgentKind::Claude);
     }
 }

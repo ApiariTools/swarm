@@ -52,7 +52,7 @@ pub struct SpawnOptions {
 /// Spawn a new ManagedAgent based on the agent kind.
 pub async fn spawn_managed_agent(opts: SpawnOptions) -> Result<Box<dyn ManagedAgent>> {
     match opts.kind {
-        AgentKind::Claude | AgentKind::ClaudeTui => {
+        AgentKind::Claude => {
             let agent = ClaudeManagedAgent::spawn(opts).await?;
             Ok(Box::new(agent))
         }
@@ -121,7 +121,7 @@ impl ClaudeManagedAgent {
 #[async_trait]
 impl ManagedAgent for ClaudeManagedAgent {
     fn kind(&self) -> AgentKind {
-        AgentKind::ClaudeTui // daemon-managed Claude acts like claude-tui
+        AgentKind::Claude
     }
 
     async fn next_event(&mut self) -> Result<Option<AgentEventWire>> {

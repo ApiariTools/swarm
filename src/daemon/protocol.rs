@@ -73,7 +73,7 @@ pub enum DaemonRequest {
 }
 
 fn default_agent() -> String {
-    "claude-tui".to_string()
+    "claude".to_string()
 }
 
 /// Response sent by the daemon back to clients.
@@ -218,7 +218,7 @@ mod tests {
     fn daemon_request_create_round_trips() {
         let req = DaemonRequest::CreateWorker {
             prompt: "fix the bug".into(),
-            agent: "claude-tui".into(),
+            agent: "claude".into(),
             repo: Some("hive".into()),
             start_point: None,
             review_configs: None,
@@ -230,7 +230,7 @@ mod tests {
         match restored {
             DaemonRequest::CreateWorker { prompt, agent, .. } => {
                 assert_eq!(prompt, "fix the bug");
-                assert_eq!(agent, "claude-tui");
+                assert_eq!(agent, "claude");
             }
             _ => panic!("expected CreateWorker"),
         }
@@ -350,7 +350,7 @@ mod tests {
                 id: "hive-1".into(),
                 branch: "swarm/fix-bug-1".into(),
                 prompt: "fix the bug".into(),
-                agent: "claude-tui".into(),
+                agent: "claude".into(),
                 phase: WorkerPhase::Running,
                 session_id: Some("sess-123".into()),
                 pr_url: None,
@@ -491,12 +491,12 @@ mod tests {
     }
 
     #[test]
-    fn daemon_request_defaults_agent_to_claude_tui() {
+    fn daemon_request_defaults_agent_to_claude() {
         let json = r#"{"action":"create_worker","prompt":"test"}"#;
         let req: DaemonRequest = serde_json::from_str(json).unwrap();
         match req {
             DaemonRequest::CreateWorker { agent, workspace, .. } => {
-                assert_eq!(agent, "claude-tui");
+                assert_eq!(agent, "claude");
                 assert!(workspace.is_none()); // defaults to None
             }
             _ => panic!("expected CreateWorker"),

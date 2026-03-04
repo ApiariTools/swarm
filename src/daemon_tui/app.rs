@@ -11,10 +11,8 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 /// Agents available in the daemon TUI.
-/// The daemon uses the SDK directly (headless) — ClaudeTui maps to the Claude
-/// SDK and Codex to the Codex SDK. Raw `Claude` (tmux-based) is not available.
 pub fn daemon_agents() -> Vec<AgentKind> {
-    vec![AgentKind::ClaudeTui, AgentKind::Codex]
+    vec![AgentKind::Claude, AgentKind::Codex]
 }
 
 /// Which panel has focus.

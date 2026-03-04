@@ -1354,7 +1354,7 @@ mod tests {
             id: id.to_string(),
             branch: format!("swarm/{}", id),
             prompt: "test prompt".to_string(),
-            kind: AgentKind::ClaudeTui,
+            kind: AgentKind::Claude,
             repo_path: PathBuf::from("/tmp/repo"),
             worktree_path: PathBuf::from(format!("/tmp/wt/{}", id)),
             phase: WorkerPhase::Running,
