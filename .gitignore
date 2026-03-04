@@ -11,6 +11,9 @@ rust-toolchain
 # Runtime state
 .swarm/
 
+# Task artifacts (hive pipeline)
+.task/
+
 # Environment / secrets
 .env
 
