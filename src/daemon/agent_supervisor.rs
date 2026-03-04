@@ -144,7 +144,10 @@ pub async fn agent_event_loop(
                         "[daemon] Agent {} exceeded max restarts, marking as Failed",
                         handle.worktree_id
                     );
-                    return (WorkerPhase::Failed, handle.agent.session_id().map(String::from));
+                    return (
+                        WorkerPhase::Failed,
+                        handle.agent.session_id().map(String::from),
+                    );
                 }
 
                 // Exponential backoff: 2^restart_count seconds, max 60
@@ -272,9 +275,10 @@ async fn drain_agent_events(
                         handle.worktree_id,
                         stderr_msg
                     );
-                    handle.logger.log_error(
-                        &format!("Agent process exited without producing any events. stderr: {}", stderr_msg),
-                    );
+                    handle.logger.log_error(&format!(
+                        "Agent process exited without producing any events. stderr: {}",
+                        stderr_msg
+                    ));
                 } else {
                     swarm_log!(
                         "[daemon] Agent {} EOF after {} events (no SessionResult)",
@@ -359,9 +363,7 @@ mod tests {
             }
         }
 
-        fn from_results(
-            results: Vec<Result<Option<AgentEventWire>, color_eyre::Report>>,
-        ) -> Self {
+        fn from_results(results: Vec<Result<Option<AgentEventWire>, color_eyre::Report>>) -> Self {
             Self {
                 events: Arc::new(Mutex::new(results.into())),
                 session_id: None,
@@ -469,9 +471,7 @@ mod tests {
         assert!(matches!(result, AgentExitReason::Completed(Some(ref id)) if id == "sess-1"));
 
         // Events should be logged to file
-        let events_path = dir
-            .path()
-            .join(".swarm/agents/test-worker/events.jsonl");
+        let events_path = dir.path().join(".swarm/agents/test-worker/events.jsonl");
         assert!(events_path.exists(), "events.jsonl should exist");
         let content = std::fs::read_to_string(&events_path).unwrap();
         let lines: Vec<&str> = content.lines().collect();
@@ -497,10 +497,11 @@ mod tests {
         assert!(matches!(result, AgentExitReason::Completed(None)));
 
         // Error event should be logged to events.jsonl
-        let events_path = dir
-            .path()
-            .join(".swarm/agents/test-worker/events.jsonl");
-        assert!(events_path.exists(), "events.jsonl should be created with error");
+        let events_path = dir.path().join(".swarm/agents/test-worker/events.jsonl");
+        assert!(
+            events_path.exists(),
+            "events.jsonl should be created with error"
+        );
         let content = std::fs::read_to_string(&events_path).unwrap();
         assert!(content.contains("Agent process exited without producing any events"));
     }
@@ -563,9 +564,7 @@ mod tests {
         let (sv_tx, mut sv_rx) = mpsc::unbounded_channel();
 
         let agent = MockAgent::from_events(vec![
-            Some(AgentEventWire::TextDelta {
-                text: "hi".into(),
-            }),
+            Some(AgentEventWire::TextDelta { text: "hi".into() }),
             None,
         ]);
         let mut handle = test_handle(agent, dir.path());
@@ -697,9 +696,7 @@ mod tests {
 
         log_agent_event(
             &logger,
-            &AgentEventWire::ThinkingDelta {
-                text: "hmm".into(),
-            },
+            &AgentEventWire::ThinkingDelta { text: "hmm".into() },
         );
         log_agent_event(&logger, &AgentEventWire::TurnComplete);
 
@@ -754,13 +751,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (sv_tx, mut sv_rx) = mpsc::unbounded_channel();
 
-        let mut agent = MockAgent::from_events(vec![
-            Some(AgentEventWire::SessionResult {
-                turns: 1,
-                cost_usd: None,
-                session_id: Some("s1".into()),
-            }),
-        ]);
+        let mut agent = MockAgent::from_events(vec![Some(AgentEventWire::SessionResult {
+            turns: 1,
+            cost_usd: None,
+            session_id: Some("s1".into()),
+        })]);
         agent.accepts = true; // Interactive agent
         let mut handle = test_handle(agent, dir.path());
 

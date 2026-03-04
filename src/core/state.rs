@@ -13,7 +13,6 @@ pub struct PrInfo {
     pub url: String,
 }
 
-
 /// Worker lifecycle phase — the single source of truth for worker state.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -75,7 +74,6 @@ impl std::fmt::Display for WorkerPhase {
 pub struct PaneState {
     pub pane_id: String,
 }
-
 
 /// Persisted worktree state (survives restarts).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -171,7 +169,9 @@ mod tests {
             repo_path: PathBuf::from("/tmp/repo"),
             worktree_path: PathBuf::from("/tmp/repo/.swarm/wt/test-1"),
             created_at: Local::now(),
-            agent: Some(PaneState { pane_id: "%1".to_string() }),
+            agent: Some(PaneState {
+                pane_id: "%1".to_string(),
+            }),
             terminals: vec![],
             summary: Some("fix bug in auth".to_string()),
             pr,
@@ -246,8 +246,7 @@ mod tests {
         ];
         for phase in phases {
             let json = serde_json::to_string(&phase).expect("serialize phase");
-            let restored: WorkerPhase =
-                serde_json::from_str(&json).expect("deserialize phase");
+            let restored: WorkerPhase = serde_json::from_str(&json).expect("deserialize phase");
             assert_eq!(phase, restored);
         }
     }
@@ -331,5 +330,4 @@ mod tests {
         let restored: WorktreeState = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.phase, WorkerPhase::Completed);
     }
-
 }

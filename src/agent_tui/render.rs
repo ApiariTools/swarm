@@ -112,8 +112,18 @@ fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut TuiApp) {
                     } else {
                         ("✔", theme::success())
                     };
-                    let preview = input.lines().next().unwrap_or("").chars().take(50).collect::<String>();
-                    let ellipsis = if input.lines().next().is_some_and(|l| l.len() > 50) { "..." } else { "" };
+                    let preview = input
+                        .lines()
+                        .next()
+                        .unwrap_or("")
+                        .chars()
+                        .take(50)
+                        .collect::<String>();
+                    let ellipsis = if input.lines().next().is_some_and(|l| l.len() > 50) {
+                        "..."
+                    } else {
+                        ""
+                    };
                     lines.push(Line::from(vec![
                         Span::styled(format!("{}{} ", focus_prefix, icon), icon_style),
                         Span::styled(tool.as_str(), tool_style),
@@ -156,10 +166,8 @@ fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut TuiApp) {
                             Style::default().fg(theme::STEEL),
                         )));
                         for line in out.lines().take(10) {
-                            lines.push(Line::from(Span::styled(
-                                format!("  │ {}", line),
-                                out_style,
-                            )));
+                            lines
+                                .push(Line::from(Span::styled(format!("  │ {}", line), out_style)));
                         }
                         if out.lines().count() > 10 {
                             lines.push(Line::from(Span::styled(
@@ -341,9 +349,7 @@ fn draw_status_bar(frame: &mut Frame, area: Rect, app: &TuiApp) {
 
     let hint = if app.focused_tool.is_some() {
         format!(" {}tab:next s-tab:prev enter:toggle esc:done ", scroll_hint)
-    } else if app.status == SessionStatus::Done
-        || app.status == SessionStatus::Waiting
-    {
+    } else if app.status == SessionStatus::Done || app.status == SessionStatus::Waiting {
         format!(" {}tab:tool u/d:page c:tools i:input q:quit ", scroll_hint)
     } else {
         format!(" {}tab:tool u/d:page c:tools q:quit ", scroll_hint)

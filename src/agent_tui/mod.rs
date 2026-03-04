@@ -9,7 +9,10 @@ use apiari_claude_sdk::{ClaudeClient, Event, SessionOptions};
 use app::{InputMode, SdkEvent, SessionStatus, TuiApp};
 use color_eyre::Result;
 use crossterm::ExecutableCommand;
-use crossterm::event::{self, KeyCode, KeyModifiers, MouseButton, MouseEventKind, EnableMouseCapture, DisableMouseCapture};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, KeyCode, KeyModifiers, MouseButton,
+    MouseEventKind,
+};
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
@@ -389,9 +392,7 @@ async fn event_loop(
                 .join("agents")
                 .join(wt_id)
                 .join("inbox.jsonl");
-            std::fs::metadata(&inbox_path)
-                .map(|m| m.len())
-                .unwrap_or(0)
+            std::fs::metadata(&inbox_path).map(|m| m.len()).unwrap_or(0)
         } else {
             0
         }

@@ -75,11 +75,7 @@ pub fn merge_into_base(repo_path: &Path, branch: &str, base_branch: &str) -> Res
 }
 
 /// Commit all changes in a worktree and merge the branch into the base branch.
-pub fn commit_all_and_merge(
-    repo_path: &Path,
-    worktree_path: &Path,
-    branch: &str,
-) -> Result<()> {
+pub fn commit_all_and_merge(repo_path: &Path, worktree_path: &Path, branch: &str) -> Result<()> {
     // Commit any pending changes
     if has_changes(worktree_path)? {
         commit_all(worktree_path, &format!("final commit on {}", branch))?;

@@ -25,6 +25,12 @@ pub enum DaemonRequest {
         /// Which workspace to create the worker in.
         #[serde(default)]
         workspace: Option<PathBuf>,
+        /// Profile slug from `.swarm/profiles/` (default: "default").
+        #[serde(default)]
+        profile: Option<String>,
+        /// Artifacts to seed in the worktree's `.task/` directory.
+        #[serde(default)]
+        task_dir: Option<TaskDirPayload>,
     },
     SendMessage {
         worktree_id: String,
@@ -70,6 +76,17 @@ pub enum DaemonRequest {
 
 fn default_agent() -> String {
     "claude".to_string()
+}
+
+/// Artifacts to seed in a worktree's `.task/` directory.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TaskDirPayload {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_md: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_md: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_md: Option<String>,
 }
 
 /// Response sent by the daemon back to clients.
@@ -181,6 +198,8 @@ pub fn translate_inbox_message(msg: &InboxMessage) -> DaemonRequest {
             repo: repo.clone(),
             start_point: start_point.clone(),
             workspace: None,
+            profile: None,
+            task_dir: None,
         },
         InboxMessage::Send {
             worktree, message, ..
@@ -209,14 +228,67 @@ mod tests {
             repo: Some("hive".into()),
             start_point: None,
             workspace: None,
+            profile: Some("strict".into()),
+            task_dir: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("\"action\":\"create_worker\""));
         let restored: DaemonRequest = serde_json::from_str(&json).unwrap();
         match restored {
-            DaemonRequest::CreateWorker { prompt, agent, .. } => {
+            DaemonRequest::CreateWorker {
+                prompt,
+                agent,
+                profile,
+                ..
+            } => {
                 assert_eq!(prompt, "fix the bug");
                 assert_eq!(agent, "claude");
+                assert_eq!(profile.as_deref(), Some("strict"));
+            }
+            _ => panic!("expected CreateWorker"),
+        }
+    }
+
+    #[test]
+    fn create_worker_backward_compat_no_new_fields() {
+        // Old callers that don't send profile or task_dir should still work
+        let json = r#"{"action":"create_worker","prompt":"test","agent":"claude"}"#;
+        let req: DaemonRequest = serde_json::from_str(json).unwrap();
+        match req {
+            DaemonRequest::CreateWorker {
+                profile, task_dir, ..
+            } => {
+                assert!(profile.is_none());
+                assert!(task_dir.is_none());
+            }
+            _ => panic!("expected CreateWorker"),
+        }
+    }
+
+    #[test]
+    fn create_worker_with_task_dir() {
+        let payload = TaskDirPayload {
+            task_md: Some("# Task\nDo the thing.".into()),
+            context_md: None,
+            plan_md: Some("# Plan\n1. Step one".into()),
+        };
+        let req = DaemonRequest::CreateWorker {
+            prompt: "test".into(),
+            agent: "claude".into(),
+            repo: None,
+            start_point: None,
+            workspace: None,
+            profile: None,
+            task_dir: Some(payload),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let restored: DaemonRequest = serde_json::from_str(&json).unwrap();
+        match restored {
+            DaemonRequest::CreateWorker { task_dir, .. } => {
+                let td = task_dir.unwrap();
+                assert!(td.task_md.as_ref().unwrap().contains("Do the thing"));
+                assert!(td.context_md.is_none());
+                assert!(td.plan_md.as_ref().unwrap().contains("Step one"));
             }
             _ => panic!("expected CreateWorker"),
         }
@@ -226,7 +298,10 @@ mod tests {
     fn daemon_request_list_workers() {
         let json = r#"{"action":"list_workers"}"#;
         let req: DaemonRequest = serde_json::from_str(json).unwrap();
-        assert!(matches!(req, DaemonRequest::ListWorkers { workspace: None }));
+        assert!(matches!(
+            req,
+            DaemonRequest::ListWorkers { workspace: None }
+        ));
     }
 
     #[test]
@@ -495,7 +570,9 @@ mod tests {
         let json = r#"{"action":"create_worker","prompt":"test"}"#;
         let req: DaemonRequest = serde_json::from_str(json).unwrap();
         match req {
-            DaemonRequest::CreateWorker { agent, workspace, .. } => {
+            DaemonRequest::CreateWorker {
+                agent, workspace, ..
+            } => {
                 assert_eq!(agent, "claude");
                 assert!(workspace.is_none()); // defaults to None
             }

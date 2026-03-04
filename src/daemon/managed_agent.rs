@@ -228,8 +228,8 @@ fn translate_claude_event(event: &apiari_claude_sdk::Event) -> Option<AgentEvent
                     }
                     AssembledEvent::ContentBlockComplete { block, .. } => match block {
                         ContentBlock::ToolUse { name, input, .. } => {
-                            let input_str = serde_json::to_string(input)
-                                .unwrap_or_else(|_| input.to_string());
+                            let input_str =
+                                serde_json::to_string(input).unwrap_or_else(|_| input.to_string());
                             return Some(AgentEventWire::ToolUse {
                                 tool: name.clone(),
                                 input: input_str,
@@ -439,17 +439,17 @@ fn translate_codex_event(event: &apiari_codex_sdk::Event) -> Option<AgentEventWi
         }
         | Event::ItemUpdated {
             item: Item::AgentMessage { text, .. },
-        } => text.as_ref().map(|t| AgentEventWire::TextDelta {
-            text: t.clone(),
-        }),
+        } => text
+            .as_ref()
+            .map(|t| AgentEventWire::TextDelta { text: t.clone() }),
         Event::ItemCompleted {
             item: Item::Reasoning { text, .. },
         }
         | Event::ItemUpdated {
             item: Item::Reasoning { text, .. },
-        } => text.as_ref().map(|t| AgentEventWire::ThinkingDelta {
-            text: t.clone(),
-        }),
+        } => text
+            .as_ref()
+            .map(|t| AgentEventWire::ThinkingDelta { text: t.clone() }),
         Event::ItemCompleted {
             item:
                 Item::CommandExecution {
@@ -473,10 +473,7 @@ fn translate_codex_event(event: &apiari_codex_sdk::Event) -> Option<AgentEventWi
         Event::ItemCompleted {
             item: Item::FileChange { changes, .. },
         } => {
-            let files: Vec<String> = changes
-                .iter()
-                .filter_map(|c| c.file_path.clone())
-                .collect();
+            let files: Vec<String> = changes.iter().filter_map(|c| c.file_path.clone()).collect();
             Some(AgentEventWire::ToolUse {
                 tool: "FileChange".into(),
                 input: files.join(", "),

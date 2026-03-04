@@ -8,9 +8,8 @@ use std::borrow::Cow;
 /// Each line is indented with 2 spaces to match the conversation layout.
 pub fn render_markdown(text: &str) -> Vec<Line<'static>> {
     let mut renderer = MarkdownRenderer::new();
-    let opts = Options::ENABLE_TABLES
-        | Options::ENABLE_STRIKETHROUGH
-        | Options::ENABLE_HEADING_ATTRIBUTES;
+    let opts =
+        Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_HEADING_ATTRIBUTES;
     let parser = Parser::new_ext(text, opts);
 
     for event in parser {
@@ -108,9 +107,7 @@ impl MarkdownRenderer {
                     pulldown_cmark::HeadingLevel::H3 => Style::default()
                         .fg(theme::FROST)
                         .add_modifier(Modifier::BOLD),
-                    _ => Style::default()
-                        .fg(theme::ICE)
-                        .add_modifier(Modifier::BOLD),
+                    _ => Style::default().fg(theme::ICE).add_modifier(Modifier::BOLD),
                 };
                 self.style_stack.push(style);
             }
@@ -225,10 +222,8 @@ impl MarkdownRenderer {
                     // Text was already accumulated in spans with HONEY style;
                     // append the URL in muted parens
                     if !url.is_empty() {
-                        self.spans.push(Span::styled(
-                            format!(" ({})", url),
-                            theme::muted(),
-                        ));
+                        self.spans
+                            .push(Span::styled(format!(" ({})", url), theme::muted()));
                     }
                 }
             }
@@ -247,8 +242,7 @@ impl MarkdownRenderer {
         if self.in_code_block {
             // pulldown-cmark gives us the entire code block content as one text event
             // but it may also come in multiple events, so accumulate
-            self.code_lines
-                .extend(text.lines().map(String::from));
+            self.code_lines.extend(text.lines().map(String::from));
             // If the text ends with a newline and the last "line" is empty, drop it
             // (pulldown-cmark includes trailing newline)
             if text.ends_with('\n') && self.code_lines.last().is_some_and(|l| l.is_empty()) {
@@ -335,7 +329,10 @@ impl MarkdownRenderer {
 
         // Top border with optional language label
         let top = if let Some(ref lang) = lang_label {
-            format!("{}\u{250c}\u{2500}\u{2500} {} \u{2500}\u{2500}", INDENT, lang)
+            format!(
+                "{}\u{250c}\u{2500}\u{2500} {} \u{2500}\u{2500}",
+                INDENT, lang
+            )
         } else {
             format!("{}\u{250c}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}", INDENT)
         };
@@ -518,9 +515,9 @@ mod tests {
     fn bold_text() {
         let lines = render_markdown("**bold**");
         let has_bold = lines.iter().any(|l| {
-            l.spans
-                .iter()
-                .any(|s| s.style.add_modifier.contains(Modifier::BOLD) && s.content.contains("bold"))
+            l.spans.iter().any(|s| {
+                s.style.add_modifier.contains(Modifier::BOLD) && s.content.contains("bold")
+            })
         });
         assert!(has_bold, "Expected bold styled span");
     }
@@ -595,11 +592,9 @@ mod tests {
     #[test]
     fn horizontal_rule() {
         let lines = render_markdown("---");
-        let has_rule = lines.iter().any(|l| {
-            l.spans
-                .iter()
-                .any(|s| s.content.contains("\u{2500}"))
-        });
+        let has_rule = lines
+            .iter()
+            .any(|l| l.spans.iter().any(|s| s.content.contains("\u{2500}")));
         assert!(has_rule, "Expected horizontal rule");
     }
 

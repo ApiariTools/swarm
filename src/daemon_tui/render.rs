@@ -21,7 +21,9 @@ const SIDEBAR_COLORS: &[Color] = &[
     Color::Rgb(100, 180, 60), // olive
 ];
 
-const SPINNER: &[char] = &['\u{2807}', '\u{280b}', '\u{2819}', '\u{2838}', '\u{2834}', '\u{2826}', '\u{2827}', '\u{280f}'];
+const SPINNER: &[char] = &[
+    '\u{2807}', '\u{280b}', '\u{2819}', '\u{2838}', '\u{2834}', '\u{2826}', '\u{2827}', '\u{280f}',
+];
 
 const SIDEBAR_WIDTH: u16 = 38;
 
@@ -38,10 +40,7 @@ pub fn draw(frame: &mut Frame, app: &mut DaemonTuiApp) {
     // Main horizontal split: sidebar | conversation
     let h_chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Length(SIDEBAR_WIDTH),
-            Constraint::Min(1),
-        ])
+        .constraints([Constraint::Length(SIDEBAR_WIDTH), Constraint::Min(1)])
         .split(area);
 
     draw_sidebar(frame, h_chunks[0], app);
@@ -105,12 +104,7 @@ fn draw_sidebar_header(frame: &mut Frame, area: Rect, app: &DaemonTuiApp, is_foc
         .unwrap_or_else(|| "swarm".to_string());
 
     let (prefix, bg, fg, modifier) = if is_focused {
-        (
-            " \u{25b8} ",
-            theme::FOCUS_BG,
-            theme::HONEY,
-            Modifier::BOLD,
-        )
+        (" \u{25b8} ", theme::FOCUS_BG, theme::HONEY, Modifier::BOLD)
     } else {
         (" ", theme::COMB, theme::SMOKE, Modifier::empty())
     };
@@ -122,18 +116,16 @@ fn draw_sidebar_header(frame: &mut Frame, area: Rect, app: &DaemonTuiApp, is_foc
     let padding = (area.width as usize).saturating_sub(label_len + dir_str.len());
 
     let line1 = Line::from(vec![
-        Span::styled(
-            label,
-            Style::default()
-                .fg(fg)
-                .bg(bg)
-                .add_modifier(modifier),
-        ),
+        Span::styled(label, Style::default().fg(fg).bg(bg).add_modifier(modifier)),
         Span::styled(" ".repeat(padding), Style::default().bg(bg)),
         Span::styled(
             dir_str,
             Style::default()
-                .fg(if is_focused { theme::HONEY } else { theme::SMOKE })
+                .fg(if is_focused {
+                    theme::HONEY
+                } else {
+                    theme::SMOKE
+                })
                 .bg(bg)
                 .add_modifier(modifier),
         ),
@@ -412,10 +404,20 @@ fn draw_conversation_panel(frame: &mut Frame, area: Rect, app: &mut DaemonTuiApp
 
     if app.workers.is_empty() {
         // Draw unfocused header even with no workers
-        draw_conversation_header(frame, Rect::new(area.x, area.y, area.width, 1), None, is_focused, "");
-        let rest = Rect::new(area.x, area.y + 1, area.width, area.height.saturating_sub(1));
-        let msg = Paragraph::new("  No workers. Press n to create one.")
-            .style(theme::muted());
+        draw_conversation_header(
+            frame,
+            Rect::new(area.x, area.y, area.width, 1),
+            None,
+            is_focused,
+            "",
+        );
+        let rest = Rect::new(
+            area.x,
+            area.y + 1,
+            area.width,
+            area.height.saturating_sub(1),
+        );
+        let msg = Paragraph::new("  No workers. Press n to create one.").style(theme::muted());
         frame.render_widget(msg, rest);
         return;
     }
@@ -429,10 +431,10 @@ fn draw_conversation_panel(frame: &mut Frame, area: Rect, app: &mut DaemonTuiApp
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1), // header bar
-            Constraint::Min(1),    // conversation
+            Constraint::Length(1),                              // header bar
+            Constraint::Min(1),                                 // conversation
             Constraint::Length(if show_input { 3 } else { 0 }), // input
-            Constraint::Length(1), // status bar
+            Constraint::Length(1),                              // status bar
         ])
         .split(area);
 
@@ -457,12 +459,17 @@ fn draw_conversation_panel(frame: &mut Frame, area: Rect, app: &mut DaemonTuiApp
     } else {
         String::new()
     };
-    draw_conversation_header(frame, chunks[0], selected_worker.as_ref(), is_focused, &scroll_pos);
+    draw_conversation_header(
+        frame,
+        chunks[0],
+        selected_worker.as_ref(),
+        is_focused,
+        &scroll_pos,
+    );
 
     // Conversation area
     {
-        let block = Block::default()
-            .borders(Borders::NONE);
+        let block = Block::default().borders(Borders::NONE);
         let inner = block.inner(chunks[1]);
         app.viewport_height = inner.height.saturating_sub(1);
 
@@ -496,12 +503,7 @@ fn draw_conversation_header(
     scroll_pos: &str,
 ) {
     let (prefix, bg, fg, modifier) = if is_focused {
-        (
-            " \u{25b8} ",
-            theme::FOCUS_BG,
-            theme::HONEY,
-            Modifier::BOLD,
-        )
+        (" \u{25b8} ", theme::FOCUS_BG, theme::HONEY, Modifier::BOLD)
     } else {
         ("   ", theme::COMB, theme::SMOKE, Modifier::empty())
     };
@@ -551,10 +553,7 @@ fn draw_conversation_entries(
     for (i, entry) in conv.entries.iter().enumerate() {
         // In filter mode, skip noise tool calls (unless they errored)
         if conv.filter_noise {
-            if let ConversationEntry::ToolCall {
-                tool, is_error, ..
-            } = entry
-            {
+            if let ConversationEntry::ToolCall { tool, is_error, .. } = entry {
                 if is_noise_tool(tool) && !*is_error {
                     entry_line_map.push((lines.len() as u32, 0));
                     continue;
@@ -583,8 +582,8 @@ fn draw_conversation_entries(
                 }
             }
             ConversationEntry::AssistantText { text } => {
-                let prev_was_assistant = i > 0
-                    && matches!(conv.entries[i - 1], ConversationEntry::AssistantText { .. });
+                let prev_was_assistant =
+                    i > 0 && matches!(conv.entries[i - 1], ConversationEntry::AssistantText { .. });
                 if !prev_was_assistant {
                     lines.push(Line::from(""));
                     lines.push(Line::from(Span::styled(
@@ -611,18 +610,11 @@ fn draw_conversation_entries(
                 };
 
                 // Categorize tools for visual hierarchy
-                let is_mutation = matches!(
-                    tool.as_str(),
-                    "Write" | "Edit" | "NotebookEdit"
-                );
-                let is_execution = matches!(
-                    tool.as_str(),
-                    "Bash" | "Task" | "Skill"
-                );
+                let is_mutation = matches!(tool.as_str(), "Write" | "Edit" | "NotebookEdit");
+                let is_execution = matches!(tool.as_str(), "Bash" | "Task" | "Skill");
                 let is_noise = matches!(
                     tool.as_str(),
-                    "Read" | "Glob" | "Grep" | "WebFetch" | "WebSearch"
-                        | "TodoRead" | "TodoWrite"
+                    "Read" | "Glob" | "Grep" | "WebFetch" | "WebSearch" | "TodoRead" | "TodoWrite"
                 );
 
                 // #1: Color-code tool names by category
@@ -899,16 +891,17 @@ fn draw_conversation_status_bar(
             WorkerPhase::Creating | WorkerPhase::Starting => {
                 (format!("{} starting...", spin), theme::status_running())
             }
-            WorkerPhase::Running => {
-                (format!("{} running...", spin), theme::status_running())
-            }
+            WorkerPhase::Running => (format!("{} running...", spin), theme::status_running()),
             WorkerPhase::Waiting => {
                 let dot = if (app.tick_count / 8).is_multiple_of(2) {
                     "\u{25cb}"
                 } else {
                     "\u{25cf}"
                 };
-                (format!("{} waiting", dot), Style::default().fg(theme::HONEY))
+                (
+                    format!("{} waiting", dot),
+                    Style::default().fg(theme::HONEY),
+                )
             }
             WorkerPhase::Completed => ("\u{25cf} done".to_string(), theme::status_done()),
             WorkerPhase::Failed => ("\u{2717} failed".to_string(), theme::error()),
@@ -917,7 +910,9 @@ fn draw_conversation_status_bar(
         ("no worker selected".to_string(), theme::muted())
     };
 
-    let conv_info = app.selected_worker().and_then(|w| app.conversations.get(&w.id));
+    let conv_info = app
+        .selected_worker()
+        .and_then(|w| app.conversations.get(&w.id));
     let right_info = if let Some(conv) = conv_info {
         let cost_str = conv
             .cost_usd
@@ -931,9 +926,7 @@ fn draw_conversation_status_bar(
         String::new()
     };
 
-    let is_filtered = app
-        .selected_conversation()
-        .is_some_and(|c| c.filter_noise);
+    let is_filtered = app.selected_conversation().is_some_and(|c| c.filter_noise);
 
     let hints = if app.focus == Panel::Conversation {
         if matches!(
@@ -1121,10 +1114,7 @@ fn draw_create_prompt_overlay(frame: &mut Frame, area: Rect, app: &DaemonTuiApp)
     let input_area = Rect::new(inner.x, inner.y, inner.width, input_height);
 
     let text = Text::from(styled_lines);
-    frame.render_widget(
-        Paragraph::new(text).wrap(Wrap { trim: false }),
-        input_area,
-    );
+    frame.render_widget(Paragraph::new(text).wrap(Wrap { trim: false }), input_area);
 
     let hint = Line::from(vec![
         Span::styled("\u{21b5}", theme::key_hint()),
@@ -1284,10 +1274,7 @@ fn draw_modifier_select_overlay(frame: &mut Frame, area: Rect, app: &DaemonTuiAp
                 Span::styled(format!("{} ", checkbox), checkbox_style),
                 Span::styled(modifier.label(), label_style),
             ]);
-            frame.render_widget(
-                Paragraph::new(line),
-                Rect::new(inner.x, y, inner.width, 1),
-            );
+            frame.render_widget(Paragraph::new(line), Rect::new(inner.x, y, inner.width, 1));
         }
     }
 
@@ -1341,8 +1328,7 @@ fn draw_input_overlay(frame: &mut Frame, area: Rect, app: &DaemonTuiApp) {
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
-    let input = Paragraph::new(format!(" > {}", app.input_buffer))
-        .style(theme::text());
+    let input = Paragraph::new(format!(" > {}", app.input_buffer)).style(theme::text());
     frame.render_widget(input, Rect::new(inner.x, inner.y + 1, inner.width, 1));
 
     frame.set_cursor_position((inner.x + 3 + app.input_cursor as u16, inner.y + 1));
@@ -1361,10 +1347,7 @@ fn draw_pr_detail_overlay(frame: &mut Frame, area: Rect, app: &DaemonTuiApp) {
     frame.render_widget(Clear, popup);
 
     let block = Block::default()
-        .title(Span::styled(
-            format!(" PR #{} ", pr.number),
-            theme::title(),
-        ))
+        .title(Span::styled(format!(" PR #{} ", pr.number), theme::title()))
         .borders(Borders::ALL)
         .border_style(theme::border_active())
         .style(Style::default().bg(theme::COMB));
@@ -1407,7 +1390,12 @@ fn draw_pr_detail_overlay(frame: &mut Frame, area: Rect, app: &DaemonTuiApp) {
     ];
 
     let text = Paragraph::new(lines).wrap(Wrap { trim: false });
-    let content_area = Rect::new(inner.x, inner.y + 1, inner.width, inner.height.saturating_sub(1));
+    let content_area = Rect::new(
+        inner.x,
+        inner.y + 1,
+        inner.width,
+        inner.height.saturating_sub(1),
+    );
     frame.render_widget(text, content_area);
 }
 

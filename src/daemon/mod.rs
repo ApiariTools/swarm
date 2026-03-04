@@ -4,16 +4,14 @@ pub mod protocol;
 pub mod socket_server;
 
 use crate::core::agent::AgentKind;
-use crate::core::{git, ipc, state};
-use crate::core::state::{SwarmState, WorkerPhase, WorktreeState};
-use crate::swarm_log;
 use crate::core::state::PrInfo;
+use crate::core::state::{SwarmState, WorkerPhase, WorktreeState};
+use crate::core::{git, ipc, state};
+use crate::swarm_log;
 use agent_supervisor::SupervisorEvent;
 use chrono::Local;
 use color_eyre::Result;
-use protocol::{
-    DaemonRequest, DaemonResponse, WorkerInfo, WorkspaceInfo,
-};
+use protocol::{DaemonRequest, DaemonResponse, WorkerInfo, WorkspaceInfo};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tokio::sync::{broadcast, mpsc};
@@ -132,11 +130,7 @@ impl ManagedWorker {
 // ── Daemon lifecycle ─────────────────────────────────────
 
 /// Start the swarm daemon.
-pub async fn start(
-    work_dir: PathBuf,
-    foreground: bool,
-    tcp_bind: Option<String>,
-) -> Result<()> {
+pub async fn start(work_dir: PathBuf, foreground: bool, tcp_bind: Option<String>) -> Result<()> {
     // Check if already running (global PID)
     if let Some(pid) = read_global_pid() {
         if is_process_alive(pid) {
@@ -188,18 +182,16 @@ pub fn stop(_work_dir: &Path) -> Result<()> {
         }
         Some(_) => {
             remove_pid();
-            Err(color_eyre::eyre::eyre!("daemon not running (stale PID file removed)"))
+            Err(color_eyre::eyre::eyre!(
+                "daemon not running (stale PID file removed)"
+            ))
         }
         None => Err(color_eyre::eyre::eyre!("daemon not running")),
     }
 }
 
 /// Restart the daemon.
-pub async fn restart(
-    work_dir: PathBuf,
-    foreground: bool,
-    tcp_bind: Option<String>,
-) -> Result<()> {
+pub async fn restart(work_dir: PathBuf, foreground: bool, tcp_bind: Option<String>) -> Result<()> {
     let _ = stop(&work_dir); // Ignore errors if not running
     start(work_dir, foreground, tcp_bind).await
 }
@@ -209,10 +201,7 @@ pub fn status(_work_dir: &Path) -> Result<()> {
     match read_global_pid() {
         Some(pid) if is_process_alive(pid) => {
             println!("daemon running (pid {})", pid);
-            println!(
-                "socket: {}",
-                ipc::global_socket_path().display()
-            );
+            println!("socket: {}", ipc::global_socket_path().display());
             Ok(())
         }
         Some(_) => {
@@ -230,9 +219,7 @@ pub fn status(_work_dir: &Path) -> Result<()> {
 /// Get the current size of a workspace's inbox.jsonl (for seeking to end on startup).
 fn inbox_file_size(ws_path: &Path) -> u64 {
     let inbox_path = ws_path.join(".swarm").join("inbox.jsonl");
-    std::fs::metadata(&inbox_path)
-        .map(|m| m.len())
-        .unwrap_or(0)
+    std::fs::metadata(&inbox_path).map(|m| m.len()).unwrap_or(0)
 }
 
 // ── Workspace registration ───────────────────────────────
@@ -249,11 +236,10 @@ async fn register_workspace(
     }
 
     let bg_canonical = canonical.clone();
-    let repos = tokio::task::spawn_blocking(move || {
-        git::detect_repos(&bg_canonical).unwrap_or_default()
-    })
-    .await
-    .unwrap_or_default();
+    let repos =
+        tokio::task::spawn_blocking(move || git::detect_repos(&bg_canonical).unwrap_or_default())
+            .await
+            .unwrap_or_default();
 
     // Load existing workers from state.json
     let mut workers = HashMap::new();
@@ -332,10 +318,8 @@ async fn run_daemon(
     eprintln!("[swarm] Daemon starting (pid {})", std::process::id());
 
     // Set up signal handlers
-    let mut sigterm =
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-    let mut sigint =
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
 
     // Event broadcast channel for subscribers — carries full DaemonResponse
     // so both AgentEvent and StateChanged can be pushed to subscribers.
@@ -376,14 +360,12 @@ async fn run_daemon(
         if let Some(ref wd) = initial_work_dir {
             let wd = wd.clone();
             Some(tokio::task::spawn(async move {
-                let canonical =
-                    std::fs::canonicalize(&wd).unwrap_or_else(|_| wd.to_path_buf());
+                let canonical = std::fs::canonicalize(&wd).unwrap_or_else(|_| wd.to_path_buf());
                 let bg = canonical.clone();
-                let repos = tokio::task::spawn_blocking(move || {
-                    git::detect_repos(&bg).unwrap_or_default()
-                })
-                .await
-                .unwrap_or_default();
+                let repos =
+                    tokio::task::spawn_blocking(move || git::detect_repos(&bg).unwrap_or_default())
+                        .await
+                        .unwrap_or_default();
                 let mut workers = HashMap::new();
                 if let Ok(Some(existing_state)) = state::load_state(&canonical) {
                     for wt in &existing_state.worktrees {
@@ -439,7 +421,34 @@ async fn run_daemon(
             && let Some(task) = pending_register.take()
             && let Ok(Some((path, ws))) = task.await
         {
-            workspaces.insert(path, ws);
+            workspaces.insert(path.clone(), ws);
+
+            // Re-spawn agent processes for active workers restored from state.json
+            if let Some(ws) = workspaces.get_mut(&path) {
+                let active_ids: Vec<String> = ws
+                    .workers
+                    .values()
+                    .filter(|w| w.phase.is_active())
+                    .map(|w| w.id.clone())
+                    .collect();
+
+                for id in active_ids {
+                    let worker = ws.workers.get(&id).unwrap();
+                    let msg_tx = spawn_worker_agent(
+                        worker.id.clone(),
+                        worker.kind.clone(),
+                        worker.prompt.clone(),
+                        worker.worktree_path.clone(),
+                        ws.path.clone(),
+                        worker.session_id.clone(),
+                        worker.restart_count,
+                        event_tx.clone(),
+                        supervisor_tx.clone(),
+                    );
+                    ws.workers.get_mut(&id).unwrap().message_tx = Some(msg_tx);
+                    eprintln!("[swarm] Re-spawned agent for worker {}", id);
+                }
+            }
         }
 
         // Check if background PR poll completed
@@ -448,7 +457,7 @@ async fn run_daemon(
             && let Some(task) = pending_pr_poll.take()
             && let Ok(results) = task.await
         {
-            apply_pr_poll_results(results, &mut workspaces, &mut state_dirty);
+            apply_pr_poll_results(results, &mut workspaces, &mut state_dirty, &event_tx);
         }
 
         tokio::select! {
@@ -628,6 +637,162 @@ async fn run_daemon(
     Ok(())
 }
 
+// ── Agent spawning ───────────────────────────────────────
+
+/// Spawn (or re-spawn) a worker agent process and its event loop.
+///
+/// Returns the `mpsc::UnboundedSender<String>` used to send follow-up messages.
+/// The agent task and its panic-watcher are spawned as background tokio tasks.
+#[allow(clippy::too_many_arguments)]
+fn spawn_worker_agent(
+    worker_id: String,
+    kind: AgentKind,
+    prompt: String,
+    worktree_path: PathBuf,
+    work_dir: PathBuf,
+    resume_session_id: Option<String>,
+    initial_restart_count: u32,
+    event_tx: broadcast::Sender<DaemonResponse>,
+    supervisor_tx: mpsc::UnboundedSender<SupervisorEvent>,
+) -> mpsc::UnboundedSender<String> {
+    let (msg_tx, mut msg_rx) = mpsc::unbounded_channel::<String>();
+
+    let wt_id = worker_id;
+    let panic_wt_id = wt_id.clone();
+    let wt_path = worktree_path;
+    let wd = work_dir;
+    let ev_tx = event_tx;
+    let sv_tx = supervisor_tx;
+
+    let join_handle = tokio::spawn(async move {
+        swarm_log!("[daemon] Agent {} — spawning process...", wt_id);
+        let handle_result = agent_supervisor::spawn_agent(agent_supervisor::SpawnAgentOpts {
+            worktree_id: &wt_id,
+            kind: kind.clone(),
+            prompt: &prompt,
+            worktree_path: &wt_path,
+            work_dir: &wd,
+            resume_session_id,
+            dangerously_skip_permissions: true,
+            event_tx: ev_tx.clone(),
+        })
+        .await;
+
+        let mut handle = match handle_result {
+            Ok(h) => h,
+            Err(e) => {
+                swarm_log!("[daemon] Failed to spawn agent {}: {}", wt_id, e);
+                let _ = sv_tx.send(SupervisorEvent::PhaseChanged {
+                    worktree_id: wt_id,
+                    phase: WorkerPhase::Failed,
+                    session_id: None,
+                });
+                return;
+            }
+        };
+
+        handle.logger.log_start(&prompt, None);
+        swarm_log!(
+            "[daemon] Agent {} spawned successfully (kind={:?})",
+            wt_id,
+            kind
+        );
+
+        let _ = sv_tx.send(SupervisorEvent::PhaseChanged {
+            worktree_id: wt_id.clone(),
+            phase: WorkerPhase::Running,
+            session_id: None,
+        });
+
+        // Initial event loop
+        swarm_log!("[daemon] Agent {} — entering event loop", wt_id);
+        let mut restart_count = initial_restart_count;
+        let (phase, _session_id) = agent_supervisor::agent_event_loop(
+            &mut handle,
+            agent_supervisor::EventLoopOpts {
+                supervisor_tx: &sv_tx,
+                work_dir: &wd,
+                restart_count: &mut restart_count,
+                kind: kind.clone(),
+                prompt: &prompt,
+                worktree_path: &wt_path,
+                dangerously_skip_permissions: true,
+            },
+        )
+        .await;
+
+        swarm_log!(
+            "[daemon] Agent {} — event loop exited with phase {:?}",
+            wt_id,
+            phase
+        );
+
+        // If the agent is waiting, listen for follow-up messages
+        if phase == WorkerPhase::Waiting {
+            loop {
+                let message = match msg_rx.recv().await {
+                    Some(msg) => msg,
+                    None => break,
+                };
+
+                handle.logger.log_user_message(&message);
+                swarm_log!(
+                    "[daemon] Sending follow-up message to {} ({} bytes)",
+                    wt_id,
+                    message.len()
+                );
+
+                if let Err(e) = handle.agent.send_message(&message).await {
+                    swarm_log!("[daemon] Failed to send message to {}: {}", wt_id, e);
+                    let _ = sv_tx.send(SupervisorEvent::PhaseChanged {
+                        worktree_id: wt_id.clone(),
+                        phase: WorkerPhase::Failed,
+                        session_id: handle.agent.session_id().map(String::from),
+                    });
+                    break;
+                }
+
+                let _ = sv_tx.send(SupervisorEvent::PhaseChanged {
+                    worktree_id: wt_id.clone(),
+                    phase: WorkerPhase::Running,
+                    session_id: handle.agent.session_id().map(String::from),
+                });
+
+                let (new_phase, _) = agent_supervisor::agent_event_loop(
+                    &mut handle,
+                    agent_supervisor::EventLoopOpts {
+                        supervisor_tx: &sv_tx,
+                        work_dir: &wd,
+                        restart_count: &mut restart_count,
+                        kind: kind.clone(),
+                        prompt: &prompt,
+                        worktree_path: &wt_path,
+                        dangerously_skip_permissions: true,
+                    },
+                )
+                .await;
+
+                if new_phase != WorkerPhase::Waiting {
+                    break;
+                }
+            }
+        }
+    });
+
+    // Log if the agent task panics
+    tokio::spawn(async move {
+        if let Err(e) = join_handle.await {
+            swarm_log!(
+                "[daemon] PANIC: Agent {} task panicked: {:?}",
+                panic_wt_id,
+                e
+            );
+        }
+    });
+
+    msg_tx
+}
+
 // ── Request handling ─────────────────────────────────────
 
 /// Handle a daemon request.
@@ -710,6 +875,8 @@ async fn handle_request(
             repo,
             start_point,
             workspace,
+            profile,
+            task_dir,
         } => {
             let kind = match AgentKind::from_str(&agent) {
                 Some(k) => k,
@@ -753,6 +920,14 @@ async fn handle_request(
                 }
             };
 
+            // Fetch latest from origin so worktrees start from up-to-date refs
+            if let Err(e) = git::fetch_origin(&repo_path) {
+                swarm_log!("[daemon] Warning: git fetch origin failed: {e}");
+            }
+
+            // Default to origin/main when no explicit start_point
+            let start_point = start_point.or_else(|| Some("origin/main".to_string()));
+
             // Generate IDs (short UUID suffix, e.g. "hive-a1b2")
             let short_id = &uuid::Uuid::new_v4().to_string()[..4];
             let repo_name = git::repo_name(&repo_path);
@@ -781,6 +956,30 @@ async fn handle_request(
                 return;
             }
 
+            // Inject profile into worktree
+            let profile_slug = profile.as_deref().unwrap_or("default");
+            let profile_content = crate::core::profile::load_profile(&work_dir, profile_slug);
+            if let Err(e) =
+                crate::core::profile::inject_profile(&worktree_path, &kind, &profile_content)
+            {
+                swarm_log!("[daemon] Warning: failed to inject profile: {e}");
+            }
+
+            // Seed .task/ directory if artifacts provided
+            if let Some(ref payload) = task_dir {
+                let task_path = worktree_path.join(".task");
+                let _ = std::fs::create_dir_all(&task_path);
+                if let Some(ref c) = payload.task_md {
+                    let _ = std::fs::write(task_path.join("TASK.md"), c);
+                }
+                if let Some(ref c) = payload.context_md {
+                    let _ = std::fs::write(task_path.join("CONTEXT.md"), c);
+                }
+                if let Some(ref c) = payload.plan_md {
+                    let _ = std::fs::write(task_path.join("PLAN.md"), c);
+                }
+            }
+
             // Register the worker
             let worker = ManagedWorker {
                 id: worktree_id.clone(),
@@ -801,154 +1000,20 @@ async fn handle_request(
             *state_dirty = true;
 
             // Spawn the agent in a background task
-            let wt_id = worktree_id.clone();
-            let wt_path = worktree_path.clone();
-            let wd = work_dir.clone();
-            let ev_tx = event_tx.clone();
-            let sv_tx = supervisor_tx.clone();
-            let agent_prompt = prompt.clone();
-            let agent_kind = kind.clone();
-
-            // Create a message channel for follow-ups
-            let (msg_tx, mut msg_rx) = mpsc::unbounded_channel::<String>();
-            if let Some(w) = ws.workers.get_mut(&wt_id) {
+            let msg_tx = spawn_worker_agent(
+                worktree_id.clone(),
+                kind.clone(),
+                prompt.clone(),
+                worktree_path.clone(),
+                work_dir.clone(),
+                None, // new worker, no session to resume
+                0,
+                event_tx.clone(),
+                supervisor_tx.clone(),
+            );
+            if let Some(w) = ws.workers.get_mut(&worktree_id) {
                 w.message_tx = Some(msg_tx);
             }
-
-            let join_handle = tokio::spawn(async move {
-                // Spawn the initial agent
-                swarm_log!("[daemon] Agent {} — spawning process...", wt_id);
-                let handle_result = agent_supervisor::spawn_agent(
-                    agent_supervisor::SpawnAgentOpts {
-                        worktree_id: &wt_id,
-                        kind: agent_kind.clone(),
-                        prompt: &agent_prompt,
-                        worktree_path: &wt_path,
-                        work_dir: &wd,
-                        resume_session_id: None,
-                        dangerously_skip_permissions: true,
-                        event_tx: ev_tx.clone(),
-                    },
-                )
-                .await;
-
-                let mut handle = match handle_result {
-                    Ok(h) => h,
-                    Err(e) => {
-                        swarm_log!("[daemon] Failed to spawn agent {}: {}", wt_id, e);
-                        let _ = sv_tx.send(SupervisorEvent::PhaseChanged {
-                            worktree_id: wt_id,
-                            phase: WorkerPhase::Failed,
-                            session_id: None,
-                        });
-                        return;
-                    }
-                };
-
-                // Log the Start event so events.jsonl is created immediately
-                handle.logger.log_start(&agent_prompt, None);
-                swarm_log!(
-                    "[daemon] Agent {} spawned successfully (kind={:?})",
-                    wt_id,
-                    agent_kind
-                );
-
-                // Signal that we're running
-                let _ = sv_tx.send(SupervisorEvent::PhaseChanged {
-                    worktree_id: wt_id.clone(),
-                    phase: WorkerPhase::Running,
-                    session_id: None,
-                });
-
-                // Initial event loop
-                swarm_log!("[daemon] Agent {} — entering event loop", wt_id);
-                let mut restart_count = 0u32;
-                let (phase, _session_id) = agent_supervisor::agent_event_loop(
-                    &mut handle,
-                    agent_supervisor::EventLoopOpts {
-                        supervisor_tx: &sv_tx,
-                        work_dir: &wd,
-                        restart_count: &mut restart_count,
-                        kind: agent_kind.clone(),
-                        prompt: &agent_prompt,
-                        worktree_path: &wt_path,
-                        dangerously_skip_permissions: true,
-                    },
-                )
-                .await;
-
-                swarm_log!(
-                    "[daemon] Agent {} — event loop exited with phase {:?}",
-                    wt_id,
-                    phase
-                );
-
-                // If the agent is waiting, listen for follow-up messages
-                if phase == WorkerPhase::Waiting {
-                    loop {
-                        let message = match msg_rx.recv().await {
-                            Some(msg) => msg,
-                            None => break,
-                        };
-
-                        handle.logger.log_user_message(&message);
-                        swarm_log!(
-                            "[daemon] Sending follow-up message to {} ({} bytes)",
-                            wt_id,
-                            message.len()
-                        );
-
-                        if let Err(e) = handle.agent.send_message(&message).await {
-                            swarm_log!(
-                                "[daemon] Failed to send message to {}: {}",
-                                wt_id,
-                                e
-                            );
-                            let _ = sv_tx.send(SupervisorEvent::PhaseChanged {
-                                worktree_id: wt_id.clone(),
-                                phase: WorkerPhase::Failed,
-                                session_id: handle.agent.session_id().map(String::from),
-                            });
-                            break;
-                        }
-
-                        let _ = sv_tx.send(SupervisorEvent::PhaseChanged {
-                            worktree_id: wt_id.clone(),
-                            phase: WorkerPhase::Running,
-                            session_id: handle.agent.session_id().map(String::from),
-                        });
-
-                        let (new_phase, _) = agent_supervisor::agent_event_loop(
-                            &mut handle,
-                            agent_supervisor::EventLoopOpts {
-                                supervisor_tx: &sv_tx,
-                                work_dir: &wd,
-                                restart_count: &mut restart_count,
-                                kind: agent_kind.clone(),
-                                prompt: &agent_prompt,
-                                worktree_path: &wt_path,
-                                dangerously_skip_permissions: true,
-                            },
-                        )
-                        .await;
-
-                        if new_phase != WorkerPhase::Waiting {
-                            break;
-                        }
-                    }
-                }
-            });
-            // Log if the agent task panics
-            let panic_wt_id = worktree_id.clone();
-            tokio::spawn(async move {
-                if let Err(e) = join_handle.await {
-                    swarm_log!(
-                        "[daemon] PANIC: Agent {} task panicked: {:?}",
-                        panic_wt_id,
-                        e
-                    );
-                }
-            });
 
             // Emit creation event
             let _ = ipc::emit_event(
@@ -1140,7 +1205,6 @@ async fn handle_request(
                 });
             }
         }
-
     }
 }
 
@@ -1169,10 +1233,8 @@ fn resolve_workspace(
             } else if workspaces.is_empty() {
                 Err(color_eyre::eyre::eyre!("no workspaces registered"))
             } else {
-                let paths: Vec<String> = workspaces
-                    .keys()
-                    .map(|p| p.display().to_string())
-                    .collect();
+                let paths: Vec<String> =
+                    workspaces.keys().map(|p| p.display().to_string()).collect();
                 Err(color_eyre::eyre::eyre!(
                     "multiple workspaces registered, specify workspace: {}",
                     paths.join(", ")
@@ -1185,20 +1247,18 @@ fn resolve_workspace(
 /// Resolve a repo path from the detected repos list.
 fn resolve_repo(repos: &[PathBuf], repo_name: Option<&str>) -> Result<PathBuf> {
     match repo_name {
-        Some(name) => {
-            repos
-                .iter()
-                .find(|r| git::repo_name(r) == name)
-                .cloned()
-                .ok_or_else(|| {
-                    let available: Vec<String> = repos.iter().map(|r| git::repo_name(r)).collect();
-                    color_eyre::eyre::eyre!(
-                        "unknown repo '{}' (available: {})",
-                        name,
-                        available.join(", ")
-                    )
-                })
-        }
+        Some(name) => repos
+            .iter()
+            .find(|r| git::repo_name(r) == name)
+            .cloned()
+            .ok_or_else(|| {
+                let available: Vec<String> = repos.iter().map(|r| git::repo_name(r)).collect();
+                color_eyre::eyre::eyre!(
+                    "unknown repo '{}' (available: {})",
+                    name,
+                    available.join(", ")
+                )
+            }),
         None => {
             if repos.len() == 1 {
                 Ok(repos[0].clone())
@@ -1252,7 +1312,11 @@ fn save_daemon_state(work_dir: &Path, workers: &HashMap<String, ManagedWorker>) 
     };
 
     if let Err(e) = state::save_state(work_dir, &state) {
-        swarm_log!("[daemon] Failed to save state for {}: {}", work_dir.display(), e);
+        swarm_log!(
+            "[daemon] Failed to save state for {}: {}",
+            work_dir.display(),
+            e
+        );
     }
 }
 
@@ -1304,8 +1368,16 @@ fn try_gh_pr_view(worktree_path: &Path) -> Option<PrInfo> {
 fn try_gh_pr_list(repo_path: &Path, branch: &str) -> Option<PrInfo> {
     let output = std::process::Command::new("gh")
         .args([
-            "pr", "list", "--head", branch, "--state", "all", "--json",
-            "number,title,state,url", "--limit", "1",
+            "pr",
+            "list",
+            "--head",
+            branch,
+            "--state",
+            "all",
+            "--json",
+            "number,title,state,url",
+            "--limit",
+            "1",
         ])
         .current_dir(repo_path)
         .output()
@@ -1351,7 +1423,11 @@ fn apply_pr_poll_results(
     results: Vec<PrPollResult>,
     workspaces: &mut HashMap<PathBuf, WorkspaceState>,
     state_dirty: &mut bool,
+    event_tx: &broadcast::Sender<DaemonResponse>,
 ) {
+    // Collect worker IDs to remove after the loop (can't remove while iterating).
+    let mut to_remove: Vec<(PathBuf, String)> = Vec::new();
+
     for result in results {
         if let Some(ws) = workspaces.get_mut(&result.workspace_path)
             && let Some(worker) = ws.workers.get_mut(&result.worker_id)
@@ -1374,8 +1450,42 @@ fn apply_pr_poll_results(
                     },
                 );
             }
+
+            let is_merged = result.pr.state == "MERGED";
             worker.pr = Some(result.pr);
             *state_dirty = true;
+
+            // Auto-close workers whose PR has been merged
+            if is_merged {
+                swarm_log!(
+                    "[daemon] Auto-closing {}: PR #{} merged",
+                    worker.id,
+                    worker.pr.as_ref().unwrap().number
+                );
+                worker.message_tx = None;
+                worker.phase = WorkerPhase::Completed;
+                let _ = git::remove_worktree(&worker.repo_path, &worker.worktree_path);
+                let _ = git::delete_branch(&worker.repo_path, &worker.branch);
+                let _ = ipc::emit_event(
+                    &result.workspace_path,
+                    &ipc::SwarmEvent::WorktreeClosed {
+                        worktree: worker.id.clone(),
+                        timestamp: Local::now(),
+                    },
+                );
+                let _ = event_tx.send(DaemonResponse::StateChanged {
+                    worktree_id: worker.id.clone(),
+                    phase: WorkerPhase::Completed,
+                });
+                to_remove.push((result.workspace_path.clone(), worker.id.clone()));
+            }
+        }
+    }
+
+    // Remove auto-closed workers from their workspaces
+    for (ws_path, worker_id) in to_remove {
+        if let Some(ws) = workspaces.get_mut(&ws_path) {
+            ws.workers.remove(&worker_id);
         }
     }
 }
@@ -1735,9 +1845,15 @@ mod tests {
         }];
 
         let mut state_dirty = false;
-        apply_pr_poll_results(results, &mut workspaces, &mut state_dirty);
+        let (event_tx, _) = broadcast::channel(16);
+        apply_pr_poll_results(results, &mut workspaces, &mut state_dirty, &event_tx);
 
-        let worker = workspaces.get(&ws_path).unwrap().workers.get("w-1").unwrap();
+        let worker = workspaces
+            .get(&ws_path)
+            .unwrap()
+            .workers
+            .get("w-1")
+            .unwrap();
         assert!(worker.pr.is_some());
         assert_eq!(worker.pr.as_ref().unwrap().number, 42);
         assert!(state_dirty);
@@ -1762,7 +1878,8 @@ mod tests {
         }];
 
         let mut state_dirty = false;
-        apply_pr_poll_results(results, &mut workspaces, &mut state_dirty);
+        let (event_tx, _) = broadcast::channel(16);
+        apply_pr_poll_results(results, &mut workspaces, &mut state_dirty, &event_tx);
         assert!(!state_dirty);
     }
 
@@ -1783,8 +1900,50 @@ mod tests {
         }];
 
         let mut state_dirty = false;
-        apply_pr_poll_results(results, &mut workspaces, &mut state_dirty);
+        let (event_tx, _) = broadcast::channel(16);
+        apply_pr_poll_results(results, &mut workspaces, &mut state_dirty, &event_tx);
         assert!(!state_dirty);
+    }
+
+    #[test]
+    fn apply_pr_poll_results_auto_closes_merged_pr() {
+        let mut workspaces = HashMap::new();
+        let ws_path = PathBuf::from("/tmp/ws");
+        let ws = test_workspace("/tmp/ws", vec!["w-1"]);
+        workspaces.insert(ws_path.clone(), ws);
+
+        let results = vec![PrPollResult {
+            worker_id: "w-1".to_string(),
+            workspace_path: ws_path.clone(),
+            pr: PrInfo {
+                number: 42,
+                title: "merged pr".to_string(),
+                state: "MERGED".to_string(),
+                url: "https://github.com/test/repo/pull/42".to_string(),
+            },
+            is_new: false,
+        }];
+
+        let mut state_dirty = false;
+        let (event_tx, mut event_rx) = broadcast::channel(16);
+        apply_pr_poll_results(results, &mut workspaces, &mut state_dirty, &event_tx);
+
+        // Worker should be removed from workspace
+        assert!(workspaces.get(&ws_path).unwrap().workers.is_empty());
+        assert!(state_dirty);
+
+        // Should have broadcast a StateChanged event
+        let event = event_rx.try_recv().unwrap();
+        match event {
+            DaemonResponse::StateChanged {
+                worktree_id,
+                phase,
+            } => {
+                assert_eq!(worktree_id, "w-1");
+                assert_eq!(phase, WorkerPhase::Completed);
+            }
+            other => panic!("expected StateChanged, got {:?}", other),
+        }
     }
 
     #[test]

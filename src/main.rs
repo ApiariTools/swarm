@@ -43,6 +43,12 @@ enum Commands {
         /// Can be specified multiple times: --mod research-first --mod explore-patterns
         #[arg(long = "mod")]
         modifiers: Vec<String>,
+        /// Profile slug from .swarm/profiles/ (default: "default").
+        #[arg(long, default_value = "default")]
+        profile: String,
+        /// Path to JSON file with .task/ artifacts to seed.
+        #[arg(long, value_name = "PATH")]
+        task_dir: Option<String>,
     },
     /// Send a message to a worktree's agent
     Send {
@@ -138,6 +144,8 @@ async fn main() -> Result<()> {
             agent,
             repo,
             modifiers,
+            profile,
+            task_dir,
         }) => {
             cmd_create(
                 work_dir,
@@ -146,6 +154,8 @@ async fn main() -> Result<()> {
                 agent.unwrap_or_else(|| "claude-tui".to_string()),
                 repo,
                 modifiers,
+                profile,
+                task_dir,
             )
             .await
         }
@@ -249,7 +259,9 @@ async fn cmd_debug_spawn(work_dir: std::path::PathBuf) -> Result<()> {
     eprintln!("[debug-spawn] Step 2: skip global env mutation (child spawn clears CLAUDECODE)");
 
     eprintln!("[debug-spawn] Step 3: ignore SIGPIPE");
-    unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN); }
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+    }
 
     eprintln!("[debug-spawn] Step 4: set up signal handlers");
     let _sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
@@ -257,18 +269,21 @@ async fn cmd_debug_spawn(work_dir: std::path::PathBuf) -> Result<()> {
 
     eprintln!("[debug-spawn] Step 5: create channels");
     let (event_tx, _) = tokio::sync::broadcast::channel::<daemon::protocol::DaemonResponse>(1024);
-    let (_supervisor_tx, _supervisor_rx) = tokio::sync::mpsc::unbounded_channel::<daemon::agent_supervisor::SupervisorEvent>();
+    let (_supervisor_tx, _supervisor_rx) =
+        tokio::sync::mpsc::unbounded_channel::<daemon::agent_supervisor::SupervisorEvent>();
 
     eprintln!("[debug-spawn] Step 6: start socket server");
-    let (_request_rx, _socket_handle) =
-        daemon::socket_server::start(event_tx.clone(), None, None)?;
+    let (_request_rx, _socket_handle) = daemon::socket_server::start(event_tx.clone(), None, None)?;
 
     // Use an existing worktree directory if one exists, like the daemon does
     let wt_dir = std::fs::read_dir(work_dir.join(".swarm/wt"))
         .ok()
         .and_then(|mut rd| rd.find_map(|e| e.ok().map(|e| e.path())))
         .unwrap_or(work_dir);
-    eprintln!("[debug-spawn] Step 7: spawn claude via SDK inside tokio::spawn (working_dir={})...", wt_dir.display());
+    eprintln!(
+        "[debug-spawn] Step 7: spawn claude via SDK inside tokio::spawn (working_dir={})...",
+        wt_dir.display()
+    );
     let handle = tokio::spawn(async move {
         let client = apiari_claude_sdk::ClaudeClient::new();
         let opts = apiari_claude_sdk::SessionOptions {
@@ -397,6 +412,8 @@ async fn cmd_create(
     agent: String,
     repo: Option<String>,
     modifiers: Vec<String>,
+    profile: String,
+    task_dir_path: Option<String>,
 ) -> Result<()> {
     let mut prompt = resolve_prompt(prompt, prompt_file)?;
 
@@ -449,12 +466,28 @@ async fn cmd_create(
         },
     );
 
+    // Load task_dir payload from JSON file if provided
+    let task_dir = if let Some(ref path) = task_dir_path {
+        let content = std::fs::read_to_string(path).map_err(|e| {
+            color_eyre::eyre::eyre!("failed to read task-dir file '{}': {}", path, e)
+        })?;
+        let payload: daemon::protocol::TaskDirPayload =
+            serde_json::from_str(&content).map_err(|e| {
+                color_eyre::eyre::eyre!("failed to parse task-dir JSON '{}': {}", path, e)
+            })?;
+        Some(payload)
+    } else {
+        None
+    };
+
     let req = daemon::protocol::DaemonRequest::CreateWorker {
         prompt,
         agent,
         repo,
         start_point: None,
         workspace: Some(work_dir.clone()),
+        profile: Some(profile),
+        task_dir,
     };
     match core::ipc::send_daemon_request(&work_dir, &req) {
         Ok(daemon::protocol::DaemonResponse::Ok { data }) => {

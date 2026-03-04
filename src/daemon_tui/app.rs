@@ -219,7 +219,13 @@ impl WorkerConversation {
 
     pub fn toggle_all_tools(&mut self) {
         let any_collapsed = self.entries.iter().any(|e| {
-            matches!(e, ConversationEntry::ToolCall { collapsed: true, .. })
+            matches!(
+                e,
+                ConversationEntry::ToolCall {
+                    collapsed: true,
+                    ..
+                }
+            )
         });
         let new_state = !any_collapsed;
         for entry in &mut self.entries {
@@ -377,7 +383,10 @@ impl WorkerConversation {
 
         for (i, &(start, count)) in map.iter().enumerate() {
             if logical_line >= start && logical_line < start + count {
-                if matches!(self.entries.get(i), Some(ConversationEntry::ToolCall { .. })) {
+                if matches!(
+                    self.entries.get(i),
+                    Some(ConversationEntry::ToolCall { .. })
+                ) {
                     return Some(i);
                 }
                 return None;
@@ -651,8 +660,7 @@ impl DaemonTuiApp {
 pub fn is_noise_tool(tool: &str) -> bool {
     matches!(
         tool,
-        "Read" | "Glob" | "Grep" | "WebFetch" | "WebSearch"
-            | "TodoRead" | "TodoWrite" | "Explore"
+        "Read" | "Glob" | "Grep" | "WebFetch" | "WebSearch" | "TodoRead" | "TodoWrite" | "Explore"
     )
 }
 
@@ -666,7 +674,14 @@ pub fn extract_tool_input(raw_json: &str) -> String {
         return raw_json.to_string();
     };
     if let Some(obj) = val.as_object() {
-        for key in &["command", "file_path", "pattern", "old_string", "query", "prompt"] {
+        for key in &[
+            "command",
+            "file_path",
+            "pattern",
+            "old_string",
+            "query",
+            "prompt",
+        ] {
             if let Some(s) = obj.get(*key).and_then(|v| v.as_str()) {
                 return s.to_string();
             }
@@ -998,17 +1013,26 @@ mod tests {
         conv.focused_tool = Some(0);
         assert!(matches!(
             &conv.entries[0],
-            ConversationEntry::ToolCall { collapsed: true, .. }
+            ConversationEntry::ToolCall {
+                collapsed: true,
+                ..
+            }
         ));
         conv.toggle_focused_tool();
         assert!(matches!(
             &conv.entries[0],
-            ConversationEntry::ToolCall { collapsed: false, .. }
+            ConversationEntry::ToolCall {
+                collapsed: false,
+                ..
+            }
         ));
         conv.toggle_focused_tool();
         assert!(matches!(
             &conv.entries[0],
-            ConversationEntry::ToolCall { collapsed: true, .. }
+            ConversationEntry::ToolCall {
+                collapsed: true,
+                ..
+            }
         ));
     }
 
@@ -1048,7 +1072,10 @@ mod tests {
         assert_eq!(conv.focused_tool, Some(1));
         assert!(matches!(
             &conv.entries[1],
-            ConversationEntry::ToolCall { collapsed: false, .. }
+            ConversationEntry::ToolCall {
+                collapsed: false,
+                ..
+            }
         ));
     }
 
@@ -1179,10 +1206,19 @@ mod tests {
 "#;
         let entries = parse_history_events(content);
         assert_eq!(entries.len(), 4);
-        assert!(matches!(&entries[0], HistoryEntry::Event(AgentEventWire::TextDelta { text }) if text == "hello world"));
-        assert!(matches!(&entries[1], HistoryEntry::Event(AgentEventWire::ToolUse { tool, .. }) if tool == "Bash"));
-        assert!(matches!(&entries[2], HistoryEntry::Event(AgentEventWire::ToolResult { output, is_error: false, .. }) if output == "file.txt"));
-        assert!(matches!(&entries[3], HistoryEntry::Event(AgentEventWire::SessionResult { turns: 5, .. })));
+        assert!(
+            matches!(&entries[0], HistoryEntry::Event(AgentEventWire::TextDelta { text }) if text == "hello world")
+        );
+        assert!(
+            matches!(&entries[1], HistoryEntry::Event(AgentEventWire::ToolUse { tool, .. }) if tool == "Bash")
+        );
+        assert!(
+            matches!(&entries[2], HistoryEntry::Event(AgentEventWire::ToolResult { output, is_error: false, .. }) if output == "file.txt")
+        );
+        assert!(matches!(
+            &entries[3],
+            HistoryEntry::Event(AgentEventWire::SessionResult { turns: 5, .. })
+        ));
     }
 
     #[test]
@@ -1203,7 +1239,10 @@ mod tests {
 "#;
         let entries = parse_history_events(content);
         assert_eq!(entries.len(), 1);
-        assert!(matches!(&entries[0], HistoryEntry::Event(AgentEventWire::TextDelta { .. })));
+        assert!(matches!(
+            &entries[0],
+            HistoryEntry::Event(AgentEventWire::TextDelta { .. })
+        ));
     }
 
     #[test]
@@ -1212,7 +1251,9 @@ mod tests {
 "#;
         let entries = parse_history_events(content);
         assert_eq!(entries.len(), 1);
-        assert!(matches!(&entries[0], HistoryEntry::Event(AgentEventWire::Error { message }) if message == "something broke"));
+        assert!(
+            matches!(&entries[0], HistoryEntry::Event(AgentEventWire::Error { message }) if message == "something broke")
+        );
     }
 
     /// End-to-end test: parse history → feed to handle_agent_event → verify conversation
@@ -1229,7 +1270,11 @@ mod tests {
 "#;
 
         let entries = parse_history_events(content);
-        assert_eq!(entries.len(), 5, "should parse 5 entries (start is skipped)");
+        assert_eq!(
+            entries.len(),
+            5,
+            "should parse 5 entries (start is skipped)"
+        );
 
         let wt_id = "test-worker";
         for entry in &entries {
@@ -1242,9 +1287,8 @@ mod tests {
                         .conversations
                         .entry(wt_id.to_string())
                         .or_insert_with(WorkerConversation::new);
-                    conv.entries.push(ConversationEntry::User {
-                        text: text.clone(),
-                    });
+                    conv.entries
+                        .push(ConversationEntry::User { text: text.clone() });
                 }
             }
         }
@@ -1256,11 +1300,22 @@ mod tests {
             "conversation should have entries after loading history"
         );
         // Should have: AssistantText("I'll help you."), ToolCall(Read), AssistantText("Done!")
-        assert_eq!(conv.entries.len(), 3, "entries: {:?}", conv.entries.iter().map(|e| match e {
-            ConversationEntry::AssistantText { text } => format!("Text({})", &text[..text.len().min(20)]),
-            ConversationEntry::ToolCall { tool, .. } => format!("Tool({})", tool),
-            ConversationEntry::User { text } => format!("User({})", &text[..text.len().min(20)]),
-            ConversationEntry::Status { text } => format!("Status({})", &text[..text.len().min(20)]),
-        }).collect::<Vec<_>>());
+        assert_eq!(
+            conv.entries.len(),
+            3,
+            "entries: {:?}",
+            conv.entries
+                .iter()
+                .map(|e| match e {
+                    ConversationEntry::AssistantText { text } =>
+                        format!("Text({})", &text[..text.len().min(20)]),
+                    ConversationEntry::ToolCall { tool, .. } => format!("Tool({})", tool),
+                    ConversationEntry::User { text } =>
+                        format!("User({})", &text[..text.len().min(20)]),
+                    ConversationEntry::Status { text } =>
+                        format!("Status({})", &text[..text.len().min(20)]),
+                })
+                .collect::<Vec<_>>()
+        );
     }
 }

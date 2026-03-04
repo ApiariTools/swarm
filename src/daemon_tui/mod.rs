@@ -19,11 +19,11 @@ pub mod socket_client;
 
 use app::{DaemonTuiApp, Mode, Panel, PendingAction, PrDetailInfo, daemon_agents};
 use color_eyre::Result;
+use crossterm::ExecutableCommand;
 use crossterm::event::{EventStream, KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use crossterm::ExecutableCommand;
 use futures::StreamExt;
 use ratatui::prelude::*;
 use socket_client::{DaemonClient, DaemonReader};
@@ -203,7 +203,10 @@ async fn event_loop(
             draw_count += 1;
             // Log first few draws with state summary for diagnostics
             if draw_count <= 5 {
-                let sel_id = app.selected_worker().map(|w| w.id.as_str()).unwrap_or("none");
+                let sel_id = app
+                    .selected_worker()
+                    .map(|w| w.id.as_str())
+                    .unwrap_or("none");
                 let conv_entries = app
                     .selected_conversation()
                     .map(|c| c.entries.len())
@@ -233,9 +236,7 @@ async fn event_loop(
                 app.history_loaded.insert(wt_id.clone());
                 app.pending_history.push_back(wt_id.clone());
                 if let Err(e) = client
-                    .send(&DaemonRequest::GetHistory {
-                        worktree_id: wt_id,
-                    })
+                    .send(&DaemonRequest::GetHistory { worktree_id: wt_id })
                     .await
                 {
                     app.pending_history.pop_back();
@@ -418,11 +419,7 @@ enum KeyAction {
 }
 
 /// Execute a KeyAction by sending requests to the daemon.
-async fn handle_action(
-    app: &mut DaemonTuiApp,
-    client: &mut DaemonClient,
-    action: KeyAction,
-) {
+async fn handle_action(app: &mut DaemonTuiApp, client: &mut DaemonClient, action: KeyAction) {
     match action {
         KeyAction::None | KeyAction::Quit => {}
         KeyAction::CreateWorker {
@@ -437,6 +434,8 @@ async fn handle_action(
                 repo,
                 start_point: None,
                 workspace: Some(app.work_dir.clone()),
+                profile: None,
+                task_dir: None,
             };
             fire_and_forget(client, app, req).await;
             fire_and_forget(
@@ -501,9 +500,7 @@ fn handle_key(app: &mut DaemonTuiApp, key: crossterm::event::KeyEvent) -> KeyAct
         Mode::PrDetail => match key.code {
             KeyCode::Char('o') | KeyCode::Enter => {
                 if let Some(ref pr) = app.pr_detail {
-                    let _ = std::process::Command::new("open")
-                        .arg(&pr.url)
-                        .spawn();
+                    let _ = std::process::Command::new("open").arg(&pr.url).spawn();
                 }
                 app.mode = Mode::Normal;
                 app.pr_detail = None;
@@ -1119,7 +1116,10 @@ fn handle_daemon_response(app: &mut DaemonTuiApp, resp: DaemonResponse) {
     match resp {
         DaemonResponse::Ok { data } => {
             if let Some(ref d) = data {
-                let keys: Vec<&String> = d.as_object().map(|o| o.keys().collect()).unwrap_or_default();
+                let keys: Vec<&String> = d
+                    .as_object()
+                    .map(|o| o.keys().collect())
+                    .unwrap_or_default();
                 tui_log!(&app.work_dir, "Ok response with data keys: {:?}", keys);
 
                 // History response
@@ -1190,13 +1190,15 @@ fn handle_daemon_response(app: &mut DaemonTuiApp, resp: DaemonResponse) {
             app.update_worker_list(workers);
         }
         DaemonResponse::AgentEvent { worktree_id, event } => {
-            tui_log!(&app.work_dir, "live event for {}: {:?}", worktree_id, std::mem::discriminant(&event));
+            tui_log!(
+                &app.work_dir,
+                "live event for {}: {:?}",
+                worktree_id,
+                std::mem::discriminant(&event)
+            );
             app.handle_agent_event(&worktree_id, &event);
         }
-        DaemonResponse::StateChanged {
-            worktree_id,
-            phase,
-        } => {
+        DaemonResponse::StateChanged { worktree_id, phase } => {
             app.handle_phase_change(&worktree_id, &phase);
         }
         DaemonResponse::Workspaces { .. } => {
@@ -1595,5 +1597,4 @@ mod tests {
         handle_key(&mut app, key(KeyCode::Esc));
         assert!(matches!(app.mode, Mode::AgentSelect));
     }
-
 }

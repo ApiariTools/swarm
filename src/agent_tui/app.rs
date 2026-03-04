@@ -370,7 +370,13 @@ impl TuiApp {
     /// Toggle all tool blocks: if any are collapsed, expand all; otherwise collapse all.
     pub fn toggle_all_tools(&mut self) {
         let any_collapsed = self.entries.iter().any(|e| {
-            matches!(e, ConversationEntry::ToolCall { collapsed: true, .. })
+            matches!(
+                e,
+                ConversationEntry::ToolCall {
+                    collapsed: true,
+                    ..
+                }
+            )
         });
         let new_state = !any_collapsed;
         for entry in &mut self.entries {
@@ -530,7 +536,10 @@ impl TuiApp {
         for (i, &(start, count)) in self.entry_line_map.iter().enumerate() {
             if logical_line >= start && logical_line < start + count {
                 // Only return if it's a ToolCall
-                if matches!(self.entries.get(i), Some(ConversationEntry::ToolCall { .. })) {
+                if matches!(
+                    self.entries.get(i),
+                    Some(ConversationEntry::ToolCall { .. })
+                ) {
                     return Some(i);
                 }
                 return None;
@@ -1006,8 +1015,7 @@ mod tests {
     #[test]
     fn error_event_sets_errored_and_adds_status() {
         let (mut app, tx) = make_app();
-        tx.send(SdkEvent::Error("something broke".into()))
-            .unwrap();
+        tx.send(SdkEvent::Error("something broke".into())).unwrap();
         app.drain_sdk_events();
         assert_eq!(app.status, SessionStatus::Errored);
         assert!(matches!(
@@ -1103,9 +1111,8 @@ mod tests {
     #[test]
     fn toggle_tools_no_tools_is_noop() {
         let (mut app, _tx) = make_app();
-        app.entries.push(ConversationEntry::AssistantText {
-            text: "hi".into(),
-        });
+        app.entries
+            .push(ConversationEntry::AssistantText { text: "hi".into() });
         app.toggle_all_tools(); // should not panic
         assert_eq!(app.entries.len(), 1);
     }
@@ -1228,8 +1235,7 @@ mod tests {
     #[test]
     fn tool_use_flushes_streaming_text() {
         let (mut app, tx) = make_app();
-        tx.send(SdkEvent::TextDelta("before tool".into()))
-            .unwrap();
+        tx.send(SdkEvent::TextDelta("before tool".into())).unwrap();
         tx.send(SdkEvent::ContentBlock(ContentBlock::ToolUse {
             id: "t1".into(),
             name: "Bash".into(),
@@ -1350,17 +1356,26 @@ mod tests {
         // Initially collapsed
         assert!(matches!(
             &app.entries[0],
-            ConversationEntry::ToolCall { collapsed: true, .. }
+            ConversationEntry::ToolCall {
+                collapsed: true,
+                ..
+            }
         ));
         app.toggle_focused_tool();
         assert!(matches!(
             &app.entries[0],
-            ConversationEntry::ToolCall { collapsed: false, .. }
+            ConversationEntry::ToolCall {
+                collapsed: false,
+                ..
+            }
         ));
         app.toggle_focused_tool();
         assert!(matches!(
             &app.entries[0],
-            ConversationEntry::ToolCall { collapsed: true, .. }
+            ConversationEntry::ToolCall {
+                collapsed: true,
+                ..
+            }
         ));
     }
 

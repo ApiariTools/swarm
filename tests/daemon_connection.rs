@@ -213,7 +213,10 @@ async fn drain_timeout_preserves_partial_reads() {
         tokio::time::sleep(Duration::from_millis(1)).await;
     }
 
-    assert!(got_response, "should eventually receive the workers response");
+    assert!(
+        got_response,
+        "should eventually receive the workers response"
+    );
 
     server.abort();
 }
@@ -266,12 +269,14 @@ async fn server_responsive_during_blocking_work() {
         assert!(
             resp.contains("ok"),
             "ping {} should return ok, got: {}",
-            i, resp
+            i,
+            resp
         );
         assert!(
             elapsed < Duration::from_millis(500),
             "ping {} took {:?} — server should respond in under 500ms",
-            i, elapsed
+            i,
+            elapsed
         );
     }
 

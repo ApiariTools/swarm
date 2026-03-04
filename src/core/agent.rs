@@ -44,7 +44,6 @@ impl AgentKind {
             Self::Codex => "codex",
         }
     }
-
 }
 
 impl std::fmt::Display for AgentKind {

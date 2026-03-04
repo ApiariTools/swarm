@@ -58,21 +58,15 @@ pub fn start(
     let (tx, rx) = mpsc::unbounded_channel();
 
     // Unix accept loop
-    let unix_task = tokio::spawn(unix_accept_loop(
-        listener,
-        tx.clone(),
-        event_tx.clone(),
-    ));
+    let unix_task = tokio::spawn(unix_accept_loop(listener, tx.clone(), event_tx.clone()));
 
     // TCP accept loop (optional)
     let mut tcp_task = None;
     let mut token_path = None;
 
     if let Some(ref bind_addr) = tcp_bind {
-        let tcp_listener =
-            std::net::TcpListener::bind(bind_addr).map_err(|e| {
-                color_eyre::eyre::eyre!("failed to bind TCP on {}: {}", bind_addr, e)
-            })?;
+        let tcp_listener = std::net::TcpListener::bind(bind_addr)
+            .map_err(|e| color_eyre::eyre::eyre!("failed to bind TCP on {}: {}", bind_addr, e))?;
         tcp_listener.set_nonblocking(true)?;
         let tcp_listener = tokio::net::TcpListener::from_std(tcp_listener)?;
 
@@ -172,13 +166,7 @@ async fn tcp_accept_loop(
                             Err(_) => return,
                         }
                     }
-                    handle_connection(
-                        Box::new(reader),
-                        writer,
-                        request_tx,
-                        event_rx,
-                    )
-                    .await;
+                    handle_connection(Box::new(reader), writer, request_tx, event_rx).await;
                 });
             }
             Err(e) => {

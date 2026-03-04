@@ -247,12 +247,7 @@ pub fn detect_repos(dir: &Path) -> Result<Vec<PathBuf>> {
                     .current_dir(&repo)
                     .output()
                     .ok()
-                    .and_then(|o| {
-                        String::from_utf8_lossy(&o.stdout)
-                            .trim()
-                            .parse()
-                            .ok()
-                    })
+                    .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse().ok())
                     .unwrap_or(0);
                 (repo, c)
             })

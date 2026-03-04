@@ -184,9 +184,7 @@ pub fn read_last_session(path: &Path) -> Option<PreviousSession> {
 
     for ev in session_events {
         match ev {
-            AgentEvent::Start {
-                model: m, ..
-            } => {
+            AgentEvent::Start { model: m, .. } => {
                 model = m.clone();
             }
             AgentEvent::SessionResult {
@@ -335,8 +333,12 @@ mod tests {
 
         // entries: User, AssistantText, ToolCall (with output filled in-place by ToolResult)
         assert_eq!(prev.entries.len(), 3);
-        assert!(matches!(&prev.entries[0], ConversationEntry::User { text } if text == "do something"));
-        assert!(matches!(&prev.entries[1], ConversationEntry::AssistantText { text } if text == "on it"));
+        assert!(
+            matches!(&prev.entries[0], ConversationEntry::User { text } if text == "do something")
+        );
+        assert!(
+            matches!(&prev.entries[1], ConversationEntry::AssistantText { text } if text == "on it")
+        );
         assert!(matches!(
             &prev.entries[2],
             ConversationEntry::ToolCall { tool, output: Some(out), is_error: false, .. }
@@ -432,8 +434,12 @@ mod tests {
         assert_eq!(prev.model, Some("opus".into()));
         // Entries should only contain the second session
         assert_eq!(prev.entries.len(), 2);
-        assert!(matches!(&prev.entries[0], ConversationEntry::User { text } if text == "second task"));
-        assert!(matches!(&prev.entries[1], ConversationEntry::AssistantText { text } if text == "working on second"));
+        assert!(
+            matches!(&prev.entries[0], ConversationEntry::User { text } if text == "second task")
+        );
+        assert!(
+            matches!(&prev.entries[1], ConversationEntry::AssistantText { text } if text == "working on second")
+        );
     }
 
     #[test]
@@ -506,9 +512,15 @@ mod tests {
         assert_eq!(prev.turns, 3);
         assert_eq!(prev.entries.len(), 4);
         assert!(matches!(&prev.entries[0], ConversationEntry::User { text } if text == "initial"));
-        assert!(matches!(&prev.entries[1], ConversationEntry::AssistantText { text } if text == "done"));
-        assert!(matches!(&prev.entries[2], ConversationEntry::User { text } if text == "follow up question"));
-        assert!(matches!(&prev.entries[3], ConversationEntry::AssistantText { text } if text == "follow up answer"));
+        assert!(
+            matches!(&prev.entries[1], ConversationEntry::AssistantText { text } if text == "done")
+        );
+        assert!(
+            matches!(&prev.entries[2], ConversationEntry::User { text } if text == "follow up question")
+        );
+        assert!(
+            matches!(&prev.entries[3], ConversationEntry::AssistantText { text } if text == "follow up answer")
+        );
     }
 
     #[test]

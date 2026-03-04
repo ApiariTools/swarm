@@ -146,9 +146,8 @@ fn send_daemon_request_to(
     sock: &Path,
     req: &crate::daemon::protocol::DaemonRequest,
 ) -> Result<crate::daemon::protocol::DaemonResponse> {
-    let stream = std::os::unix::net::UnixStream::connect(sock).map_err(|e| {
-        color_eyre::eyre::eyre!("failed to connect to daemon socket: {}", e)
-    })?;
+    let stream = std::os::unix::net::UnixStream::connect(sock)
+        .map_err(|e| color_eyre::eyre::eyre!("failed to connect to daemon socket: {}", e))?;
 
     // Set read/write timeout
     let timeout = std::time::Duration::from_secs(30);
@@ -165,8 +164,7 @@ fn send_daemon_request_to(
     let mut resp_line = String::new();
     std::io::BufRead::read_line(&mut reader, &mut resp_line)?;
 
-    let resp: crate::daemon::protocol::DaemonResponse =
-        serde_json::from_str(resp_line.trim())?;
+    let resp: crate::daemon::protocol::DaemonResponse = serde_json::from_str(resp_line.trim())?;
     Ok(resp)
 }
 
@@ -473,5 +471,4 @@ mod tests {
             _ => panic!("expected PrDetected"),
         }
     }
-
 }

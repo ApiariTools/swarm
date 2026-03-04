@@ -86,11 +86,7 @@ impl ModifierPrompt {
 ///
 /// Format: `[mod1]\n\n---\n\n[mod2]\n\n---\n\n[user prompt]`
 /// If no modifiers are selected, returns the base prompt unchanged.
-pub fn assemble_prompt(
-    base: &str,
-    modifiers: &[ModifierPrompt],
-    selected: &[bool],
-) -> String {
+pub fn assemble_prompt(base: &str, modifiers: &[ModifierPrompt], selected: &[bool]) -> String {
     let active: Vec<&str> = modifiers
         .iter()
         .zip(selected.iter())
