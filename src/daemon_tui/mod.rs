@@ -874,6 +874,13 @@ fn handle_key(app: &mut DaemonTuiApp, key: crossterm::event::KeyEvent) -> KeyAct
                     KeyAction::None
                 }
                 KeyCode::Tab => {
+                    app.focus = Panel::Sidebar;
+                    if let Some(conv) = app.selected_conversation_mut() {
+                        conv.clear_focus();
+                    }
+                    KeyAction::None
+                }
+                KeyCode::Char(']') => {
                     let vh = app.viewport_height;
                     if let Some(conv) = app.selected_conversation_mut() {
                         conv.focus_next_tool();
@@ -881,7 +888,7 @@ fn handle_key(app: &mut DaemonTuiApp, key: crossterm::event::KeyEvent) -> KeyAct
                     }
                     KeyAction::None
                 }
-                KeyCode::BackTab => {
+                KeyCode::Char('[') => {
                     let vh = app.viewport_height;
                     if let Some(conv) = app.selected_conversation_mut() {
                         conv.focus_prev_tool();
@@ -920,17 +927,25 @@ fn handle_key(app: &mut DaemonTuiApp, key: crossterm::event::KeyEvent) -> KeyAct
                     }
                     KeyAction::None
                 }
-                KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    let half = app.viewport_height / 2;
+                KeyCode::Char('u') => {
+                    let amount = if key.modifiers.contains(KeyModifiers::CONTROL) {
+                        (app.viewport_height / 2) as u32
+                    } else {
+                        1
+                    };
                     if let Some(conv) = app.selected_conversation_mut() {
-                        conv.scroll_up(half as u32);
+                        conv.scroll_up(amount);
                     }
                     KeyAction::None
                 }
-                KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    let half = app.viewport_height / 2;
+                KeyCode::Char('d') => {
+                    let amount = if key.modifiers.contains(KeyModifiers::CONTROL) {
+                        (app.viewport_height / 2) as u32
+                    } else {
+                        1
+                    };
                     if let Some(conv) = app.selected_conversation_mut() {
-                        conv.scroll_down(half as u32);
+                        conv.scroll_down(amount);
                     }
                     KeyAction::None
                 }
@@ -940,9 +955,42 @@ fn handle_key(app: &mut DaemonTuiApp, key: crossterm::event::KeyEvent) -> KeyAct
                     }
                     KeyAction::None
                 }
+                KeyCode::Home => {
+                    if let Some(conv) = app.selected_conversation_mut() {
+                        let vh = if conv.conversation_area.height > 0 {
+                            conv.conversation_area.height as u32
+                        } else {
+                            1
+                        };
+                        conv.scroll_offset = conv.total_visual_lines.saturating_sub(vh);
+                        conv.auto_scroll = false;
+                    }
+                    KeyAction::None
+                }
+                KeyCode::PageUp => {
+                    let vh = app.viewport_height as u32;
+                    if let Some(conv) = app.selected_conversation_mut() {
+                        conv.scroll_up(vh);
+                    }
+                    KeyAction::None
+                }
+                KeyCode::PageDown => {
+                    let vh = app.viewport_height as u32;
+                    if let Some(conv) = app.selected_conversation_mut() {
+                        conv.scroll_down(vh);
+                    }
+                    KeyAction::None
+                }
                 KeyCode::Char('c') => {
                     if let Some(conv) = app.selected_conversation_mut() {
                         conv.toggle_all_tools();
+                    }
+                    KeyAction::None
+                }
+                KeyCode::Char('f') => {
+                    if let Some(conv) = app.selected_conversation_mut() {
+                        conv.filter_noise = !conv.filter_noise;
+                        conv.focused_tool = None;
                     }
                     KeyAction::None
                 }
@@ -977,7 +1025,7 @@ fn handle_mouse(app: &mut DaemonTuiApp, mouse: crossterm::event::MouseEvent) -> 
                 && app.focus == Panel::Conversation
                 && let Some(conv) = app.selected_conversation_mut()
             {
-                conv.scroll_up(3);
+                conv.scroll_up(5);
             }
         }
         MouseEventKind::ScrollDown => {
@@ -985,7 +1033,7 @@ fn handle_mouse(app: &mut DaemonTuiApp, mouse: crossterm::event::MouseEvent) -> 
                 && app.focus == Panel::Conversation
                 && let Some(conv) = app.selected_conversation_mut()
             {
-                conv.scroll_down(3);
+                conv.scroll_down(5);
             }
         }
         MouseEventKind::Down(MouseButton::Left) => {
@@ -1498,6 +1546,14 @@ mod tests {
         let mut app = app_with_workers(&["w-1"]);
         app.focus = Panel::Conversation;
         handle_key(&mut app, key(KeyCode::Char('h')));
+        assert!(matches!(app.focus, Panel::Sidebar));
+    }
+
+    #[test]
+    fn tab_from_conversation_switches_to_sidebar() {
+        let mut app = app_with_workers(&["w-1"]);
+        app.focus = Panel::Conversation;
+        handle_key(&mut app, key(KeyCode::Tab));
         assert!(matches!(app.focus, Panel::Sidebar));
     }
 

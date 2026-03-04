@@ -1,4 +1,4 @@
-use super::app::{DaemonTuiApp, Mode, Panel, WorkerConversation, daemon_agents};
+use super::app::{DaemonTuiApp, Mode, Panel, WorkerConversation, daemon_agents, is_noise_tool};
 use crate::agent_tui::app::ConversationEntry;
 use crate::agent_tui::markdown;
 use crate::core::review::{ReviewMode, load_reviews_toml};
@@ -455,7 +455,7 @@ fn draw_conversation_panel(frame: &mut Frame, area: Rect, app: &mut DaemonTuiApp
 
     if app.workers.is_empty() {
         // Draw unfocused header even with no workers
-        draw_conversation_header(frame, Rect::new(area.x, area.y, area.width, 1), None, is_focused);
+        draw_conversation_header(frame, Rect::new(area.x, area.y, area.width, 1), None, is_focused, "");
         let rest = Rect::new(area.x, area.y + 1, area.width, area.height.saturating_sub(1));
         let msg = Paragraph::new("  No workers. Press n to create one.")
             .style(theme::muted());
@@ -479,8 +479,28 @@ fn draw_conversation_panel(frame: &mut Frame, area: Rect, app: &mut DaemonTuiApp
         ])
         .split(area);
 
-    // Header bar
-    draw_conversation_header(frame, chunks[0], selected_worker.as_ref(), is_focused);
+    // Header bar — compute scroll position for display
+    let scroll_pos = if let Some(ref id) = selected_id
+        && let Some(conv) = app.conversations.get(id)
+    {
+        if conv.auto_scroll || conv.total_visual_lines == 0 {
+            String::new()
+        } else {
+            let vh = conv.conversation_area.height as u32;
+            let max = conv.total_visual_lines.saturating_sub(vh);
+            if max == 0 {
+                String::new()
+            } else if conv.scroll_offset >= max {
+                "Top".to_string()
+            } else {
+                let pct = 100 - (conv.scroll_offset * 100 / max);
+                format!("{}%", pct)
+            }
+        }
+    } else {
+        String::new()
+    };
+    draw_conversation_header(frame, chunks[0], selected_worker.as_ref(), is_focused, &scroll_pos);
 
     // Conversation area
     {
@@ -516,6 +536,7 @@ fn draw_conversation_header(
     area: Rect,
     worker: Option<&WorkerInfo>,
     is_focused: bool,
+    scroll_pos: &str,
 ) {
     let (prefix, bg, fg, modifier) = if is_focused {
         (
@@ -531,16 +552,13 @@ fn draw_conversation_header(
     let base_style = Style::default().fg(fg).bg(bg).add_modifier(modifier);
 
     let (left_text, right_text) = if let Some(w) = worker {
-        let (phase_icon, phase_name) = match w.phase {
-            WorkerPhase::Creating | WorkerPhase::Starting => ("\u{25cc}", "starting"),
-            WorkerPhase::Running => ("\u{25cf}", "running"),
-            WorkerPhase::Waiting => ("\u{25cb}", "waiting"),
-            WorkerPhase::Completed => ("\u{25c6}", "done"),
-            WorkerPhase::Failed => ("\u{2717}", "failed"),
-        };
         (
             format!("{}{}", prefix, w.id),
-            format!("{} {}  ", phase_icon, phase_name),
+            if scroll_pos.is_empty() {
+                String::new()
+            } else {
+                format!("{}  ", scroll_pos)
+            },
         )
     } else {
         (format!("{}no worker selected", prefix), String::new())
@@ -570,7 +588,23 @@ fn draw_conversation_entries(
     let mut lines: Vec<Line<'_>> = Vec::new();
     let mut entry_line_map: Vec<(u32, u32)> = Vec::with_capacity(conv.entries.len());
 
+    // Top padding
+    lines.push(Line::from(""));
+
     for (i, entry) in conv.entries.iter().enumerate() {
+        // In filter mode, skip noise tool calls (unless they errored)
+        if conv.filter_noise {
+            if let ConversationEntry::ToolCall {
+                tool, is_error, ..
+            } = entry
+            {
+                if is_noise_tool(tool) && !*is_error {
+                    entry_line_map.push((lines.len() as u32, 0));
+                    continue;
+                }
+            }
+        }
+
         let start = lines.len() as u32;
         let is_focused_tool = conv.focused_tool == Some(i);
 
@@ -580,13 +614,14 @@ fn draw_conversation_entries(
                 lines.push(Line::from(Span::styled(
                     "  You:",
                     Style::default()
-                        .fg(theme::SLATE)
+                        .fg(theme::HONEY)
+                        .bg(theme::FOCUS_BG)
                         .add_modifier(Modifier::BOLD),
                 )));
                 for line in text.lines() {
                     lines.push(Line::from(Span::styled(
                         format!("  {}", line),
-                        theme::text(),
+                        Style::default().fg(theme::HONEY).bg(theme::FOCUS_BG),
                     )));
                 }
             }
@@ -617,15 +652,42 @@ fn draw_conversation_entries(
                 } else {
                     theme::COMB
                 };
-                let tool_style = if is_focused_tool {
-                    Style::default()
-                        .fg(theme::HONEY)
-                        .bg(focus_bg)
-                        .add_modifier(Modifier::BOLD)
+
+                // Categorize tools for visual hierarchy
+                let is_mutation = matches!(
+                    tool.as_str(),
+                    "Write" | "Edit" | "NotebookEdit"
+                );
+                let is_execution = matches!(
+                    tool.as_str(),
+                    "Bash" | "Task" | "Skill"
+                );
+                let is_noise = matches!(
+                    tool.as_str(),
+                    "Read" | "Glob" | "Grep" | "WebFetch" | "WebSearch"
+                        | "TodoRead" | "TodoWrite"
+                );
+
+                // #1: Color-code tool names by category
+                let tool_name_color = if is_focused_tool {
+                    theme::HONEY
+                } else if is_mutation {
+                    theme::NECTAR // amber/orange — draws attention
+                } else if is_execution {
+                    theme::MINT // green — action
+                } else if is_noise {
+                    Color::Rgb(80, 77, 70) // very dim
                 } else {
-                    theme::tool_name()
+                    theme::ICE // default
                 };
+
+                let tool_style = Style::default()
+                    .fg(tool_name_color)
+                    .bg(focus_bg)
+                    .add_modifier(Modifier::BOLD);
+
                 if *collapsed {
+                    // Line 1: icon + tool name + input summary
                     let (icon, icon_style) = if output.is_none() {
                         ("\u{22ef}", theme::muted().bg(focus_bg))
                     } else if *is_error {
@@ -645,13 +707,56 @@ fn draw_conversation_entries(
                     } else {
                         ""
                     };
+
+                    // #3: Dim noise tools, #4: bold input for mutations
+                    let input_style = if is_noise {
+                        Style::default().fg(Color::Rgb(70, 67, 60)).bg(focus_bg)
+                    } else if is_mutation {
+                        Style::default().fg(theme::FROST).bg(focus_bg)
+                    } else {
+                        theme::muted().bg(focus_bg)
+                    };
+
                     lines.push(Line::from(vec![
                         Span::styled(format!("{}{} ", focus_prefix, icon), icon_style),
                         Span::styled(tool.as_str(), tool_style),
-                        Span::styled(format!("  {}{}", preview, ellipsis), theme::muted().bg(focus_bg)),
+                        Span::styled(format!("  {}{}", preview, ellipsis), input_style),
                     ]));
+                    // Line 2: result hint (first useful output line or URL)
+                    if let Some(out) = output {
+                        // Prefer a line containing a URL, else first non-empty line
+                        let hint_line = out
+                            .lines()
+                            .find(|l| l.contains("https://"))
+                            .or_else(|| out.lines().find(|l| !l.trim().is_empty()));
+                        if let Some(hint) = hint_line {
+                            let has_url = hint.contains("https://");
+                            // #2: Blue for URLs, #5: Red for errors, dim for noise
+                            let hint_style = if *is_error {
+                                theme::error()
+                            } else if has_url {
+                                Style::default().fg(theme::FROST)
+                            } else if is_noise {
+                                Style::default().fg(Color::Rgb(60, 57, 50))
+                            } else {
+                                Style::default().fg(Color::Rgb(90, 87, 80))
+                            };
+                            let total_out_lines = out.lines().count();
+                            let suffix = if total_out_lines > 1 {
+                                format!("  ({} more lines)", total_out_lines - 1)
+                            } else {
+                                String::new()
+                            };
+                            let hint_truncated: String = hint.chars().take(80).collect();
+                            lines.push(Line::from(vec![
+                                Span::styled("       \u{2192} ", Style::default().fg(theme::STEEL)),
+                                Span::styled(hint_truncated, hint_style),
+                                Span::styled(suffix, theme::muted()),
+                            ]));
+                        }
+                    }
                 } else {
-                    lines.push(Line::from(""));
+                    // Expanded view
                     lines.push(Line::from(vec![
                         Span::styled(focus_prefix, theme::muted().bg(focus_bg)),
                         Span::styled(format!(" {} ", tool), tool_style),
@@ -660,16 +765,11 @@ fn draw_conversation_entries(
                             Style::default().fg(theme::STEEL).bg(focus_bg),
                         ),
                     ]));
-                    for line in input.lines().take(5) {
+                    // Show all input lines (typically short)
+                    for line in input.lines() {
                         lines.push(Line::from(Span::styled(
                             format!("  \u{2502} {}", line),
                             Style::default().fg(theme::SLATE),
-                        )));
-                    }
-                    if input.lines().count() > 5 {
-                        lines.push(Line::from(Span::styled(
-                            format!("  \u{2502} ... ({} more lines)", input.lines().count() - 5),
-                            theme::muted(),
                         )));
                     }
                     if let Some(out) = output {
@@ -682,17 +782,19 @@ fn draw_conversation_entries(
                             "  \u{251c}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}",
                             Style::default().fg(theme::STEEL),
                         )));
-                        for line in out.lines().take(10) {
+                        let out_lines: Vec<&str> = out.lines().collect();
+                        let max_output = 50;
+                        for line in out_lines.iter().take(max_output) {
                             lines.push(Line::from(Span::styled(
                                 format!("  \u{2502} {}", line),
                                 out_style,
                             )));
                         }
-                        if out.lines().count() > 10 {
+                        if out_lines.len() > max_output {
                             lines.push(Line::from(Span::styled(
                                 format!(
                                     "  \u{2502} ... ({} more lines)",
-                                    out.lines().count() - 10
+                                    out_lines.len() - max_output
                                 ),
                                 theme::muted(),
                             )));
@@ -753,17 +855,51 @@ fn draw_conversation_entries(
         )));
     }
 
+    // Bottom padding
+    lines.push(Line::from(""));
+    lines.push(Line::from(""));
+
     conv.entry_line_map = entry_line_map;
     conv.total_rendered_lines = lines.len() as u32;
     conv.conversation_area = inner;
 
+    // Compute visual (wrapped) line counts for scroll accuracy
+    let inner_width = inner.width.max(1) as usize;
+    let mut entry_visual_line_map: Vec<(u32, u32)> = Vec::with_capacity(conv.entry_line_map.len());
+    let mut visual_offset: u32 = 0;
+    for &(raw_start, raw_count) in &conv.entry_line_map {
+        let mut visual_count: u32 = 0;
+        for idx in raw_start..(raw_start + raw_count) {
+            if let Some(line) = lines.get(idx as usize) {
+                let w = line.width();
+                visual_count += (w.max(1).div_ceil(inner_width)) as u32;
+            } else {
+                visual_count += 1;
+            }
+        }
+        entry_visual_line_map.push((visual_offset, visual_count));
+        visual_offset += visual_count;
+    }
+    // Also account for streaming text lines after entries
+    let entry_raw_end = conv.entry_line_map.last().map(|(s, c)| s + c).unwrap_or(0) as usize;
+    for idx in entry_raw_end..lines.len() {
+        if let Some(line) = lines.get(idx) {
+            let w = line.width();
+            visual_offset += (w.max(1).div_ceil(inner_width)) as u32;
+        } else {
+            visual_offset += 1;
+        }
+    }
+    conv.entry_visual_line_map = entry_visual_line_map;
+    conv.total_visual_lines = visual_offset;
+
     let text = Text::from(lines);
-    let total_lines = text.lines.len() as u32;
+    let total_visual = conv.total_visual_lines;
     let visible_height = inner.height as u32;
     let scroll = if conv.auto_scroll {
-        total_lines.saturating_sub(visible_height)
+        total_visual.saturating_sub(visible_height)
     } else {
-        total_lines
+        total_visual
             .saturating_sub(visible_height)
             .saturating_sub(conv.scroll_offset)
     };
@@ -838,21 +974,27 @@ fn draw_conversation_status_bar(
         String::new()
     };
 
+    let is_filtered = app
+        .selected_conversation()
+        .is_some_and(|c| c.filter_noise);
+
     let hints = if app.focus == Panel::Conversation {
         if matches!(
             app.selected_worker().map(|w| &w.phase),
             Some(WorkerPhase::Waiting)
         ) {
-            " j/k:scroll c:tools i:input h:sidebar tab:tools "
+            " j/k:scroll c:tools f:filter i:input tab:sidebar "
         } else {
-            " j/k:scroll c:tools h:sidebar tab:tools "
+            " j/k:scroll c:tools f:filter tab:sidebar "
         }
     } else {
         ""
     };
 
+    let filter_badge = if is_filtered { " [filtered]" } else { "" };
+
     let available = area.width as usize;
-    let left = format!(" [{}]", phase_text);
+    let left = format!(" [{}]{}", phase_text, filter_badge);
     let right = format!("{}  {} ", hints, right_info);
     let padding = available.saturating_sub(left.len() + right.len());
 
@@ -878,7 +1020,7 @@ fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
 
 fn draw_help_overlay(frame: &mut Frame, area: Rect) {
     let popup_width = (area.width).min(50);
-    let popup_height = (area.height).min(26);
+    let popup_height = (area.height).min(30);
     let popup = centered_rect(popup_width, popup_height, area);
     frame.render_widget(Clear, popup);
 
@@ -903,13 +1045,16 @@ fn draw_help_overlay(frame: &mut Frame, area: Rect) {
         ("q", "quit"),
         ("", ""),
         ("", "── Conversation ──"),
-        ("h", "focus sidebar"),
-        ("tab/S-tab", "cycle tool focus"),
+        ("tab/h", "focus sidebar"),
+        ("[ / ]", "cycle tool focus"),
         ("\u{21b5}", "toggle focused tool"),
         ("esc", "clear focus / sidebar"),
         ("j/k", "scroll"),
+        ("PgUp/Dn", "scroll page"),
+        ("Home", "scroll to top"),
         ("G/End", "scroll to bottom"),
         ("c", "toggle all tools"),
+        ("f", "filter noise tools"),
         ("p", "PR detail"),
         ("i/s", "enter input mode"),
     ];

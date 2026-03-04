@@ -83,13 +83,17 @@ pub struct WorkerConversation {
     pub is_streaming: bool,
     pub scroll_offset: u32,
     pub auto_scroll: bool,
+    pub filter_noise: bool,
     pub focused_tool: Option<usize>,
     pub tool_count: u32,
     pub turn_count: u32,
     pub cost_usd: Option<f64>,
-    /// (start_line, line_count) per entry, built during render.
+    /// (start_line, line_count) per entry, built during render (raw lines).
     pub entry_line_map: Vec<(u32, u32)>,
     pub total_rendered_lines: u32,
+    /// (start_visual_line, visual_line_count) per entry, accounting for wrap.
+    pub entry_visual_line_map: Vec<(u32, u32)>,
+    pub total_visual_lines: u32,
     /// Inner conversation area rect, set during render for hit-testing.
     pub conversation_area: Rect,
 }
@@ -102,12 +106,15 @@ impl WorkerConversation {
             is_streaming: false,
             scroll_offset: 0,
             auto_scroll: true,
+            filter_noise: false,
             focused_tool: None,
             tool_count: 0,
             turn_count: 0,
             cost_usd: None,
             entry_line_map: Vec::new(),
             total_rendered_lines: 0,
+            entry_visual_line_map: Vec::new(),
+            total_visual_lines: 0,
             conversation_area: Rect::default(),
         }
     }
@@ -128,9 +135,10 @@ impl WorkerConversation {
             AgentEventWire::ToolUse { tool, input } => {
                 self.flush_streaming_text();
                 self.tool_count += 1;
+                let extracted = extract_tool_input(input);
                 self.entries.push(ConversationEntry::ToolCall {
                     tool: tool.clone(),
-                    input: input.clone(),
+                    input: extracted,
                     output: None,
                     is_error: false,
                     collapsed: true,
@@ -143,7 +151,7 @@ impl WorkerConversation {
                     ..
                 }) = self.entries.last_mut()
                 {
-                    *o = Some(truncate_output(output, 20));
+                    *o = Some(output.clone());
                     *e = *is_error;
                 }
             }
@@ -186,7 +194,14 @@ impl WorkerConversation {
     // ── Scrolling ──
 
     pub fn scroll_up(&mut self, amount: u32) {
-        self.scroll_offset = self.scroll_offset.saturating_add(amount);
+        // viewport_height is set during render; use conversation_area as fallback
+        let vh = if self.conversation_area.height > 0 {
+            self.conversation_area.height as u32
+        } else {
+            1
+        };
+        let max = self.total_visual_lines.saturating_sub(vh);
+        self.scroll_offset = self.scroll_offset.saturating_add(amount).min(max);
         self.auto_scroll = false;
     }
 
@@ -290,15 +305,21 @@ impl WorkerConversation {
             Some(i) => i,
             None => return,
         };
-        if idx >= self.entry_line_map.len() {
+        // Use visual line map if available, fall back to raw
+        let (map, total) = if !self.entry_visual_line_map.is_empty() {
+            (&self.entry_visual_line_map, self.total_visual_lines)
+        } else {
+            (&self.entry_line_map, self.total_rendered_lines)
+        };
+        if idx >= map.len() {
             return;
         }
-        let (start, count) = self.entry_line_map[idx];
+        let (start, count) = map[idx];
         let visible = viewport_height as u32;
-        if visible == 0 || self.total_rendered_lines <= visible {
+        if visible == 0 || total <= visible {
             return;
         }
-        let max_scroll = self.total_rendered_lines.saturating_sub(visible);
+        let max_scroll = total.saturating_sub(visible);
         let top = if self.auto_scroll {
             max_scroll
         } else {
@@ -336,11 +357,18 @@ impl WorkerConversation {
         }
         let visible_row = (row - inner_top) as u32;
 
+        // Use visual line map if available, fall back to raw
+        let (map, total) = if !self.entry_visual_line_map.is_empty() {
+            (&self.entry_visual_line_map, self.total_visual_lines)
+        } else {
+            (&self.entry_line_map, self.total_rendered_lines)
+        };
+
         let visible = inner_height as u32;
-        if self.total_rendered_lines == 0 {
+        if total == 0 {
             return None;
         }
-        let max_scroll = self.total_rendered_lines.saturating_sub(visible);
+        let max_scroll = total.saturating_sub(visible);
         let top = if self.auto_scroll {
             max_scroll
         } else {
@@ -349,7 +377,7 @@ impl WorkerConversation {
 
         let logical_line = top + visible_row;
 
-        for (i, &(start, count)) in self.entry_line_map.iter().enumerate() {
+        for (i, &(start, count)) in map.iter().enumerate() {
             if logical_line >= start && logical_line < start + count {
                 if matches!(self.entries.get(i), Some(ConversationEntry::ToolCall { .. })) {
                     return Some(i);
@@ -473,11 +501,17 @@ impl DaemonTuiApp {
         if !self.workers.is_empty() && self.selected >= self.workers.len() {
             self.selected = self.workers.len() - 1;
         }
-        // Ensure conversation state exists for each worker
+        // Ensure conversation state exists for each worker, injecting initial prompt
         for w in &self.workers {
-            self.conversations
-                .entry(w.id.clone())
-                .or_insert_with(WorkerConversation::new);
+            self.conversations.entry(w.id.clone()).or_insert_with(|| {
+                let mut conv = WorkerConversation::new();
+                if !w.prompt.is_empty() {
+                    conv.entries.push(ConversationEntry::User {
+                        text: w.prompt.clone(),
+                    });
+                }
+                conv
+            });
         }
         self.needs_redraw = true;
     }
@@ -623,18 +657,33 @@ impl DaemonTuiApp {
     }
 }
 
-/// Truncate tool output to a maximum number of lines.
-fn truncate_output(output: &str, max_lines: usize) -> String {
-    let lines: Vec<&str> = output.lines().collect();
-    if lines.len() <= max_lines {
-        output.to_string()
+/// Returns true for read-only / low-signal tools that can be filtered out.
+pub fn is_noise_tool(tool: &str) -> bool {
+    matches!(
+        tool,
+        "Read" | "Glob" | "Grep" | "WebFetch" | "WebSearch"
+            | "TodoRead" | "TodoWrite" | "Explore"
+    )
+}
+
+/// Extract a human-readable summary from raw JSON tool input.
+///
+/// Mirrors the agent_tui logic: tries `command`, `file_path`, `pattern`,
+/// `old_string`, `query`, `prompt` keys in order, then falls back to
+/// pretty-printed JSON.
+pub fn extract_tool_input(raw_json: &str) -> String {
+    let Ok(val) = serde_json::from_str::<serde_json::Value>(raw_json) else {
+        return raw_json.to_string();
+    };
+    if let Some(obj) = val.as_object() {
+        for key in &["command", "file_path", "pattern", "old_string", "query", "prompt"] {
+            if let Some(s) = obj.get(*key).and_then(|v| v.as_str()) {
+                return s.to_string();
+            }
+        }
+        serde_json::to_string_pretty(&val).unwrap_or_else(|_| raw_json.to_string())
     } else {
-        let kept: Vec<&str> = lines[..max_lines].to_vec();
-        format!(
-            "{}\n... ({} more lines)",
-            kept.join("\n"),
-            lines.len() - max_lines
-        )
+        raw_json.to_string()
     }
 }
 
@@ -874,6 +923,7 @@ mod tests {
     #[test]
     fn scroll_operations() {
         let mut conv = WorkerConversation::new();
+        conv.total_visual_lines = 100; // simulate rendered content
         conv.scroll_up(5);
         assert_eq!(conv.scroll_offset, 5);
         assert!(!conv.auto_scroll);
