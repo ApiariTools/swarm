@@ -39,10 +39,6 @@ enum Commands {
         /// Repo name (required when multiple repos detected)
         #[arg(long)]
         repo: Option<String>,
-        /// Auto-spawn review workers on PR (slug: code-review, security-audit, test-coverage, or custom filename).
-        /// Can be specified multiple times: --review code-review --review security-audit
-        #[arg(long)]
-        review: Vec<String>,
         /// Prompt modifiers to prepend (slug: research-first, explore-patterns, or custom .swarm/modifiers/*.md).
         /// Can be specified multiple times: --mod research-first --mod explore-patterns
         #[arg(long = "mod")]
@@ -64,13 +60,6 @@ enum Commands {
     Merge {
         /// Worktree ID
         worktree: String,
-    },
-    /// Trigger review workers for a worktree with a PR
-    Review {
-        /// Parent worktree ID (e.g. "hive-3")
-        worktree: String,
-        /// Specific review slug (e.g. "code-review"); omit for all auto reviews
-        slug: Option<String>,
     },
     /// Run the TUI-native Claude agent (standalone)
     AgentTui {
@@ -148,7 +137,6 @@ async fn main() -> Result<()> {
             prompt_file,
             agent,
             repo,
-            review,
             modifiers,
         }) => {
             cmd_create(
@@ -157,12 +145,10 @@ async fn main() -> Result<()> {
                 prompt_file,
                 agent.unwrap_or_else(|| "claude-tui".to_string()),
                 repo,
-                review,
                 modifiers,
             )
             .await
         }
-        Some(Commands::Review { worktree, slug }) => cmd_review(work_dir, worktree, slug).await,
         Some(Commands::Send { worktree, message }) => cmd_send(work_dir, worktree, message).await,
         Some(Commands::Close { worktree }) => cmd_close(work_dir, worktree).await,
         Some(Commands::Merge { worktree }) => cmd_merge(work_dir, worktree).await,
@@ -410,7 +396,6 @@ async fn cmd_create(
     prompt_file: Option<String>,
     agent: String,
     repo: Option<String>,
-    review: Vec<String>,
     modifiers: Vec<String>,
 ) -> Result<()> {
     let mut prompt = resolve_prompt(prompt, prompt_file)?;
@@ -450,30 +435,6 @@ async fn cmd_create(
         None
     };
 
-    // Resolve --review slugs to ReviewConfigs
-    let review_configs = if review.is_empty() {
-        None
-    } else {
-        let mut configs = Vec::new();
-        for slug in &review {
-            let review_prompt =
-                core::review::ReviewPrompt::from_slug(slug, &work_dir).ok_or_else(|| {
-                    color_eyre::eyre::eyre!(
-                        "unknown review slug '{}' (available: code-review, security-audit, test-coverage, or custom .swarm/prompts/*.md)",
-                        slug
-                    )
-                })?;
-            configs.push(core::review::ReviewConfig {
-                prompt: review_prompt,
-                agent: None,
-                extra_instructions: None,
-                slug: Some(slug.clone()),
-                mode: core::review::ReviewMode::default(),
-            });
-        }
-        Some(configs)
-    };
-
     if !is_daemon_running(&work_dir) {
         return Err(color_eyre::eyre::eyre!(
             "daemon not running — start it with `swarm` or `swarm daemon start`"
@@ -493,7 +454,6 @@ async fn cmd_create(
         agent,
         repo,
         start_point: None,
-        review_configs,
         workspace: Some(work_dir.clone()),
     };
     match core::ipc::send_daemon_request(&work_dir, &req) {
@@ -559,35 +519,6 @@ async fn cmd_close(work_dir: std::path::PathBuf, worktree: String) -> Result<()>
             return Err(color_eyre::eyre::eyre!("{}", message));
         }
         Ok(_) => println!("closed"),
-        Err(e) => {
-            return Err(color_eyre::eyre::eyre!("daemon request failed: {}", e));
-        }
-    }
-    Ok(())
-}
-
-async fn cmd_review(
-    work_dir: std::path::PathBuf,
-    worktree: String,
-    slug: Option<String>,
-) -> Result<()> {
-    if !is_daemon_running(&work_dir) {
-        return Err(color_eyre::eyre::eyre!(
-            "daemon not running — start it with `swarm` or `swarm daemon start`"
-        ));
-    }
-    let req = daemon::protocol::DaemonRequest::Review {
-        worktree_id: worktree,
-        slug,
-    };
-    match core::ipc::send_daemon_request(&work_dir, &req) {
-        Ok(daemon::protocol::DaemonResponse::Ok { .. }) => {
-            println!("review triggered");
-        }
-        Ok(daemon::protocol::DaemonResponse::Error { message }) => {
-            return Err(color_eyre::eyre::eyre!("{}", message));
-        }
-        Ok(_) => println!("review triggered"),
         Err(e) => {
             return Err(color_eyre::eyre::eyre!("daemon request failed: {}", e));
         }

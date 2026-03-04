@@ -73,7 +73,6 @@ struct ManagedWorker {
     created_at: chrono::DateTime<Local>,
     /// Channel to send messages to the agent supervisor task.
     message_tx: Option<mpsc::UnboundedSender<String>>,
-    review_configs: Option<Vec<crate::core::review::ReviewConfig>>,
 }
 
 impl ManagedWorker {
@@ -91,15 +90,6 @@ impl ManagedWorker {
             pr_state: self.pr.as_ref().map(|p| p.state.clone()),
             restart_count: self.restart_count,
             created_at: Some(self.created_at),
-            review_slugs: self
-                .review_configs
-                .as_ref()
-                .map(|cfgs| {
-                    cfgs.iter()
-                        .filter_map(|c| c.slug.clone())
-                        .collect()
-                })
-                .unwrap_or_default(),
         }
     }
 
@@ -132,10 +122,6 @@ impl ManagedWorker {
             phase: self.phase.clone(),
             status,
             agent_session_status,
-            review_configs: self.review_configs.clone(),
-            review_parent: None,
-            review_slug: None,
-            review_mode: None,
             agent_pid: None,
             session_id: self.session_id.clone(),
             restart_count: Some(self.restart_count),
@@ -289,7 +275,6 @@ async fn register_workspace(
                         pr: wt.pr.clone(),
                         created_at: wt.created_at,
                         message_tx: None,
-                        review_configs: wt.review_configs.clone(),
                     },
                 );
             }
@@ -418,7 +403,6 @@ async fn run_daemon(
                                     pr: wt.pr.clone(),
                                     created_at: wt.created_at,
                                     message_tx: None,
-                                    review_configs: wt.review_configs.clone(),
                                 },
                             );
                         }
@@ -444,6 +428,9 @@ async fn run_daemon(
         } else {
             None
         };
+
+    // IDs queued for immediate PR polling (from TriggerPrPoll requests)
+    let mut triggered_pr_poll_ids: Vec<String> = Vec::new();
 
     loop {
         // Check if deferred workspace registration completed
@@ -484,6 +471,7 @@ async fn run_daemon(
                     &event_tx,
                     &supervisor_tx,
                     &mut state_dirty,
+                    &mut triggered_pr_poll_ids,
                 ).await;
             }
 
@@ -561,6 +549,7 @@ async fn run_daemon(
                             &event_tx,
                             &supervisor_tx,
                             &mut state_dirty,
+                            &mut triggered_pr_poll_ids,
                         ).await;
                     }
                 }
@@ -579,6 +568,7 @@ async fn run_daemon(
                                     worker_id: w.id.clone(),
                                     branch: w.branch.clone(),
                                     repo_path: w.repo_path.clone(),
+                                    worktree_path: w.worktree_path.clone(),
                                     had_pr: w.pr.is_some(),
                                     workspace_path: ws.path.clone(),
                                 })
@@ -590,6 +580,32 @@ async fn run_daemon(
                         }));
                     }
                 }
+            }
+        }
+
+        // Triggered PR poll: if IDs were queued and no poll is in flight, run one now
+        if !triggered_pr_poll_ids.is_empty() && pending_pr_poll.is_none() {
+            let ids = std::mem::take(&mut triggered_pr_poll_ids);
+            let jobs: Vec<PrPollJob> = workspaces
+                .values()
+                .flat_map(|ws| {
+                    ws.workers
+                        .values()
+                        .filter(|w| ids.contains(&w.id))
+                        .map(|w| PrPollJob {
+                            worker_id: w.id.clone(),
+                            branch: w.branch.clone(),
+                            repo_path: w.repo_path.clone(),
+                            worktree_path: w.worktree_path.clone(),
+                            had_pr: w.pr.is_some(),
+                            workspace_path: ws.path.clone(),
+                        })
+                })
+                .collect();
+            if !jobs.is_empty() {
+                pending_pr_poll = Some(tokio::task::spawn_blocking(move || {
+                    poll_prs_background(jobs)
+                }));
             }
         }
 
@@ -622,6 +638,7 @@ async fn handle_request(
     event_tx: &broadcast::Sender<DaemonResponse>,
     supervisor_tx: &mpsc::UnboundedSender<SupervisorEvent>,
     state_dirty: &mut bool,
+    triggered_pr_poll_ids: &mut Vec<String>,
 ) {
     match request {
         DaemonRequest::Ping => {
@@ -692,7 +709,6 @@ async fn handle_request(
             agent,
             repo,
             start_point,
-            review_configs,
             workspace,
         } => {
             let kind = match AgentKind::from_str(&agent) {
@@ -779,7 +795,6 @@ async fn handle_request(
                 pr: None,
                 created_at: Local::now(),
                 message_tx: None,
-                review_configs: review_configs.clone(),
             };
 
             ws.workers.insert(worktree_id.clone(), worker);
@@ -1087,6 +1102,11 @@ async fn handle_request(
             let _ = resp_tx.send(DaemonResponse::Ok { data: None });
         }
 
+        DaemonRequest::TriggerPrPoll { worker_ids } => {
+            triggered_pr_poll_ids.extend(worker_ids);
+            let _ = resp_tx.send(DaemonResponse::Ok { data: None });
+        }
+
         DaemonRequest::GetHistory { worktree_id } => {
             // Search all workspaces for the agent events file
             let mut found = false;
@@ -1121,14 +1141,6 @@ async fn handle_request(
             }
         }
 
-        DaemonRequest::Review { worktree_id, slug } => {
-            swarm_log!(
-                "[daemon] Review request for {} (slug: {:?})",
-                worktree_id,
-                slug
-            );
-            let _ = resp_tx.send(DaemonResponse::Ok { data: None });
-        }
     }
 }
 
@@ -1251,6 +1263,7 @@ struct PrPollJob {
     worker_id: String,
     branch: String,
     repo_path: PathBuf,
+    worktree_path: PathBuf,
     /// Whether this worker already had a PR before this poll.
     had_pr: bool,
     workspace_path: PathBuf,
@@ -1264,46 +1277,70 @@ struct PrPollResult {
     is_new: bool,
 }
 
-/// Run PR polling on a blocking thread. Each worker gets one `gh pr list` call.
+/// Try `gh pr view` from the worktree directory (uses git context to find the PR).
+/// Returns `None` when no PR exists (gh exits non-zero).
+fn try_gh_pr_view(worktree_path: &Path) -> Option<PrInfo> {
+    let output = std::process::Command::new("gh")
+        .args(["pr", "view", "--json", "number,title,state,url"])
+        .current_dir(worktree_path)
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    let pr: serde_json::Value = serde_json::from_str(text.trim()).ok()?;
+    Some(PrInfo {
+        number: pr["number"].as_u64().unwrap_or(0),
+        title: pr["title"].as_str().unwrap_or("").to_string(),
+        state: pr["state"].as_str().unwrap_or("").to_string(),
+        url: pr["url"].as_str().unwrap_or("").to_string(),
+    })
+}
+
+/// Fallback: `gh pr list --head <branch>` from the repo directory.
+fn try_gh_pr_list(repo_path: &Path, branch: &str) -> Option<PrInfo> {
+    let output = std::process::Command::new("gh")
+        .args([
+            "pr", "list", "--head", branch, "--state", "all", "--json",
+            "number,title,state,url", "--limit", "1",
+        ])
+        .current_dir(repo_path)
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    let prs: Vec<serde_json::Value> = serde_json::from_str(text.trim()).ok()?;
+    let pr = prs.first()?;
+    Some(PrInfo {
+        number: pr["number"].as_u64().unwrap_or(0),
+        title: pr["title"].as_str().unwrap_or("").to_string(),
+        state: pr["state"].as_str().unwrap_or("").to_string(),
+        url: pr["url"].as_str().unwrap_or("").to_string(),
+    })
+}
+
+/// Run PR polling on a blocking thread. Tries `gh pr view` first (uses git
+/// context from the worktree), then falls back to `gh pr list --head <branch>`.
 fn poll_prs_background(jobs: Vec<PrPollJob>) -> Vec<PrPollResult> {
     let mut results = Vec::new();
     for job in &jobs {
-        let output = std::process::Command::new("gh")
-            .args([
-                "pr",
-                "list",
-                "--head",
-                &job.branch,
-                "--state",
-                "all",
-                "--json",
-                "number,title,state,url",
-                "--limit",
-                "1",
-            ])
-            .current_dir(&job.repo_path)
-            .output();
+        let pr = try_gh_pr_view(&job.worktree_path)
+            .or_else(|| try_gh_pr_list(&job.repo_path, &job.branch));
 
-        if let Ok(output) = output
-            && output.status.success()
-        {
-            let text = String::from_utf8_lossy(&output.stdout);
-            if let Ok(prs) = serde_json::from_str::<Vec<serde_json::Value>>(text.trim())
-                && let Some(pr) = prs.first()
-            {
-                let new_pr = PrInfo {
-                    number: pr["number"].as_u64().unwrap_or(0),
-                    title: pr["title"].as_str().unwrap_or("").to_string(),
-                    state: pr["state"].as_str().unwrap_or("").to_string(),
-                    url: pr["url"].as_str().unwrap_or("").to_string(),
-                };
-                results.push(PrPollResult {
-                    worker_id: job.worker_id.clone(),
-                    workspace_path: job.workspace_path.clone(),
-                    pr: new_pr,
-                    is_new: !job.had_pr,
-                });
-            }
+        if let Some(new_pr) = pr {
+            results.push(PrPollResult {
+                worker_id: job.worker_id.clone(),
+                workspace_path: job.workspace_path.clone(),
+                pr: new_pr,
+                is_new: !job.had_pr,
+            });
         }
     }
     results
@@ -1346,10 +1383,9 @@ fn apply_pr_poll_results(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::review::ReviewConfig;
 
     /// Build a ManagedWorker with sensible defaults for testing.
-    fn test_worker(id: &str, review_configs: Option<Vec<ReviewConfig>>) -> ManagedWorker {
+    fn test_worker(id: &str) -> ManagedWorker {
         ManagedWorker {
             id: id.to_string(),
             branch: format!("swarm/{}", id),
@@ -1363,7 +1399,6 @@ mod tests {
             pr: None,
             created_at: Local::now(),
             message_tx: None,
-            review_configs,
         }
     }
 
@@ -1382,11 +1417,11 @@ mod tests {
         (resp_rx, resp_tx, workspaces, event_tx, supervisor_tx)
     }
 
-    /// Create a test workspace with optional workers.
-    fn test_workspace(path: &str, workers: Vec<(&str, Option<Vec<ReviewConfig>>)>) -> WorkspaceState {
+    /// Create a test workspace with workers.
+    fn test_workspace(path: &str, worker_ids: Vec<&str>) -> WorkspaceState {
         let mut ws_workers = HashMap::new();
-        for (id, cfgs) in workers {
-            ws_workers.insert(id.to_string(), test_worker(id, cfgs));
+        for id in worker_ids {
+            ws_workers.insert(id.to_string(), test_worker(id));
         }
         WorkspaceState {
             path: PathBuf::from(path),
@@ -1396,44 +1431,11 @@ mod tests {
         }
     }
 
-    #[test]
-    fn to_worker_info_extracts_review_slugs() {
-        let cfgs = vec![
-            ReviewConfig {
-                prompt: crate::core::review::ReviewPrompt::BuiltIn {
-                    slug: "code-review".into(),
-                },
-                agent: None,
-                extra_instructions: None,
-                slug: Some("code-review".into()),
-                mode: crate::core::review::ReviewMode::Review,
-            },
-            ReviewConfig {
-                prompt: crate::core::review::ReviewPrompt::BuiltIn {
-                    slug: "security-audit".into(),
-                },
-                agent: None,
-                extra_instructions: None,
-                slug: Some("security-audit".into()),
-                mode: crate::core::review::ReviewMode::Review,
-            },
-        ];
-        let worker = test_worker("hive-abc", Some(cfgs));
-        let info = worker.to_worker_info();
-        assert_eq!(info.review_slugs, vec!["code-review", "security-audit"]);
-    }
-
-    #[test]
-    fn to_worker_info_no_review_configs() {
-        let worker = test_worker("hive-def", None);
-        let info = worker.to_worker_info();
-        assert!(info.review_slugs.is_empty());
-    }
-
     #[tokio::test]
     async fn handle_request_ping() {
         let (mut resp_rx, resp_tx, mut workspaces, event_tx, supervisor_tx) = test_harness();
         let mut state_dirty = false;
+        let mut triggered = Vec::new();
 
         handle_request(
             DaemonRequest::Ping,
@@ -1442,6 +1444,7 @@ mod tests {
             &event_tx,
             &supervisor_tx,
             &mut state_dirty,
+            &mut triggered,
         )
         .await;
 
@@ -1453,6 +1456,7 @@ mod tests {
     async fn handle_request_list_workers_empty() {
         let (mut resp_rx, resp_tx, mut workspaces, event_tx, supervisor_tx) = test_harness();
         let mut state_dirty = false;
+        let mut triggered = Vec::new();
 
         handle_request(
             DaemonRequest::ListWorkers { workspace: None },
@@ -1461,6 +1465,7 @@ mod tests {
             &event_tx,
             &supervisor_tx,
             &mut state_dirty,
+            &mut triggered,
         )
         .await;
 
@@ -1472,56 +1477,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handle_request_list_workers_with_reviews() {
-        let (mut resp_rx, resp_tx, mut workspaces, event_tx, supervisor_tx) = test_harness();
-        let mut state_dirty = false;
-
-        let cfgs = vec![ReviewConfig {
-            prompt: crate::core::review::ReviewPrompt::BuiltIn {
-                slug: "code-review".into(),
-            },
-            agent: None,
-            extra_instructions: None,
-            slug: Some("code-review".into()),
-            mode: crate::core::review::ReviewMode::Review,
-        }];
-        workspaces.insert(
-            PathBuf::from("/tmp/test"),
-            test_workspace("/tmp/test", vec![("hive-1", Some(cfgs))]),
-        );
-
-        handle_request(
-            DaemonRequest::ListWorkers { workspace: None },
-            &resp_tx,
-            &mut workspaces,
-            &event_tx,
-            &supervisor_tx,
-            &mut state_dirty,
-        )
-        .await;
-
-        let resp = resp_rx.try_recv().unwrap();
-        match resp {
-            DaemonResponse::Workers { workers } => {
-                assert_eq!(workers.len(), 1);
-                assert_eq!(workers[0].review_slugs, vec!["code-review"]);
-            }
-            other => panic!("expected Workers, got {:?}", other),
-        }
-    }
-
-    #[tokio::test]
     async fn handle_request_list_workers_filtered_by_workspace() {
         let (mut resp_rx, resp_tx, mut workspaces, event_tx, supervisor_tx) = test_harness();
         let mut state_dirty = false;
+        let mut triggered = Vec::new();
 
         workspaces.insert(
             PathBuf::from("/tmp/ws1"),
-            test_workspace("/tmp/ws1", vec![("hive-1", None)]),
+            test_workspace("/tmp/ws1", vec!["hive-1"]),
         );
         workspaces.insert(
             PathBuf::from("/tmp/ws2"),
-            test_workspace("/tmp/ws2", vec![("hive-2", None), ("hive-3", None)]),
+            test_workspace("/tmp/ws2", vec!["hive-2", "hive-3"]),
         );
 
         // List all
@@ -1532,6 +1499,7 @@ mod tests {
             &event_tx,
             &supervisor_tx,
             &mut state_dirty,
+            &mut triggered,
         )
         .await;
 
@@ -1551,6 +1519,7 @@ mod tests {
             &event_tx,
             &supervisor_tx,
             &mut state_dirty,
+            &mut triggered,
         )
         .await;
 
@@ -1565,6 +1534,7 @@ mod tests {
     async fn handle_request_send_message_unknown_worker() {
         let (mut resp_rx, resp_tx, mut workspaces, event_tx, supervisor_tx) = test_harness();
         let mut state_dirty = false;
+        let mut triggered = Vec::new();
 
         handle_request(
             DaemonRequest::SendMessage {
@@ -1576,6 +1546,7 @@ mod tests {
             &event_tx,
             &supervisor_tx,
             &mut state_dirty,
+            &mut triggered,
         )
         .await;
 
@@ -1592,6 +1563,7 @@ mod tests {
     async fn handle_request_close_unknown_worker() {
         let (mut resp_rx, resp_tx, mut workspaces, event_tx, supervisor_tx) = test_harness();
         let mut state_dirty = false;
+        let mut triggered = Vec::new();
 
         handle_request(
             DaemonRequest::CloseWorker {
@@ -1602,6 +1574,7 @@ mod tests {
             &event_tx,
             &supervisor_tx,
             &mut state_dirty,
+            &mut triggered,
         )
         .await;
 
@@ -1618,6 +1591,7 @@ mod tests {
     async fn handle_request_register_workspace() {
         let (mut resp_rx, resp_tx, mut workspaces, event_tx, supervisor_tx) = test_harness();
         let mut state_dirty = false;
+        let mut triggered = Vec::new();
 
         let dir = tempfile::tempdir().unwrap();
 
@@ -1630,6 +1604,7 @@ mod tests {
             &event_tx,
             &supervisor_tx,
             &mut state_dirty,
+            &mut triggered,
         )
         .await;
 
@@ -1642,10 +1617,11 @@ mod tests {
     async fn handle_request_list_workspaces() {
         let (mut resp_rx, resp_tx, mut workspaces, event_tx, supervisor_tx) = test_harness();
         let mut state_dirty = false;
+        let mut triggered = Vec::new();
 
         workspaces.insert(
             PathBuf::from("/tmp/ws1"),
-            test_workspace("/tmp/ws1", vec![("hive-1", None)]),
+            test_workspace("/tmp/ws1", vec!["hive-1"]),
         );
         workspaces.insert(
             PathBuf::from("/tmp/ws2"),
@@ -1659,6 +1635,7 @@ mod tests {
             &event_tx,
             &supervisor_tx,
             &mut state_dirty,
+            &mut triggered,
         )
         .await;
 
@@ -1675,14 +1652,15 @@ mod tests {
     async fn handle_request_cross_workspace_worker_lookup() {
         let (mut resp_rx, resp_tx, mut workspaces, event_tx, supervisor_tx) = test_harness();
         let mut state_dirty = false;
+        let mut triggered = Vec::new();
 
         workspaces.insert(
             PathBuf::from("/tmp/ws1"),
-            test_workspace("/tmp/ws1", vec![("hive-1", None)]),
+            test_workspace("/tmp/ws1", vec!["hive-1"]),
         );
         workspaces.insert(
             PathBuf::from("/tmp/ws2"),
-            test_workspace("/tmp/ws2", vec![("hive-2", None)]),
+            test_workspace("/tmp/ws2", vec!["hive-2"]),
         );
 
         // SendMessage to worker in ws2 without specifying workspace
@@ -1696,6 +1674,7 @@ mod tests {
             &event_tx,
             &supervisor_tx,
             &mut state_dirty,
+            &mut triggered,
         )
         .await;
 
@@ -1709,13 +1688,37 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn handle_request_trigger_pr_poll() {
+        let (mut resp_rx, resp_tx, mut workspaces, event_tx, supervisor_tx) = test_harness();
+        let mut state_dirty = false;
+        let mut triggered = Vec::new();
+
+        handle_request(
+            DaemonRequest::TriggerPrPoll {
+                worker_ids: vec!["w-1".into(), "w-2".into()],
+            },
+            &resp_tx,
+            &mut workspaces,
+            &event_tx,
+            &supervisor_tx,
+            &mut state_dirty,
+            &mut triggered,
+        )
+        .await;
+
+        let resp = resp_rx.try_recv().unwrap();
+        assert!(matches!(resp, DaemonResponse::Ok { data: None }));
+        assert_eq!(triggered, vec!["w-1", "w-2"]);
+    }
+
     // ── Background PR poll tests ─────────────────────────
 
     #[test]
     fn apply_pr_poll_results_updates_worker() {
         let mut workspaces = HashMap::new();
         let ws_path = PathBuf::from("/tmp/ws");
-        let ws = test_workspace("/tmp/ws", vec![("w-1", None)]);
+        let ws = test_workspace("/tmp/ws", vec!["w-1"]);
         assert!(ws.workers.get("w-1").unwrap().pr.is_none());
         workspaces.insert(ws_path.clone(), ws);
 
@@ -1744,7 +1747,7 @@ mod tests {
     fn apply_pr_poll_results_ignores_missing_worker() {
         let mut workspaces = HashMap::new();
         let ws_path = PathBuf::from("/tmp/ws");
-        workspaces.insert(ws_path.clone(), test_workspace("/tmp/ws", vec![("w-1", None)]));
+        workspaces.insert(ws_path.clone(), test_workspace("/tmp/ws", vec!["w-1"]));
 
         let results = vec![PrPollResult {
             worker_id: "nonexistent".to_string(),
@@ -1791,6 +1794,7 @@ mod tests {
             worker_id: "test".to_string(),
             branch: "swarm/test".to_string(),
             repo_path: PathBuf::from("/tmp/nonexistent-repo-12345"),
+            worktree_path: PathBuf::from("/tmp/nonexistent-wt-12345"),
             had_pr: false,
             workspace_path: PathBuf::from("/tmp/ws"),
         }];

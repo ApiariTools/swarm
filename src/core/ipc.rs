@@ -1,4 +1,3 @@
-use crate::core::review::{ReviewConfig, deserialize_review_configs};
 use crate::core::state::WorkerPhase;
 use apiari_common::ipc::{JsonlReader, JsonlWriter};
 use chrono::{DateTime, Local};
@@ -19,12 +18,6 @@ pub enum InboxMessage {
         repo: Option<String>,
         #[serde(default)]
         start_point: Option<String>,
-        #[serde(
-            default,
-            deserialize_with = "deserialize_review_configs",
-            alias = "review_config"
-        )]
-        review_configs: Option<Vec<ReviewConfig>>,
         timestamp: DateTime<Local>,
     },
     Send {
@@ -41,13 +34,6 @@ pub enum InboxMessage {
     Merge {
         id: String,
         worktree: String,
-        timestamp: DateTime<Local>,
-    },
-    Review {
-        id: String,
-        worktree: String,
-        #[serde(default)]
-        slug: Option<String>,
         timestamp: DateTime<Local>,
     },
 }
@@ -102,12 +88,6 @@ pub enum SwarmEvent {
         pr_url: String,
         pr_title: String,
         pr_number: u64,
-        timestamp: DateTime<Local>,
-    },
-    ReviewStarted {
-        worktree: String,
-        parent: String,
-        slug: String,
         timestamp: DateTime<Local>,
     },
 }
@@ -277,7 +257,6 @@ mod tests {
             agent: "claude".to_string(),
             repo: Some("swarm".to_string()),
             start_point: None,
-            review_configs: None,
             timestamp: Local::now(),
         };
         let json = serde_json::to_string(&msg).unwrap();
@@ -495,71 +474,4 @@ mod tests {
         }
     }
 
-    // ── Review message tests ──────────────────────────────
-
-    #[test]
-    fn test_review_message_round_trips() {
-        let msg = InboxMessage::Review {
-            id: "msg-5".to_string(),
-            worktree: "hive-3".to_string(),
-            slug: Some("code-review".to_string()),
-            timestamp: Local::now(),
-        };
-        let json = serde_json::to_string(&msg).unwrap();
-        let restored: InboxMessage = serde_json::from_str(&json).unwrap();
-        match restored {
-            InboxMessage::Review {
-                worktree, slug, ..
-            } => {
-                assert_eq!(worktree, "hive-3");
-                assert_eq!(slug.as_deref(), Some("code-review"));
-            }
-            _ => panic!("expected Review variant"),
-        }
-    }
-
-    #[test]
-    fn test_review_message_without_slug() {
-        let msg = InboxMessage::Review {
-            id: "msg-6".to_string(),
-            worktree: "hive-4".to_string(),
-            slug: None,
-            timestamp: Local::now(),
-        };
-        let json = serde_json::to_string(&msg).unwrap();
-        let restored: InboxMessage = serde_json::from_str(&json).unwrap();
-        match restored {
-            InboxMessage::Review { slug, .. } => {
-                assert!(slug.is_none());
-            }
-            _ => panic!("expected Review variant"),
-        }
-    }
-
-    #[test]
-    fn test_review_started_event_round_trips() {
-        let event = SwarmEvent::ReviewStarted {
-            worktree: "hive-3-review-code-review".to_string(),
-            parent: "hive-3".to_string(),
-            slug: "code-review".to_string(),
-            timestamp: Local::now(),
-        };
-        let json = serde_json::to_string(&event).unwrap();
-        assert!(json.contains("\"event\":\"review_started\""));
-
-        let restored: SwarmEvent = serde_json::from_str(&json).unwrap();
-        match restored {
-            SwarmEvent::ReviewStarted {
-                worktree,
-                parent,
-                slug,
-                ..
-            } => {
-                assert_eq!(worktree, "hive-3-review-code-review");
-                assert_eq!(parent, "hive-3");
-                assert_eq!(slug, "code-review");
-            }
-            _ => panic!("expected ReviewStarted"),
-        }
-    }
 }

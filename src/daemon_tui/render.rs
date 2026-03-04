@@ -1,7 +1,6 @@
 use super::app::{DaemonTuiApp, Mode, Panel, WorkerConversation, daemon_agents, is_noise_tool};
 use crate::agent_tui::app::ConversationEntry;
 use crate::agent_tui::markdown;
-use crate::core::review::{ReviewMode, load_reviews_toml};
 use crate::core::state::WorkerPhase;
 use crate::daemon::protocol::WorkerInfo;
 use crate::tui::theme;
@@ -56,7 +55,6 @@ pub fn draw(frame: &mut Frame, app: &mut DaemonTuiApp) {
         Mode::RepoSelect => draw_repo_select_overlay(frame, area, app),
         Mode::AgentSelect => draw_agent_select_overlay(frame, area, app),
         Mode::ModifierSelect => draw_modifier_select_overlay(frame, area, app),
-        Mode::ReviewSelect => draw_review_select_overlay(frame, area, app),
         Mode::Input => draw_input_overlay(frame, area, app),
         Mode::PrDetail => draw_pr_detail_overlay(frame, area, app),
         Mode::Normal => {}
@@ -168,9 +166,9 @@ fn draw_divider(frame: &mut Frame, area: Rect) {
     frame.render_widget(divider, inner);
 }
 
-/// Height of a single worker item: 3 rows for the worker + 1 per review slug.
-fn worker_item_height(worker: &WorkerInfo) -> usize {
-    3 + worker.review_slugs.len()
+/// Height of a single worker item: 3 rows (id, agent+time, prompt).
+fn worker_item_height(_worker: &WorkerInfo, _app: &DaemonTuiApp) -> usize {
+    3
 }
 
 fn draw_worker_list(frame: &mut Frame, area: Rect, app: &DaemonTuiApp) {
@@ -188,15 +186,15 @@ fn draw_worker_list(frame: &mut Frame, area: Rect, app: &DaemonTuiApp) {
         .iter()
         .scan(0usize, |acc, w| {
             let top = *acc;
-            *acc += worker_item_height(w);
+            *acc += worker_item_height(w, app);
             Some(top)
         })
         .collect();
-    let total_height: usize = app.workers.iter().map(worker_item_height).sum();
+    let total_height: usize = app.workers.iter().map(|w| worker_item_height(w, app)).sum();
 
     // Compute scroll offset
     let selected_top = item_tops[app.selected];
-    let selected_bottom = selected_top + worker_item_height(&app.workers[app.selected]);
+    let selected_bottom = selected_top + worker_item_height(&app.workers[app.selected], app);
     let mut scroll = app.list_scroll.get();
 
     if selected_top < scroll {
@@ -215,7 +213,7 @@ fn draw_worker_list(frame: &mut Frame, area: Rect, app: &DaemonTuiApp) {
     let viewport_bottom = area.y + area.height;
 
     for (i, worker) in app.workers.iter().enumerate() {
-        let item_h = worker_item_height(worker);
+        let item_h = worker_item_height(worker, app);
         let item_top = item_tops[i];
         let item_bottom = item_top + item_h;
 
@@ -242,20 +240,6 @@ fn draw_worker_list(frame: &mut Frame, area: Rect, app: &DaemonTuiApp) {
             let rect = Rect::new(area.x, render_y, area.width, worker_rows as u16);
             draw_worker_row(frame, rect, worker, is_selected, i, app);
             render_y += worker_rows as u16;
-        }
-
-        // Draw review sub-rows
-        let review_skip = skip_top.saturating_sub(3);
-        for (ri, slug) in worker.review_slugs.iter().enumerate() {
-            if render_y >= viewport_bottom {
-                break;
-            }
-            if ri < review_skip {
-                continue;
-            }
-            let wt_color = SIDEBAR_COLORS[i % SIDEBAR_COLORS.len()];
-            draw_review_sub_row(frame, Rect::new(area.x, render_y, area.width, 1), slug, wt_color);
-            render_y += 1;
         }
     }
 }
@@ -332,13 +316,6 @@ fn draw_worker_row(
         ));
     }
 
-    if !worker.review_slugs.is_empty() {
-        line1_spans.push(Span::styled(
-            format!(" \u{25be}{}R", worker.review_slugs.len()),
-            Style::default().fg(Color::Rgb(60, 180, 180)), // teal
-        ));
-    }
-
     if row_chunks[0].height > 0 {
         frame.render_widget(Paragraph::new(Line::from(line1_spans)), row_chunks[0]);
     }
@@ -401,26 +378,6 @@ fn draw_worker_row(
     }
 }
 
-/// Draw a compact 1-line review sub-row beneath its parent worker.
-fn draw_review_sub_row(frame: &mut Frame, area: Rect, slug: &str, wt_color: Color) {
-    let slug_label = match slug {
-        "code-review" => "R:code",
-        "security-audit" => "R:sec",
-        "test-coverage" => "R:test",
-        other => other,
-    };
-
-    let line = Line::from(vec![
-        Span::styled("\u{258c}", Style::default().fg(wt_color)),
-        Span::styled("    ", Style::default()),
-        Span::styled(
-            slug_label,
-            Style::default().fg(Color::Rgb(60, 180, 180)),
-        ),
-    ]);
-    frame.render_widget(Paragraph::new(line), area);
-}
-
 fn draw_sidebar_status_bar(frame: &mut Frame, area: Rect, app: &DaemonTuiApp) {
     if let Some(msg) = app.current_status() {
         let style = if msg.starts_with("error") {
@@ -463,8 +420,8 @@ fn draw_conversation_panel(frame: &mut Frame, area: Rect, app: &mut DaemonTuiApp
         return;
     }
 
-    let selected_id = app.workers.get(app.selected).map(|w| w.id.clone());
-    let selected_worker = app.workers.get(app.selected).cloned();
+    let selected_id = app.selected_worker().map(|w| w.id.clone());
+    let selected_worker = app.selected_worker().cloned();
 
     // Determine if we need an input bar
     let show_input = is_focused && app.mode == Mode::Input;
@@ -1364,120 +1321,6 @@ fn draw_modifier_select_overlay(frame: &mut Frame, area: Rect, app: &DaemonTuiAp
     );
 }
 
-fn draw_review_select_overlay(frame: &mut Frame, area: Rect, app: &DaemonTuiApp) {
-    let popup_width = (area.width).min(50);
-    let popup_height = (app.review_prompts.len() as u16 + 6).min(area.height);
-    let popup = centered_rect(popup_width, popup_height, area);
-    frame.render_widget(Clear, popup);
-
-    let block = Block::default()
-        .title(Span::styled(" reviews ", theme::title()))
-        .borders(Borders::ALL)
-        .border_style(theme::border_active())
-        .style(Style::default().bg(theme::COMB));
-
-    let inner = block.inner(popup);
-    frame.render_widget(block, popup);
-
-    if app.review_prompts.is_empty() {
-        let empty = Line::from(Span::styled(" no reviews available", theme::muted()));
-        frame.render_widget(
-            Paragraph::new(empty),
-            Rect::new(inner.x, inner.y + 1, inner.width, 1),
-        );
-    } else {
-        let project_config = load_reviews_toml(&app.work_dir);
-        for (i, prompt) in app.review_prompts.iter().enumerate() {
-            let y = inner.y + 1 + i as u16;
-            if y >= inner.y + inner.height.saturating_sub(3) {
-                break;
-            }
-            let is_cursor = i == app.review_cursor;
-            let is_checked = app.review_selected[i];
-
-            let cursor_indicator = if is_cursor { "\u{25b8}" } else { " " };
-            let checkbox = if is_checked { "[x]" } else { "[ ]" };
-
-            let cursor_style = if is_cursor {
-                theme::selected()
-            } else {
-                theme::muted()
-            };
-            let checkbox_style = if is_checked {
-                Style::default().fg(theme::HONEY)
-            } else {
-                theme::muted()
-            };
-            let label_style = if is_cursor {
-                theme::selected()
-            } else {
-                theme::text()
-            };
-
-            // Mode badge from project config
-            let mode = project_config
-                .as_ref()
-                .and_then(|p| p.reviews.get(prompt.slug()))
-                .and_then(|e| e.mode)
-                .unwrap_or_default();
-
-            let (mode_label, mode_style) = match mode {
-                ReviewMode::Review => (
-                    "review",
-                    Style::default().fg(Color::Rgb(60, 180, 180)),
-                ),
-                ReviewMode::Act => ("act", Style::default().fg(theme::HONEY)),
-            };
-
-            let line = Line::from(vec![
-                Span::styled(format!(" {} ", cursor_indicator), cursor_style),
-                Span::styled(format!("{} ", checkbox), checkbox_style),
-                Span::styled(prompt.label(), label_style),
-                Span::styled(format!("  {}", mode_label), mode_style),
-            ]);
-            frame.render_widget(
-                Paragraph::new(line),
-                Rect::new(inner.x, y, inner.width, 1),
-            );
-        }
-    }
-
-    // Context line
-    let agents = daemon_agents();
-    let agent_name = agents
-        .get(app.agent_select_index)
-        .map(|a| a.daemon_name())
-        .unwrap_or("?");
-    let count = app.review_selected.iter().filter(|&&s| s).count();
-    let ctx = Line::from(vec![
-        Span::styled(" agent: ", theme::muted()),
-        Span::styled(agent_name, theme::accent()),
-        Span::styled(format!("  reviews: {}", count), theme::muted()),
-    ]);
-    let ctx_y = inner.y + inner.height.saturating_sub(3);
-    frame.render_widget(
-        Paragraph::new(ctx),
-        Rect::new(inner.x, ctx_y, inner.width, 1),
-    );
-
-    // Hint
-    let hint = Line::from(vec![
-        Span::styled("space", theme::key_hint()),
-        Span::styled(" toggle  ", theme::key_desc()),
-        Span::styled("a", theme::key_hint()),
-        Span::styled(" all  ", theme::key_desc()),
-        Span::styled("\u{21b5}", theme::key_hint()),
-        Span::styled(" confirm  ", theme::key_desc()),
-        Span::styled("esc", theme::key_hint()),
-        Span::styled(" back", theme::key_desc()),
-    ]);
-    let hint_y = inner.y + inner.height.saturating_sub(1);
-    frame.render_widget(
-        Paragraph::new(hint),
-        Rect::new(inner.x + 1, hint_y, inner.width.saturating_sub(2), 1),
-    );
-}
-
 fn draw_input_overlay(frame: &mut Frame, area: Rect, app: &DaemonTuiApp) {
     // Only show if conversation is focused — we draw it inline in the conversation panel.
     // This overlay is for when sidebar is focused and user presses 's' to quick-send.
@@ -1511,7 +1354,9 @@ fn draw_pr_detail_overlay(frame: &mut Frame, area: Rect, app: &DaemonTuiApp) {
         None => return,
     };
 
-    let popup_width = (area.width).min(56);
+    // Size to fit the URL (+ 12 for "  URL:   " prefix and border padding)
+    let min_width = (pr.url.len() as u16 + 12).max(56);
+    let popup_width = area.width.min(min_width);
     let popup = centered_rect(popup_width, 11, area);
     frame.render_widget(Clear, popup);
 
@@ -1548,10 +1393,7 @@ fn draw_pr_detail_overlay(frame: &mut Frame, area: Rect, app: &DaemonTuiApp) {
         Line::from(""),
         Line::from(vec![
             Span::styled("  URL:   ", theme::muted()),
-            Span::styled(
-                truncate_str(&pr.url, (inner.width as usize).saturating_sub(10)),
-                Style::default().fg(theme::FROST),
-            ),
+            Span::styled(&pr.url, Style::default().fg(theme::FROST)),
         ]),
         Line::from(""),
         Line::from(vec![

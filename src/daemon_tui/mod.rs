@@ -33,7 +33,6 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 use crate::core::modifier;
-use crate::core::review::{ReviewConfig, load_reviews_toml};
 use crate::daemon::protocol::{DaemonRequest, DaemonResponse};
 
 /// Run the daemon TUI connected to a remote daemon via TCP.
@@ -278,7 +277,32 @@ async fn event_loop(
             Some(result) = daemon_rx.recv() => {
                 match result {
                     Ok(resp) => {
+                        // Detect new workers before updating state, so we can
+                        // trigger an immediate PR poll for them.
+                        let new_worker_ids = if let DaemonResponse::Workers { ref workers } = resp {
+                            let existing: std::collections::HashSet<&str> =
+                                app.workers.iter().map(|w| w.id.as_str()).collect();
+                            workers
+                                .iter()
+                                .filter(|w| !existing.contains(w.id.as_str()))
+                                .map(|w| w.id.clone())
+                                .collect::<Vec<_>>()
+                        } else {
+                            Vec::new()
+                        };
+
                         handle_daemon_response(app, resp);
+
+                        if !new_worker_ids.is_empty() {
+                            fire_and_forget(
+                                client,
+                                app,
+                                DaemonRequest::TriggerPrPoll {
+                                    worker_ids: new_worker_ids,
+                                },
+                            )
+                            .await;
+                        }
                     }
                     Err(e) => {
                         // Only trigger disconnect if the current reader task
@@ -318,14 +342,12 @@ async fn event_loop(
                     app.needs_redraw = true;
                 }
 
-                // Periodic worker refresh: if connected but workers list is empty,
-                // re-request every 2s (handles race with daemon workspace registration).
+                // Periodic worker refresh: every 5s while connected, so workers
+                // created by other agents/processes appear automatically.
                 if app.connected
-                    && app.workers.is_empty()
-                    && last_worker_request.elapsed() >= Duration::from_secs(2)
+                    && last_worker_request.elapsed() >= Duration::from_secs(5)
                 {
                     last_worker_request = std::time::Instant::now();
-                    tui_log!(&app.work_dir, "worker refresh (empty list, re-requesting)");
                     fire_and_forget(
                         client,
                         app,
@@ -386,7 +408,6 @@ enum KeyAction {
         prompt: String,
         agent: String,
         repo: Option<String>,
-        review_configs: Option<Vec<ReviewConfig>>,
     },
     SendMessage {
         worktree_id: String,
@@ -408,7 +429,6 @@ async fn handle_action(
             prompt,
             agent,
             repo,
-            review_configs,
         } => {
             app.set_status("creating worker...".to_string());
             let req = DaemonRequest::CreateWorker {
@@ -416,7 +436,6 @@ async fn handle_action(
                 agent,
                 repo,
                 start_point: None,
-                review_configs,
                 workspace: Some(app.work_dir.clone()),
             };
             fire_and_forget(client, app, req).await;
@@ -653,43 +672,6 @@ fn handle_key(app: &mut DaemonTuiApp, key: crossterm::event::KeyEvent) -> KeyAct
                 KeyAction::None
             }
             KeyCode::Enter => {
-                app.review_cursor = 0;
-                app.review_selected = vec![false; app.review_prompts.len()];
-                app.mode = Mode::ReviewSelect;
-                KeyAction::None
-            }
-            KeyCode::Esc => {
-                app.mode = Mode::AgentSelect;
-                KeyAction::None
-            }
-            _ => KeyAction::None,
-        },
-        Mode::ReviewSelect => match key.code {
-            KeyCode::Up | KeyCode::Char('k') => {
-                app.review_cursor = app.review_cursor.saturating_sub(1);
-                KeyAction::None
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if app.review_cursor + 1 < app.review_prompts.len() {
-                    app.review_cursor += 1;
-                }
-                KeyAction::None
-            }
-            KeyCode::Char(' ') => {
-                if let Some(sel) = app.review_selected.get_mut(app.review_cursor) {
-                    *sel = !*sel;
-                }
-                KeyAction::None
-            }
-            KeyCode::Char('a') => {
-                let any_selected = app.review_selected.iter().any(|&s| s);
-                let new_val = !any_selected;
-                for sel in &mut app.review_selected {
-                    *sel = new_val;
-                }
-                KeyAction::None
-            }
-            KeyCode::Enter => {
                 let agents = daemon_agents();
                 let agent = agents
                     .get(app.agent_select_index)
@@ -705,40 +687,15 @@ fn handle_key(app: &mut DaemonTuiApp, key: crossterm::event::KeyEvent) -> KeyAct
                     &app.modifier_selected,
                 );
 
-                // Build review_configs from selections
-                let project_config = load_reviews_toml(&app.work_dir);
-                let selected: Vec<ReviewConfig> = app
-                    .review_prompts
-                    .iter()
-                    .zip(app.review_selected.iter())
-                    .filter(|(_, sel)| **sel)
-                    .map(|(rp, _)| {
-                        let slug = rp.slug().to_string();
-                        let entry = project_config
-                            .as_ref()
-                            .and_then(|p| p.reviews.get(&slug));
-                        ReviewConfig {
-                            prompt: rp.clone(),
-                            agent: entry
-                                .and_then(|e| e.agent.as_ref())
-                                .and_then(|a| crate::core::agent::AgentKind::from_str(a)),
-                            extra_instructions: entry.and_then(|e| e.prompt.clone()),
-                            slug: Some(slug),
-                            mode: entry.and_then(|e| e.mode).unwrap_or_default(),
-                        }
-                    })
-                    .collect();
-
                 app.mode = Mode::Normal;
                 KeyAction::CreateWorker {
                     prompt,
                     agent,
                     repo,
-                    review_configs: Some(selected),
                 }
             }
             KeyCode::Esc => {
-                app.mode = Mode::ModifierSelect;
+                app.mode = Mode::AgentSelect;
                 KeyAction::None
             }
             _ => KeyAction::None,
@@ -850,7 +807,8 @@ fn handle_key(app: &mut DaemonTuiApp, key: crossterm::event::KeyEvent) -> KeyAct
                     KeyAction::None
                 }
                 KeyCode::Char('p') => {
-                    if let Some(w) = app.selected_worker()
+                    // PR detail always targets the parent worker
+                    if let Some(w) = app.selected_parent()
                         && let Some(detail) = PrDetailInfo::from_worker(w)
                     {
                         app.pr_detail = Some(detail);
@@ -1003,7 +961,8 @@ fn handle_key(app: &mut DaemonTuiApp, key: crossterm::event::KeyEvent) -> KeyAct
                     KeyAction::None
                 }
                 KeyCode::Char('p') => {
-                    if let Some(w) = app.selected_worker()
+                    // PR detail always targets the parent worker
+                    if let Some(w) = app.selected_parent()
                         && let Some(detail) = PrDetailInfo::from_worker(w)
                     {
                         app.pr_detail = Some(detail);
@@ -1276,7 +1235,6 @@ mod tests {
             pr_state: None,
             restart_count: 0,
             created_at: None,
-            review_slugs: vec![],
         }
     }
 
@@ -1621,12 +1579,13 @@ mod tests {
     }
 
     #[test]
-    fn modifier_select_enter_goes_to_review_select() {
+    fn modifier_select_enter_creates_worker() {
         let mut app = DaemonTuiApp::new(std::path::PathBuf::from("/tmp"));
         app.pending_prompt = "task".into();
         app.mode = Mode::ModifierSelect;
-        handle_key(&mut app, key(KeyCode::Enter));
-        assert!(matches!(app.mode, Mode::ReviewSelect));
+        let action = handle_key(&mut app, key(KeyCode::Enter));
+        assert!(matches!(app.mode, Mode::Normal));
+        assert!(matches!(action, KeyAction::CreateWorker { .. }));
     }
 
     #[test]
@@ -1637,11 +1596,4 @@ mod tests {
         assert!(matches!(app.mode, Mode::AgentSelect));
     }
 
-    #[test]
-    fn review_select_esc_goes_to_modifier_select() {
-        let mut app = DaemonTuiApp::new(std::path::PathBuf::from("/tmp"));
-        app.mode = Mode::ReviewSelect;
-        handle_key(&mut app, key(KeyCode::Esc));
-        assert!(matches!(app.mode, Mode::ModifierSelect));
-    }
 }

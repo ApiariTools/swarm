@@ -1,7 +1,6 @@
 use crate::agent_tui::app::ConversationEntry;
 use crate::core::agent::AgentKind;
 use crate::core::modifier::ModifierPrompt;
-use crate::core::review::ReviewPrompt;
 use crate::core::state::WorkerPhase;
 use crate::daemon::protocol::{AgentEventWire, WorkerInfo};
 use ratatui::prelude::Rect;
@@ -31,7 +30,6 @@ pub enum Mode {
     RepoSelect,
     AgentSelect,
     ModifierSelect,
-    ReviewSelect,
     Confirm,
     Help,
     PrDetail,
@@ -391,7 +389,6 @@ impl WorkerConversation {
 
 /// The main application state for the daemon TUI.
 pub struct DaemonTuiApp {
-    // Worker list
     pub workers: Vec<WorkerInfo>,
     pub selected: usize,
     pub list_scroll: Cell<usize>,
@@ -416,9 +413,6 @@ pub struct DaemonTuiApp {
     pub modifier_prompts: Vec<ModifierPrompt>,
     pub modifier_selected: Vec<bool>,
     pub modifier_cursor: usize,
-    pub review_prompts: Vec<ReviewPrompt>,
-    pub review_selected: Vec<bool>,
-    pub review_cursor: usize,
 
     // Confirm flow
     pub confirm_message: String,
@@ -474,9 +468,6 @@ impl DaemonTuiApp {
             modifier_prompts: Vec::new(),
             modifier_selected: Vec::new(),
             modifier_cursor: 0,
-            review_prompts: Vec::new(),
-            review_selected: Vec::new(),
-            review_cursor: 0,
             confirm_message: String::new(),
             pending_action: None,
             pr_detail: None,
@@ -497,6 +488,7 @@ impl DaemonTuiApp {
     /// Update the worker list from daemon ListWorkers response.
     pub fn update_worker_list(&mut self, new_workers: Vec<WorkerInfo>) {
         self.workers = new_workers;
+
         // Clamp selection
         if !self.workers.is_empty() && self.selected >= self.workers.len() {
             self.selected = self.workers.len() - 1;
@@ -534,20 +526,25 @@ impl DaemonTuiApp {
         }
     }
 
-    /// Get the currently selected worker info.
+    /// Get the currently selected worker.
     pub fn selected_worker(&self) -> Option<&WorkerInfo> {
         self.workers.get(self.selected)
     }
 
-    /// Get the conversation for the selected worker.
+    /// Alias for selected_worker (kept for call sites that distinguish parent context).
+    pub fn selected_parent(&self) -> Option<&WorkerInfo> {
+        self.workers.get(self.selected)
+    }
+
+    /// Get the conversation for the focused worker.
     pub fn selected_conversation(&self) -> Option<&WorkerConversation> {
         self.selected_worker()
             .and_then(|w| self.conversations.get(&w.id))
     }
 
-    /// Get a mutable conversation for the selected worker.
+    /// Get a mutable conversation for the focused worker.
     pub fn selected_conversation_mut(&mut self) -> Option<&mut WorkerConversation> {
-        let id = self.workers.get(self.selected)?.id.clone();
+        let id = self.selected_worker()?.id.clone();
         self.conversations.get_mut(&id)
     }
 
@@ -617,19 +614,15 @@ impl DaemonTuiApp {
     // ── Worker selection ──
 
     pub fn select_next(&mut self) {
-        if !self.workers.is_empty() {
-            let prev = self.selected;
-            self.selected = (self.selected + 1).min(self.workers.len() - 1);
-            if self.selected != prev {
-                self.needs_redraw = true;
-            }
+        if !self.workers.is_empty() && self.selected + 1 < self.workers.len() {
+            self.selected += 1;
+            self.needs_redraw = true;
         }
     }
 
     pub fn select_prev(&mut self) {
-        let prev = self.selected;
-        self.selected = self.selected.saturating_sub(1);
-        if self.selected != prev {
+        if self.selected > 0 {
+            self.selected -= 1;
             self.needs_redraw = true;
         }
     }
@@ -639,19 +632,16 @@ impl DaemonTuiApp {
         self.needs_redraw = true;
     }
 
-    /// Load modifier and review prompts on first use (avoids startup I/O).
+    /// Load modifier prompts on first use (avoids startup I/O).
     pub fn ensure_prompts_loaded(&mut self) {
         if !self.prompts_loaded {
             self.modifier_prompts = ModifierPrompt::available(&self.work_dir);
             self.modifier_selected = vec![false; self.modifier_prompts.len()];
-            self.review_prompts = ReviewPrompt::available(&self.work_dir);
-            self.review_selected = vec![false; self.review_prompts.len()];
             self.prompts_loaded = true;
             tui_log!(
                 &self.work_dir,
-                "prompts loaded: {} modifiers, {} reviews",
-                self.modifier_prompts.len(),
-                self.review_prompts.len()
+                "prompts loaded: {} modifiers",
+                self.modifier_prompts.len()
             );
         }
     }
@@ -865,7 +855,6 @@ mod tests {
             pr_state: None,
             restart_count: 0,
             created_at: None,
-            review_slugs: vec![],
         }]);
         assert_eq!(app.selected, 0);
     }
@@ -887,7 +876,6 @@ mod tests {
                 pr_state: None,
                 restart_count: 0,
                 created_at: None,
-                review_slugs: vec![],
             })
             .collect();
         app.update_worker_list(workers);
@@ -1090,7 +1078,6 @@ mod tests {
             pr_state: Some("OPEN".into()),
             restart_count: 0,
             created_at: None,
-            review_slugs: vec![],
         };
         let detail = PrDetailInfo::from_worker(&w).unwrap();
         assert_eq!(detail.number, 42);
@@ -1114,7 +1101,6 @@ mod tests {
             pr_state: None,
             restart_count: 0,
             created_at: None,
-            review_slugs: vec![],
         };
         assert!(PrDetailInfo::from_worker(&w).is_none());
     }
@@ -1134,7 +1120,6 @@ mod tests {
             pr_state: None,
             restart_count: 0,
             created_at: None,
-            review_slugs: vec![],
         };
         let detail = PrDetailInfo::from_worker(&w).unwrap();
         assert_eq!(detail.number, 99);
@@ -1158,7 +1143,6 @@ mod tests {
             pr_state: None,
             restart_count: 0,
             created_at: None,
-            review_slugs: vec![],
         }]);
         assert_eq!(app.workers[0].phase, WorkerPhase::Running);
 

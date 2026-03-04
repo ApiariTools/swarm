@@ -402,7 +402,6 @@ mod tests {
             agent: "claude".into(),
             repo: None,
             start_point: None,
-            review_configs: None,
             timestamp: Local::now(),
         };
         let json = serde_json::to_string(&msg).unwrap();

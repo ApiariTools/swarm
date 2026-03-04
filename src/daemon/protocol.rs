@@ -1,5 +1,4 @@
 use crate::core::ipc::InboxMessage;
-use crate::core::review::ReviewConfig;
 use crate::core::state::WorkerPhase;
 use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
@@ -23,8 +22,6 @@ pub enum DaemonRequest {
         repo: Option<String>,
         #[serde(default)]
         start_point: Option<String>,
-        #[serde(default)]
-        review_configs: Option<Vec<ReviewConfig>>,
         /// Which workspace to create the worker in.
         #[serde(default)]
         workspace: Option<PathBuf>,
@@ -50,11 +47,6 @@ pub enum DaemonRequest {
     GetHistory {
         worktree_id: String,
     },
-    Review {
-        worktree_id: String,
-        #[serde(default)]
-        slug: Option<String>,
-    },
     /// Authenticate a TCP connection with a token.
     Auth {
         token: String,
@@ -69,6 +61,10 @@ pub enum DaemonRequest {
     },
     /// List all registered workspaces.
     ListWorkspaces,
+    /// Trigger an immediate PR poll for specific workers.
+    TriggerPrPoll {
+        worker_ids: Vec<String>,
+    },
     Ping,
 }
 
@@ -132,9 +128,6 @@ pub struct WorkerInfo {
     pub restart_count: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<DateTime<Local>>,
-    /// Review slugs attached to this worker (empty = no reviews).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub review_slugs: Vec<String>,
 }
 
 /// Wire-format agent events streamed to subscribers.
@@ -181,14 +174,12 @@ pub fn translate_inbox_message(msg: &InboxMessage) -> DaemonRequest {
             agent,
             repo,
             start_point,
-            review_configs,
             ..
         } => DaemonRequest::CreateWorker {
             prompt: prompt.clone(),
             agent: agent.clone(),
             repo: repo.clone(),
             start_point: start_point.clone(),
-            review_configs: review_configs.clone(),
             workspace: None,
         },
         InboxMessage::Send {
@@ -202,10 +193,6 @@ pub fn translate_inbox_message(msg: &InboxMessage) -> DaemonRequest {
         },
         InboxMessage::Merge { worktree, .. } => DaemonRequest::MergeWorker {
             worktree_id: worktree.clone(),
-        },
-        InboxMessage::Review { worktree, slug, .. } => DaemonRequest::Review {
-            worktree_id: worktree.clone(),
-            slug: slug.clone(),
         },
     }
 }
@@ -221,7 +208,6 @@ mod tests {
             agent: "claude".into(),
             repo: Some("hive".into()),
             start_point: None,
-            review_configs: None,
             workspace: None,
         };
         let json = serde_json::to_string(&req).unwrap();
@@ -359,7 +345,6 @@ mod tests {
                 pr_state: None,
                 restart_count: 0,
                 created_at: None,
-                review_slugs: vec![],
             }],
         };
         let json = serde_json::to_string(&resp).unwrap();
@@ -435,7 +420,6 @@ mod tests {
             agent: "claude".into(),
             repo: Some("hive".into()),
             start_point: None,
-            review_configs: None,
             timestamp: chrono::Local::now(),
         };
         let req = translate_inbox_message(&msg);
@@ -487,6 +471,22 @@ mod tests {
         match restored {
             DaemonRequest::Auth { token } => assert_eq!(token, "my-secret-token"),
             _ => panic!("expected Auth"),
+        }
+    }
+
+    #[test]
+    fn daemon_request_trigger_pr_poll_round_trips() {
+        let req = DaemonRequest::TriggerPrPoll {
+            worker_ids: vec!["hive-1".into(), "hive-2".into()],
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("\"action\":\"trigger_pr_poll\""));
+        let restored: DaemonRequest = serde_json::from_str(&json).unwrap();
+        match restored {
+            DaemonRequest::TriggerPrPoll { worker_ids } => {
+                assert_eq!(worker_ids, vec!["hive-1", "hive-2"]);
+            }
+            _ => panic!("expected TriggerPrPoll"),
         }
     }
 

@@ -251,8 +251,10 @@ fn translate_claude_event(event: &apiari_claude_sdk::Event) -> Option<AgentEvent
                                 is_error: is_error.unwrap_or(false),
                             });
                         }
-                        ContentBlock::Text { text } => {
-                            return Some(AgentEventWire::TextDelta { text: text.clone() });
+                        ContentBlock::Text { .. } => {
+                            // Text already delivered via TextDelta events;
+                            // ContentBlockComplete contains the full accumulated
+                            // text which would duplicate it.
                         }
                         _ => {}
                     },
@@ -264,26 +266,11 @@ fn translate_claude_event(event: &apiari_claude_sdk::Event) -> Option<AgentEvent
             }
             None
         }
-        apiari_claude_sdk::Event::Assistant { message, .. } => {
-            use apiari_claude_sdk::types::ContentBlock;
-            // Non-streaming: emit tool uses and text blocks
-            for block in &message.message.content {
-                match block {
-                    ContentBlock::ToolUse { name, input, .. } => {
-                        let input_str =
-                            serde_json::to_string(input).unwrap_or_else(|_| input.to_string());
-                        return Some(AgentEventWire::ToolUse {
-                            tool: name.clone(),
-                            input: input_str,
-                        });
-                    }
-                    ContentBlock::Text { text } => {
-                        return Some(AgentEventWire::TextDelta { text: text.clone() });
-                    }
-                    _ => {}
-                }
-            }
-            Some(AgentEventWire::TurnComplete)
+        apiari_claude_sdk::Event::Assistant { .. } => {
+            // With include_partial_messages=true (always set), all content
+            // (text, tool_use, tool_result, turn boundaries) has already been
+            // delivered via Stream events. Skip to avoid duplication.
+            None
         }
         apiari_claude_sdk::Event::Result(result) => Some(AgentEventWire::SessionResult {
             turns: result.num_turns,
