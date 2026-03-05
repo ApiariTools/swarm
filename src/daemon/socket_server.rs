@@ -1,6 +1,5 @@
 use super::protocol::{DaemonRequest, DaemonResponse};
 use crate::core::ipc::{self, InboxMessage};
-use crate::swarm_log;
 use std::path::PathBuf;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::UnixListener;
@@ -86,7 +85,7 @@ pub fn start(
             {
                 std::fs::write(&tp, &token)?;
             }
-            eprintln!("[swarm] TCP auth token: {}", token);
+            tracing::info!(token = %token, "TCP auth token");
             token_path = Some(tp);
         }
 
@@ -96,7 +95,7 @@ pub fn start(
             event_tx,
             token.clone(),
         )));
-        eprintln!("[swarm] TCP listener on {}", bind_addr);
+        tracing::info!(addr = %bind_addr, "TCP listener started");
     }
 
     let handle = DaemonSocketHandle {
@@ -131,7 +130,7 @@ async fn unix_accept_loop(
                 ));
             }
             Err(e) => {
-                swarm_log!("[daemon] unix accept error: {}", e);
+                tracing::error!(error = %e, "Unix accept error");
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
         }
@@ -149,7 +148,7 @@ async fn tcp_accept_loop(
     loop {
         match listener.accept().await {
             Ok((stream, addr)) => {
-                swarm_log!("[daemon] TCP connection from {}", addr);
+                tracing::debug!(addr = %addr, "TCP connection");
                 let request_tx = request_tx.clone();
                 let event_rx = event_tx.subscribe();
                 let expected = expected_token.clone();
@@ -170,7 +169,7 @@ async fn tcp_accept_loop(
                 });
             }
             Err(e) => {
-                swarm_log!("[daemon] TCP accept error: {}", e);
+                tracing::error!(error = %e, "TCP accept error");
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
         }
@@ -301,7 +300,7 @@ async fn handle_subscription_dyn(
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
-                        swarm_log!("[daemon] subscriber lagged, dropped {} events", n);
+                        tracing::warn!(dropped = n, "Subscriber lagged");
                     }
                     Err(broadcast::error::RecvError::Closed) => {
                         return;

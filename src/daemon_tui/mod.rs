@@ -1,5 +1,5 @@
 /// Write a diagnostic line to `.swarm/tui-debug.log` (TUI process can't use
-/// eprintln because stdout is in raw mode, and swarm_log! is only initialised
+/// eprintln because stdout is in raw mode, and tracing is only initialised
 /// in the daemon process).
 macro_rules! tui_log {
     ($work_dir:expr, $($arg:tt)*) => {{
