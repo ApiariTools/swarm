@@ -54,18 +54,33 @@ fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut TuiApp) {
     let mut lines: Vec<Line<'_>> = Vec::new();
     let mut entry_line_map: Vec<(u32, u32)> = Vec::with_capacity(app.entries.len());
 
+    let w = inner.width as usize;
     for (i, entry) in app.entries.iter().enumerate() {
         let start = lines.len() as u32;
         let is_focused = app.focused_tool == Some(i);
         match entry {
-            ConversationEntry::User { text } => {
+            ConversationEntry::User { text, timestamp } => {
+                // Divider before user messages (visual turn boundary)
+                if i > 0 {
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(Span::styled(
+                        format!("  {}", "─".repeat(w.saturating_sub(4))),
+                        Style::default().fg(theme::STEEL),
+                    )));
+                }
                 lines.push(Line::from(""));
-                lines.push(Line::from(Span::styled(
-                    "  You:",
-                    Style::default()
-                        .fg(theme::SLATE)
-                        .add_modifier(Modifier::BOLD),
-                )));
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        "  You:",
+                        Style::default()
+                            .fg(theme::HONEY)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!("  {}", timestamp),
+                        Style::default().fg(theme::SMOKE),
+                    ),
+                ]));
                 for line in text.lines() {
                     lines.push(Line::from(Span::styled(
                         format!("  {}", line),
@@ -73,18 +88,24 @@ fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut TuiApp) {
                     )));
                 }
             }
-            ConversationEntry::AssistantText { text } => {
+            ConversationEntry::AssistantText { text, timestamp } => {
                 // Merge consecutive assistant text blocks under one header
                 let prev_was_assistant =
                     i > 0 && matches!(app.entries[i - 1], ConversationEntry::AssistantText { .. });
                 if !prev_was_assistant {
                     lines.push(Line::from(""));
-                    lines.push(Line::from(Span::styled(
-                        "  Claude:",
-                        Style::default()
-                            .fg(theme::FROST)
-                            .add_modifier(Modifier::BOLD),
-                    )));
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            "  Claude:",
+                            Style::default()
+                                .fg(theme::FROST)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            format!("  {}", timestamp),
+                            Style::default().fg(theme::SMOKE),
+                        ),
+                    ]));
                 }
                 lines.extend(markdown::render_markdown(text));
             }
@@ -201,12 +222,18 @@ fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut TuiApp) {
             Some(ConversationEntry::AssistantText { .. })
         ) {
             lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(
-                "  Claude:",
-                Style::default()
-                    .fg(theme::FROST)
-                    .add_modifier(Modifier::BOLD),
-            )));
+            lines.push(Line::from(vec![
+                Span::styled(
+                    "  Claude:",
+                    Style::default()
+                        .fg(theme::FROST)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("  {}", &app.streaming_timestamp),
+                    Style::default().fg(theme::SMOKE),
+                ),
+            ]));
         }
         for line in app.streaming_text.lines() {
             lines.push(Line::from(Span::styled(

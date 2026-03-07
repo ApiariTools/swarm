@@ -184,7 +184,9 @@ impl WorkerConversation {
     pub fn flush_streaming_text(&mut self) {
         if !self.streaming_text.is_empty() {
             let text = std::mem::take(&mut self.streaming_text);
-            self.entries.push(ConversationEntry::AssistantText { text });
+            let timestamp = chrono::Local::now().format("%-I:%M %p").to_string();
+            self.entries
+                .push(ConversationEntry::AssistantText { text, timestamp });
         }
         self.is_streaming = false;
     }
@@ -456,6 +458,9 @@ pub struct DaemonTuiApp {
 
     // Lazy-loaded prompts: only loaded when user enters create flow
     pub prompts_loaded: bool,
+
+    // Zoom: hide sidebar and show conversation full-width
+    pub zoomed: bool,
 }
 
 impl DaemonTuiApp {
@@ -491,6 +496,7 @@ impl DaemonTuiApp {
             history_loaded: std::collections::HashSet::new(),
             pending_history: std::collections::VecDeque::new(),
             prompts_loaded: false,
+            zoomed: false,
         }
     }
 
@@ -509,6 +515,7 @@ impl DaemonTuiApp {
                 if !w.prompt.is_empty() {
                     conv.entries.push(ConversationEntry::User {
                         text: w.prompt.clone(),
+                        timestamp: chrono::Local::now().format("%-I:%M %p").to_string(),
                     });
                 }
                 conv
@@ -773,7 +780,7 @@ mod tests {
         assert_eq!(conv.entries.len(), 1);
         assert!(matches!(
             &conv.entries[0],
-            ConversationEntry::AssistantText { text } if text == "done"
+            ConversationEntry::AssistantText { text, .. } if text == "done"
         ));
     }
 
@@ -845,7 +852,7 @@ mod tests {
         assert_eq!(conv.entries.len(), 2);
         assert!(matches!(
             &conv.entries[0],
-            ConversationEntry::AssistantText { text } if text == "before"
+            ConversationEntry::AssistantText { text, .. } if text == "before"
         ));
         assert!(matches!(
             &conv.entries[1],
@@ -952,6 +959,7 @@ mod tests {
     fn make_text(text: &str) -> ConversationEntry {
         ConversationEntry::AssistantText {
             text: text.to_string(),
+            timestamp: String::new(),
         }
     }
 
@@ -1287,8 +1295,10 @@ mod tests {
                         .conversations
                         .entry(wt_id.to_string())
                         .or_insert_with(WorkerConversation::new);
-                    conv.entries
-                        .push(ConversationEntry::User { text: text.clone() });
+                    conv.entries.push(ConversationEntry::User {
+                        text: text.clone(),
+                        timestamp: String::new(),
+                    });
                 }
             }
         }
@@ -1307,10 +1317,10 @@ mod tests {
             conv.entries
                 .iter()
                 .map(|e| match e {
-                    ConversationEntry::AssistantText { text } =>
+                    ConversationEntry::AssistantText { text, .. } =>
                         format!("Text({})", &text[..text.len().min(20)]),
                     ConversationEntry::ToolCall { tool, .. } => format!("Tool({})", tool),
-                    ConversationEntry::User { text } =>
+                    ConversationEntry::User { text, .. } =>
                         format!("User({})", &text[..text.len().min(20)]),
                     ConversationEntry::Status { text } =>
                         format!("Status({})", &text[..text.len().min(20)]),

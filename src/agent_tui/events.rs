@@ -1,10 +1,15 @@
 use apiari_common::ipc::JsonlWriter;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local, Utc};
 use serde::{Deserialize, Serialize};
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
 use super::app::ConversationEntry;
+
+/// Format a UTC timestamp as local time for display.
+fn fmt_ts(ts: &DateTime<Utc>) -> String {
+    ts.with_timezone(&Local).format("%-I:%M %p").to_string()
+}
 
 /// A structured event written to the agent's event log for hive consumption.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -211,16 +216,29 @@ pub fn read_last_session(path: &Path) -> Option<PreviousSession> {
 
     for ev in session_events {
         match ev {
-            AgentEvent::Start { prompt, .. } => {
+            AgentEvent::Start {
+                prompt, timestamp, ..
+            } => {
                 entries.push(ConversationEntry::User {
                     text: prompt.clone(),
+                    timestamp: fmt_ts(timestamp),
                 });
             }
-            AgentEvent::UserMessage { text, .. } => {
-                entries.push(ConversationEntry::User { text: text.clone() });
+            AgentEvent::UserMessage {
+                text, timestamp, ..
+            } => {
+                entries.push(ConversationEntry::User {
+                    text: text.clone(),
+                    timestamp: fmt_ts(timestamp),
+                });
             }
-            AgentEvent::AssistantText { text, .. } => {
-                entries.push(ConversationEntry::AssistantText { text: text.clone() });
+            AgentEvent::AssistantText {
+                text, timestamp, ..
+            } => {
+                entries.push(ConversationEntry::AssistantText {
+                    text: text.clone(),
+                    timestamp: fmt_ts(timestamp),
+                });
             }
             AgentEvent::ToolUse { tool, input, .. } => {
                 entries.push(ConversationEntry::ToolCall {
@@ -334,10 +352,10 @@ mod tests {
         // entries: User, AssistantText, ToolCall (with output filled in-place by ToolResult)
         assert_eq!(prev.entries.len(), 3);
         assert!(
-            matches!(&prev.entries[0], ConversationEntry::User { text } if text == "do something")
+            matches!(&prev.entries[0], ConversationEntry::User { text, .. } if text == "do something")
         );
         assert!(
-            matches!(&prev.entries[1], ConversationEntry::AssistantText { text } if text == "on it")
+            matches!(&prev.entries[1], ConversationEntry::AssistantText { text, .. } if text == "on it")
         );
         assert!(matches!(
             &prev.entries[2],
@@ -435,10 +453,10 @@ mod tests {
         // Entries should only contain the second session
         assert_eq!(prev.entries.len(), 2);
         assert!(
-            matches!(&prev.entries[0], ConversationEntry::User { text } if text == "second task")
+            matches!(&prev.entries[0], ConversationEntry::User { text, .. } if text == "second task")
         );
         assert!(
-            matches!(&prev.entries[1], ConversationEntry::AssistantText { text } if text == "working on second")
+            matches!(&prev.entries[1], ConversationEntry::AssistantText { text, .. } if text == "working on second")
         );
     }
 
@@ -511,15 +529,17 @@ mod tests {
         let prev = read_last_session(f.path()).unwrap();
         assert_eq!(prev.turns, 3);
         assert_eq!(prev.entries.len(), 4);
-        assert!(matches!(&prev.entries[0], ConversationEntry::User { text } if text == "initial"));
         assert!(
-            matches!(&prev.entries[1], ConversationEntry::AssistantText { text } if text == "done")
+            matches!(&prev.entries[0], ConversationEntry::User { text, .. } if text == "initial")
         );
         assert!(
-            matches!(&prev.entries[2], ConversationEntry::User { text } if text == "follow up question")
+            matches!(&prev.entries[1], ConversationEntry::AssistantText { text, .. } if text == "done")
         );
         assert!(
-            matches!(&prev.entries[3], ConversationEntry::AssistantText { text } if text == "follow up answer")
+            matches!(&prev.entries[2], ConversationEntry::User { text, .. } if text == "follow up question")
+        );
+        assert!(
+            matches!(&prev.entries[3], ConversationEntry::AssistantText { text, .. } if text == "follow up answer")
         );
     }
 
@@ -745,6 +765,8 @@ mod tests {
 
         let prev = read_last_session(&path).unwrap();
         assert_eq!(prev.entries.len(), 4);
-        assert!(matches!(&prev.entries[2], ConversationEntry::User { text } if text == "followup"));
+        assert!(
+            matches!(&prev.entries[2], ConversationEntry::User { text, .. } if text == "followup")
+        );
     }
 }

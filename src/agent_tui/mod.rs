@@ -81,6 +81,7 @@ pub async fn run(args: AgentTuiArgs) -> Result<()> {
         logger.log_start(&args.prompt, None);
         app.entries.push(app::ConversationEntry::User {
             text: args.prompt.clone(),
+            timestamp: chrono::Local::now().format("%-I:%M %p").to_string(),
         });
         None
     };

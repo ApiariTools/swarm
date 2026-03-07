@@ -37,14 +37,19 @@ pub fn draw(frame: &mut Frame, app: &mut DaemonTuiApp) {
         area,
     );
 
-    // Main horizontal split: sidebar | conversation
-    let h_chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(SIDEBAR_WIDTH), Constraint::Min(1)])
-        .split(area);
+    if app.zoomed {
+        // Zoomed: conversation panel takes full width.
+        draw_conversation_panel(frame, area, app);
+    } else {
+        // Normal: sidebar | conversation
+        let h_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Length(SIDEBAR_WIDTH), Constraint::Min(1)])
+            .split(area);
 
-    draw_sidebar(frame, h_chunks[0], app);
-    draw_conversation_panel(frame, h_chunks[1], app);
+        draw_sidebar(frame, h_chunks[0], app);
+        draw_conversation_panel(frame, h_chunks[1], app);
+    }
 
     // Overlays
     match &app.mode {
@@ -565,15 +570,29 @@ fn draw_conversation_entries(
         let is_focused_tool = conv.focused_tool == Some(i);
 
         match entry {
-            ConversationEntry::User { text } => {
+            ConversationEntry::User { text, timestamp } => {
+                if i > 0 {
+                    lines.push(Line::from(""));
+                    let w = inner.width as usize;
+                    lines.push(Line::from(Span::styled(
+                        format!("  {}", "─".repeat(w.saturating_sub(4))),
+                        Style::default().fg(theme::STEEL),
+                    )));
+                }
                 lines.push(Line::from(""));
-                lines.push(Line::from(Span::styled(
-                    "  You:",
-                    Style::default()
-                        .fg(theme::HONEY)
-                        .bg(theme::FOCUS_BG)
-                        .add_modifier(Modifier::BOLD),
-                )));
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        "  You:",
+                        Style::default()
+                            .fg(theme::HONEY)
+                            .bg(theme::FOCUS_BG)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!("  {}", timestamp),
+                        Style::default().fg(theme::SMOKE),
+                    ),
+                ]));
                 for line in text.lines() {
                     lines.push(Line::from(Span::styled(
                         format!("  {}", line),
@@ -581,17 +600,23 @@ fn draw_conversation_entries(
                     )));
                 }
             }
-            ConversationEntry::AssistantText { text } => {
+            ConversationEntry::AssistantText { text, timestamp } => {
                 let prev_was_assistant =
                     i > 0 && matches!(conv.entries[i - 1], ConversationEntry::AssistantText { .. });
                 if !prev_was_assistant {
                     lines.push(Line::from(""));
-                    lines.push(Line::from(Span::styled(
-                        "  Claude:",
-                        Style::default()
-                            .fg(theme::FROST)
-                            .add_modifier(Modifier::BOLD),
-                    )));
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            "  Claude:",
+                            Style::default()
+                                .fg(theme::FROST)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            format!("  {}", timestamp),
+                            Style::default().fg(theme::SMOKE),
+                        ),
+                    ]));
                 }
                 lines.extend(markdown::render_markdown(text));
             }
@@ -991,6 +1016,7 @@ fn draw_help_overlay(frame: &mut Frame, area: Rect) {
         ("x", "close worker"),
         ("m", "merge worker"),
         ("p", "PR detail"),
+        ("z", "toggle zoom"),
         ("?", "toggle help"),
         ("q", "quit"),
         ("", ""),
@@ -1007,6 +1033,7 @@ fn draw_help_overlay(frame: &mut Frame, area: Rect) {
         ("f", "filter noise tools"),
         ("p", "PR detail"),
         ("i/s", "enter input mode"),
+        ("z", "toggle zoom"),
     ];
 
     for (i, (key, desc)) in sections.iter().enumerate() {

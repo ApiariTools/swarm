@@ -1,4 +1,5 @@
 use apiari_claude_sdk::types::ContentBlock;
+use chrono::Local;
 use ratatui::layout::Rect;
 use std::time::Instant;
 use tokio::sync::mpsc;
@@ -7,9 +8,9 @@ use tokio::sync::mpsc;
 #[derive(Debug, Clone)]
 pub enum ConversationEntry {
     /// User message.
-    User { text: String },
+    User { text: String, timestamp: String },
     /// Assistant text block (may be streamed incrementally).
-    AssistantText { text: String },
+    AssistantText { text: String, timestamp: String },
     /// A tool call with its result.
     ToolCall {
         tool: String,
@@ -20,6 +21,11 @@ pub enum ConversationEntry {
     },
     /// Status message (e.g. "Session started", "Rate limited").
     Status { text: String },
+}
+
+/// Format a timestamp for display (e.g. "2:34 PM").
+fn now_timestamp() -> String {
+    Local::now().format("%-I:%M %p").to_string()
 }
 
 /// An SDK event forwarded from the background session task.
@@ -83,6 +89,8 @@ pub struct TuiApp {
     pub entries: Vec<ConversationEntry>,
     /// Current streaming text buffer (appended to on TextDelta).
     pub streaming_text: String,
+    /// Timestamp captured when streaming started (for the flushed entry).
+    pub streaming_timestamp: String,
     /// Whether we're currently receiving streaming text.
     pub is_streaming: bool,
     /// Scroll offset (0 = bottom, follows output).
@@ -132,6 +140,7 @@ impl TuiApp {
         Self {
             entries: Vec::new(),
             streaming_text: String::new(),
+            streaming_timestamp: String::new(),
             is_streaming: false,
             scroll_offset: 0,
             auto_scroll: true,
@@ -181,6 +190,7 @@ impl TuiApp {
                     // Flush any previous streaming text
                     self.flush_streaming_text();
                     self.is_streaming = true;
+                    self.streaming_timestamp = now_timestamp();
                     self.status = SessionStatus::Streaming;
                 }
                 self.streaming_text.push_str(text);
@@ -193,11 +203,13 @@ impl TuiApp {
                         // Avoid duplicating text already captured via streaming
                         let already_captured = matches!(
                             self.entries.last(),
-                            Some(ConversationEntry::AssistantText { text: existing }) if existing == text
+                            Some(ConversationEntry::AssistantText { text: existing, .. }) if existing == text
                         );
                         if !already_captured {
-                            self.entries
-                                .push(ConversationEntry::AssistantText { text: text.clone() });
+                            self.entries.push(ConversationEntry::AssistantText {
+                                text: text.clone(),
+                                timestamp: now_timestamp(),
+                            });
                         }
                     }
                 }
@@ -306,14 +318,19 @@ impl TuiApp {
     fn flush_streaming_text(&mut self) {
         if !self.streaming_text.is_empty() {
             let text = std::mem::take(&mut self.streaming_text);
-            self.entries.push(ConversationEntry::AssistantText { text });
+            let timestamp = std::mem::take(&mut self.streaming_timestamp);
+            self.entries
+                .push(ConversationEntry::AssistantText { text, timestamp });
         }
         self.is_streaming = false;
     }
 
     /// Add a user message to the conversation.
     pub fn add_user_message(&mut self, text: String) {
-        self.entries.push(ConversationEntry::User { text });
+        self.entries.push(ConversationEntry::User {
+            text,
+            timestamp: now_timestamp(),
+        });
         self.status = SessionStatus::Streaming;
         self.turn_had_tool_use = false;
     }
@@ -835,7 +852,7 @@ mod tests {
         assert_eq!(app.status, SessionStatus::Streaming); // keeps previous status until Result
         assert!(matches!(
             &app.entries[0],
-            ConversationEntry::AssistantText { text } if text == "streamed text"
+            ConversationEntry::AssistantText { text, .. } if text == "streamed text"
         ));
     }
 
@@ -864,7 +881,7 @@ mod tests {
         assert_eq!(app.entries.len(), 1);
         assert!(matches!(
             &app.entries[0],
-            ConversationEntry::AssistantText { text } if text == "direct text"
+            ConversationEntry::AssistantText { text, .. } if text == "direct text"
         ));
     }
 
@@ -1034,7 +1051,7 @@ mod tests {
         assert_eq!(app.entries.len(), 2);
         assert!(matches!(
             &app.entries[0],
-            ConversationEntry::AssistantText { text } if text == "partial "
+            ConversationEntry::AssistantText { text, .. } if text == "partial "
         ));
         assert!(matches!(
             &app.entries[1],
@@ -1051,7 +1068,7 @@ mod tests {
         assert_eq!(app.status, SessionStatus::Streaming);
         assert!(matches!(
             &app.entries[0],
-            ConversationEntry::User { text } if text == "hello"
+            ConversationEntry::User { text, .. } if text == "hello"
         ));
     }
 
@@ -1111,8 +1128,10 @@ mod tests {
     #[test]
     fn toggle_tools_no_tools_is_noop() {
         let (mut app, _tx) = make_app();
-        app.entries
-            .push(ConversationEntry::AssistantText { text: "hi".into() });
+        app.entries.push(ConversationEntry::AssistantText {
+            text: "hi".into(),
+            timestamp: String::new(),
+        });
         app.toggle_all_tools(); // should not panic
         assert_eq!(app.entries.len(), 1);
     }
@@ -1198,7 +1217,7 @@ mod tests {
         assert_eq!(app.entries.len(), 4);
         assert!(matches!(
             &app.entries[0],
-            ConversationEntry::AssistantText { text } if text == "I'll help."
+            ConversationEntry::AssistantText { text, .. } if text == "I'll help."
         ));
         assert!(matches!(
             &app.entries[1],
@@ -1206,7 +1225,7 @@ mod tests {
         ));
         assert!(matches!(
             &app.entries[2],
-            ConversationEntry::AssistantText { text } if text == "Done!"
+            ConversationEntry::AssistantText { text, .. } if text == "Done!"
         ));
         assert!(matches!(&app.entries[3], ConversationEntry::Status { .. }));
     }
@@ -1247,7 +1266,7 @@ mod tests {
         assert_eq!(app.entries.len(), 2);
         assert!(matches!(
             &app.entries[0],
-            ConversationEntry::AssistantText { text } if text == "before tool"
+            ConversationEntry::AssistantText { text, .. } if text == "before tool"
         ));
         assert!(matches!(
             &app.entries[1],
@@ -1268,7 +1287,10 @@ mod tests {
     }
 
     fn make_text(s: &str) -> ConversationEntry {
-        ConversationEntry::AssistantText { text: s.into() }
+        ConversationEntry::AssistantText {
+            text: s.into(),
+            timestamp: String::new(),
+        }
     }
 
     #[test]

@@ -455,7 +455,10 @@ async fn handle_action(app: &mut DaemonTuiApp, client: &mut DaemonClient, action
             // Add user message to conversation immediately
             if let Some(conv) = app.conversations.get_mut(&worktree_id) {
                 conv.entries
-                    .push(crate::agent_tui::app::ConversationEntry::User { text });
+                    .push(crate::agent_tui::app::ConversationEntry::User {
+                        text,
+                        timestamp: chrono::Local::now().format("%-I:%M %p").to_string(),
+                    });
                 conv.auto_scroll = true;
             }
             fire_and_forget(client, app, req).await;
@@ -813,6 +816,13 @@ fn handle_key(app: &mut DaemonTuiApp, key: crossterm::event::KeyEvent) -> KeyAct
                     }
                     KeyAction::None
                 }
+                KeyCode::Char('z') => {
+                    app.zoomed = !app.zoomed;
+                    if app.zoomed && !app.workers.is_empty() {
+                        app.focus = Panel::Conversation;
+                    }
+                    KeyAction::None
+                }
                 _ => KeyAction::None,
             },
             Panel::Conversation => match key.code {
@@ -865,6 +875,8 @@ fn handle_key(app: &mut DaemonTuiApp, key: crossterm::event::KeyEvent) -> KeyAct
                         if let Some(conv) = app.selected_conversation_mut() {
                             conv.clear_focus();
                         }
+                    } else if app.zoomed {
+                        app.zoomed = false;
                     } else {
                         app.focus = Panel::Sidebar;
                     }
@@ -965,6 +977,10 @@ fn handle_key(app: &mut DaemonTuiApp, key: crossterm::event::KeyEvent) -> KeyAct
                         app.pr_detail = Some(detail);
                         app.mode = Mode::PrDetail;
                     }
+                    KeyAction::None
+                }
+                KeyCode::Char('z') => {
+                    app.zoomed = !app.zoomed;
                     KeyAction::None
                 }
                 _ => KeyAction::None,
@@ -1146,6 +1162,9 @@ fn handle_daemon_response(app: &mut DaemonTuiApp, resp: DaemonResponse) {
                                     conv.entries.push(
                                         crate::agent_tui::app::ConversationEntry::User {
                                             text: text.clone(),
+                                            timestamp: chrono::Local::now()
+                                                .format("%-I:%M %p")
+                                                .to_string(),
                                         },
                                     );
                                 }

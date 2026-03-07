@@ -1935,10 +1935,7 @@ mod tests {
         // Should have broadcast a StateChanged event
         let event = event_rx.try_recv().unwrap();
         match event {
-            DaemonResponse::StateChanged {
-                worktree_id,
-                phase,
-            } => {
+            DaemonResponse::StateChanged { worktree_id, phase } => {
                 assert_eq!(worktree_id, "w-1");
                 assert_eq!(phase, WorkerPhase::Completed);
             }
