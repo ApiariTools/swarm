@@ -861,23 +861,61 @@ fn draw_conversation_entries(
     conv.entry_visual_line_map = entry_visual_line_map;
     conv.total_visual_lines = visual_offset;
 
-    let text = Text::from(lines);
-    let total_visual = conv.total_visual_lines;
     let visible_height = inner.height as u32;
-    let scroll = if conv.auto_scroll {
-        total_visual.saturating_sub(visible_height)
+
+    if conv.auto_scroll {
+        // Auto-scroll: show the bottom of the conversation.
+        // Instead of computing a scroll offset (which can diverge from ratatui's
+        // word-wrapping), keep only the tail of lines that fit the viewport
+        // plus a generous buffer, then use u16::MAX scroll to pin to bottom.
+        let keep_lines = (visible_height as usize) * 4 + 50;
+        let display_lines = if lines.len() > keep_lines {
+            Text::from(lines[lines.len() - keep_lines..].to_vec())
+        } else {
+            Text::from(lines)
+        };
+        let paragraph = Paragraph::new(display_lines)
+            .scroll((u16::MAX, 0))
+            .wrap(Wrap { trim: false })
+            .block(block.clone());
+        frame.render_widget(paragraph, area);
     } else {
-        total_visual
+        // Manual scroll: use our visual-line estimate for the offset.
+        let total_visual = conv.total_visual_lines;
+        let target_scroll = total_visual
             .saturating_sub(visible_height)
-            .saturating_sub(conv.scroll_offset)
-    };
+            .saturating_sub(conv.scroll_offset);
 
-    let paragraph = Paragraph::new(text)
-        .scroll((scroll as u16, 0))
-        .wrap(Wrap { trim: false })
-        .block(block.clone());
+        // Trim from front when scroll is large to avoid u16 overflow.
+        let (display_lines, effective_scroll) = if target_scroll > 500 {
+            let buffer = visible_height.max(100);
+            let drop_target = target_scroll.saturating_sub(buffer);
+            let mut dropped_visual = 0u32;
+            let mut drop_count = 0usize;
+            for line in lines.iter() {
+                let w = line.width();
+                let vl = (w.max(1).div_ceil(inner_width)) as u32;
+                if dropped_visual + vl > drop_target {
+                    break;
+                }
+                dropped_visual += vl;
+                drop_count += 1;
+            }
+            let adj_scroll = target_scroll - dropped_visual;
+            (
+                Text::from(lines[drop_count..].to_vec()),
+                adj_scroll.min(u16::MAX as u32) as u16,
+            )
+        } else {
+            (Text::from(lines), target_scroll as u16)
+        };
 
-    frame.render_widget(paragraph, area);
+        let paragraph = Paragraph::new(display_lines)
+            .scroll((effective_scroll, 0))
+            .wrap(Wrap { trim: false })
+            .block(block.clone());
+        frame.render_widget(paragraph, area);
+    }
 }
 
 fn draw_conversation_input(frame: &mut Frame, area: Rect, app: &DaemonTuiApp) {

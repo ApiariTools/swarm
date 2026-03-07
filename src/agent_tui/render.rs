@@ -266,25 +266,58 @@ fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut TuiApp) {
     app.entry_line_map = entry_line_map;
     app.total_rendered_lines = lines.len() as u32;
 
-    let text = Text::from(lines);
-    let total_lines = text.lines.len() as u32;
-
     // Calculate scroll using inner height (accounts for bottom padding)
     let visible_height = inner.height as u32;
-    let scroll = if app.auto_scroll {
-        total_lines.saturating_sub(visible_height)
+
+    if app.auto_scroll {
+        // Keep only the tail to avoid wrapping-estimate drift with u16::MAX scroll.
+        let keep_lines = (visible_height as usize) * 4 + 50;
+        let display_lines = if lines.len() > keep_lines {
+            Text::from(lines[lines.len() - keep_lines..].to_vec())
+        } else {
+            Text::from(lines)
+        };
+        let paragraph = Paragraph::new(display_lines)
+            .scroll((u16::MAX, 0))
+            .wrap(Wrap { trim: false })
+            .block(block);
+        frame.render_widget(paragraph, area);
     } else {
-        total_lines
+        let total_lines = lines.len() as u32;
+        let target_scroll = total_lines
             .saturating_sub(visible_height)
-            .saturating_sub(app.scroll_offset)
-    };
+            .saturating_sub(app.scroll_offset);
 
-    let paragraph = Paragraph::new(text)
-        .scroll((scroll as u16, 0))
-        .wrap(Wrap { trim: false })
-        .block(block);
+        let (display_lines, effective_scroll) = if target_scroll > 500 {
+            let buffer = visible_height.max(100);
+            let drop_target = target_scroll.saturating_sub(buffer);
+            let mut drop_count = 0usize;
+            let mut dropped = 0u32;
+            let w = inner.width.max(1) as usize;
+            for line in lines.iter() {
+                let lw = line.width();
+                let vl = (lw.max(1).div_ceil(w)) as u32;
+                if dropped + vl > drop_target {
+                    break;
+                }
+                dropped += vl;
+                drop_count += 1;
+            }
+            let adj = target_scroll - dropped;
+            (
+                Text::from(lines[drop_count..].to_vec()),
+                adj.min(u16::MAX as u32) as u16,
+            )
+        } else {
+            (Text::from(lines), target_scroll as u16)
+        };
 
-    frame.render_widget(paragraph, area);
+        let paragraph = Paragraph::new(display_lines)
+            .scroll((effective_scroll, 0))
+            .wrap(Wrap { trim: false })
+            .block(block);
+        frame.render_widget(paragraph, area);
+    }
 }
 
 /// Check if entry at `idx` is a continuation of a Claude turn (looking past tool calls).
