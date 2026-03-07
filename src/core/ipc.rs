@@ -175,10 +175,10 @@ pub fn send_daemon_request(
     req: &crate::daemon::protocol::DaemonRequest,
 ) -> Result<crate::daemon::protocol::DaemonResponse> {
     let local = socket_path(work_dir);
-    if local.exists() {
-        if let Ok(resp) = send_daemon_request_to(&local, req) {
-            return Ok(resp);
-        }
+    if local.exists()
+        && let Ok(resp) = send_daemon_request_to(&local, req)
+    {
+        return Ok(resp);
     }
     // Fall back to global socket
     send_daemon_request_to(&global_socket_path(), req)

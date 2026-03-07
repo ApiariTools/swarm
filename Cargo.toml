@@ -25,6 +25,9 @@ pulldown-cmark = "0.13"
 libc.workspace = true
 async-trait = "0.1"
 futures = "0.3"
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tracing-appender = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

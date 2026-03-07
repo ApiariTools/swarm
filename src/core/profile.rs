@@ -8,10 +8,10 @@ pub const DEFAULT_PROFILE: &str = include_str!("../../profiles/default.md");
 pub fn load_profile(work_dir: &Path, slug: &str) -> String {
     let profiles_dir = work_dir.join(".swarm").join("profiles");
     let path = profiles_dir.join(format!("{slug}.md"));
-    if path.is_file() {
-        if let Ok(content) = std::fs::read_to_string(&path) {
-            return content;
-        }
+    if path.is_file()
+        && let Ok(content) = std::fs::read_to_string(&path)
+    {
+        return content;
     }
     // Fallback to embedded default for "default" slug
     if slug == "default" {
@@ -42,18 +42,18 @@ pub fn inject_profile(
 
 /// List available profile slugs from `.swarm/profiles/`.
 /// Always includes "default" (the embedded fallback).
+#[allow(dead_code)]
 pub fn list_profiles(work_dir: &Path) -> Vec<String> {
     let mut slugs = vec!["default".to_string()];
     let profiles_dir = work_dir.join(".swarm").join("profiles");
     if let Ok(entries) = std::fs::read_dir(&profiles_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) == Some("md") {
-                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                    if stem != "default" {
-                        slugs.push(stem.to_string());
-                    }
-                }
+            if path.extension().and_then(|e| e.to_str()) == Some("md")
+                && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+                && stem != "default"
+            {
+                slugs.push(stem.to_string());
             }
         }
     }

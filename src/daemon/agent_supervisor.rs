@@ -3,7 +3,6 @@ use super::protocol::{AgentEventWire, DaemonResponse};
 use crate::agent_tui::events::EventLogger;
 use crate::core::agent::AgentKind;
 use crate::core::state::WorkerPhase;
-use crate::swarm_log;
 use std::path::Path;
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc};
@@ -127,12 +126,12 @@ pub async fn agent_event_loop(
             }
             AgentExitReason::Crashed(error) => {
                 *restart_count += 1;
-                swarm_log!(
-                    "[daemon] Agent {} crashed (attempt {}/{}): {}",
-                    handle.worktree_id,
-                    restart_count,
-                    MAX_RESTARTS,
-                    error
+                tracing::warn!(
+                    worker_id = %handle.worktree_id,
+                    attempt = *restart_count,
+                    max = MAX_RESTARTS,
+                    error = %error,
+                    "Agent crashed",
                 );
                 handle.logger.log_error(&format!(
                     "Agent crashed (attempt {}/{}): {}",
@@ -140,10 +139,7 @@ pub async fn agent_event_loop(
                 ));
 
                 if *restart_count > MAX_RESTARTS {
-                    swarm_log!(
-                        "[daemon] Agent {} exceeded max restarts, marking as Failed",
-                        handle.worktree_id
-                    );
+                    tracing::error!(worker_id = %handle.worktree_id, "Agent exceeded max restarts, marking as Failed");
                     return (
                         WorkerPhase::Failed,
                         handle.agent.session_id().map(String::from),
@@ -152,11 +148,7 @@ pub async fn agent_event_loop(
 
                 // Exponential backoff: 2^restart_count seconds, max 60
                 let delay_secs = std::cmp::min(2u64.pow(*restart_count), 60);
-                swarm_log!(
-                    "[daemon] Restarting agent {} in {}s with session resume",
-                    handle.worktree_id,
-                    delay_secs
-                );
+                tracing::info!(worker_id = %handle.worktree_id, delay_secs, "Restarting agent with session resume");
                 tokio::time::sleep(Duration::from_secs(delay_secs)).await;
 
                 // Re-spawn with session resume
@@ -183,11 +175,7 @@ pub async fn agent_event_loop(
                         continue;
                     }
                     Err(e) => {
-                        swarm_log!(
-                            "[daemon] Failed to restart agent {}: {}",
-                            handle.worktree_id,
-                            e
-                        );
+                        tracing::error!(worker_id = %handle.worktree_id, error = %e, "Failed to restart agent");
                         handle
                             .logger
                             .log_error(&format!("Failed to restart: {}", e));
@@ -216,22 +204,19 @@ async fn drain_agent_events(
     write_agent_status(work_dir, &handle.worktree_id, "running");
     let mut event_count: u64 = 0;
 
-    swarm_log!(
-        "[daemon] Agent {} — drain_agent_events: waiting for first event...",
-        handle.worktree_id
-    );
+    tracing::debug!(worker_id = %handle.worktree_id, "Waiting for first event");
 
     loop {
         match handle.agent.next_event().await {
             Ok(Some(event)) => {
                 event_count += 1;
 
-                if event_count <= 3 || event_count % 50 == 0 {
-                    swarm_log!(
-                        "[daemon] Agent {} — event #{}: {:?}",
-                        handle.worktree_id,
+                if event_count <= 3 || event_count.is_multiple_of(50) {
+                    tracing::debug!(
+                        worker_id = %handle.worktree_id,
                         event_count,
-                        std::mem::discriminant(&event)
+                        event_type = ?std::mem::discriminant(&event),
+                        "Agent event",
                     );
                 }
 
@@ -252,11 +237,7 @@ async fn drain_agent_events(
 
                 // If this was a SessionResult, capture the completion
                 if let AgentEventWire::SessionResult { session_id, .. } = &event {
-                    swarm_log!(
-                        "[daemon] Agent {} completed with SessionResult ({} events)",
-                        handle.worktree_id,
-                        event_count
-                    );
+                    tracing::info!(worker_id = %handle.worktree_id, event_count, "Agent completed with SessionResult");
                     return AgentExitReason::Completed(session_id.clone());
                 }
             }
@@ -270,32 +251,19 @@ async fn drain_agent_events(
                         .map(|s| s.trim())
                         .filter(|s| !s.is_empty())
                         .unwrap_or("(no stderr)");
-                    swarm_log!(
-                        "[daemon] WARNING: Agent {} exited with ZERO events. stderr: {}",
-                        handle.worktree_id,
-                        stderr_msg
-                    );
+                    tracing::warn!(worker_id = %handle.worktree_id, stderr = %stderr_msg, "Agent exited with zero events");
                     handle.logger.log_error(&format!(
                         "Agent process exited without producing any events. stderr: {}",
                         stderr_msg
                     ));
                 } else {
-                    swarm_log!(
-                        "[daemon] Agent {} EOF after {} events (no SessionResult)",
-                        handle.worktree_id,
-                        event_count
-                    );
+                    tracing::debug!(worker_id = %handle.worktree_id, event_count, "Agent EOF (no SessionResult)");
                 }
                 let session_id = handle.agent.session_id().map(String::from);
                 return AgentExitReason::Completed(session_id);
             }
             Err(e) => {
-                swarm_log!(
-                    "[daemon] Agent {} errored after {} events: {}",
-                    handle.worktree_id,
-                    event_count,
-                    e
-                );
+                tracing::error!(worker_id = %handle.worktree_id, event_count, error = %e, "Agent errored");
                 return AgentExitReason::Crashed(e.to_string());
             }
         }

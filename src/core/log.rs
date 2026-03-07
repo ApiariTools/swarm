@@ -1,32 +1,34 @@
-use std::fs::OpenOptions;
-use std::io::Write;
+//! Logging initialization — replaces the old manual OnceLock file logger.
+
 use std::path::Path;
-use std::sync::{Mutex, OnceLock};
 
-static LOG_FILE: OnceLock<Mutex<std::fs::File>> = OnceLock::new();
-
-/// Open `.swarm/swarm.log` in append mode for the duration of the process.
-pub fn init(work_dir: &Path) {
-    let path = work_dir.join(".swarm").join("swarm.log");
-    if let Ok(file) = OpenOptions::new().create(true).append(true).open(path) {
-        let _ = LOG_FILE.set(Mutex::new(file));
-    }
+/// Initialize stderr logging for CLI subcommands.
+/// Respects RUST_LOG env var; defaults to INFO with timestamps.
+pub fn init_stderr() {
+    use tracing_subscriber::{EnvFilter, fmt};
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    fmt()
+        .with_env_filter(filter)
+        .with_target(false)
+        .with_ansi(true)
+        .init();
 }
 
-/// Write a timestamped line to the log file. No-op if `init` was not called.
-pub fn log(msg: &str) {
-    if let Some(mtx) = LOG_FILE.get()
-        && let Ok(mut f) = mtx.lock()
-    {
-        let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
-        let _ = writeln!(f, "[{now}] {msg}");
-    }
-}
-
-/// `format!`-style logging to `.swarm/swarm.log`.
-#[macro_export]
-macro_rules! swarm_log {
-    ($($arg:tt)*) => {
-        $crate::core::log::log(&format!($($arg)*))
-    };
+/// Initialize file logging for daemon mode. Writes to `{work_dir}/.swarm/swarm.log`.
+/// CRITICAL: the returned WorkerGuard must be stored for the entire process lifetime.
+/// Dropping it shuts down the background flush thread and silently loses log lines.
+pub fn init(work_dir: &Path) -> tracing_appender::non_blocking::WorkerGuard {
+    use tracing_subscriber::{EnvFilter, fmt};
+    let log_dir = work_dir.join(".swarm");
+    std::fs::create_dir_all(&log_dir).ok();
+    let appender = tracing_appender::rolling::never(&log_dir, "swarm.log");
+    let (non_blocking, guard) = tracing_appender::non_blocking(appender);
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    fmt()
+        .with_env_filter(filter)
+        .with_writer(non_blocking)
+        .with_ansi(false)
+        .with_target(false)
+        .init();
+    guard
 }

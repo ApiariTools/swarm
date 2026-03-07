@@ -558,13 +558,13 @@ fn draw_conversation_entries(
     let mut last_shown_ts = String::new();
     for (i, entry) in conv.entries.iter().enumerate() {
         // In filter mode, skip noise tool calls (unless they errored)
-        if conv.filter_noise {
-            if let ConversationEntry::ToolCall { tool, is_error, .. } = entry {
-                if is_noise_tool(tool) && !*is_error {
-                    entry_line_map.push((lines.len() as u32, 0));
-                    continue;
-                }
-            }
+        if conv.filter_noise
+            && let ConversationEntry::ToolCall { tool, is_error, .. } = entry
+            && is_noise_tool(tool)
+            && !*is_error
+        {
+            entry_line_map.push((lines.len() as u32, 0));
+            continue;
         }
 
         let start = lines.len() as u32;
