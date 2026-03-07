@@ -823,6 +823,12 @@ fn handle_key(app: &mut DaemonTuiApp, key: crossterm::event::KeyEvent) -> KeyAct
                     }
                     KeyAction::None
                 }
+                KeyCode::Char('G') | KeyCode::End => {
+                    if let Some(conv) = app.selected_conversation_mut() {
+                        conv.scroll_to_bottom();
+                    }
+                    KeyAction::None
+                }
                 _ => KeyAction::None,
             },
             Panel::Conversation => match key.code {
