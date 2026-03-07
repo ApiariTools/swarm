@@ -31,12 +31,18 @@ jobs:
           repository: ApiariTools/apiari-claude-sdk
           path: claude-sdk
 
+      - name: Checkout apiari-codex-sdk
+        uses: actions/checkout@v4
+        with:
+          repository: ApiariTools/apiari-codex-sdk
+          path: codex-sdk
+
       - name: Create workspace root
         run: |
           cat > Cargo.toml << 'TOML'
           [workspace]
           resolver = "3"
-          members = ["swarm", "common", "claude-sdk"]
+          members = ["swarm", "common", "claude-sdk", "codex-sdk"]
 
           [workspace.package]
           edition = "2024"
@@ -54,9 +60,10 @@ jobs:
           tracing = "0.1"
           libc = "0.2"
           ratatui = "0.29"
-          crossterm = "0.28"
+          crossterm = { version = "0.28", features = ["event-stream"] }
           apiari-common = { path = "common" }
           apiari-claude-sdk = { path = "claude-sdk" }
+          apiari-codex-sdk = { path = "codex-sdk" }
           TOML
 
       - uses: dtolnay/rust-toolchain@stable
