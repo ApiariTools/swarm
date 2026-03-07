@@ -865,17 +865,23 @@ fn draw_conversation_entries(
 
     if conv.auto_scroll {
         // Auto-scroll: show the bottom of the conversation.
-        // Instead of computing a scroll offset (which can diverge from ratatui's
-        // word-wrapping), keep only the tail of lines that fit the viewport
-        // plus a generous buffer, then use u16::MAX scroll to pin to bottom.
+        // Trim to a small tail so our visual-line estimate stays accurate
+        // (drift accumulates over many lines with ratatui's word-wrapping).
         let keep_lines = (visible_height as usize) * 4 + 50;
         let display_lines = if lines.len() > keep_lines {
-            Text::from(lines[lines.len() - keep_lines..].to_vec())
+            &lines[lines.len() - keep_lines..]
         } else {
-            Text::from(lines)
+            &lines[..]
         };
-        let paragraph = Paragraph::new(display_lines)
-            .scroll((u16::MAX, 0))
+        // Compute visual line count for the kept tail
+        let mut tail_visual: u32 = 0;
+        for line in display_lines {
+            let w = line.width();
+            tail_visual += (w.max(1).div_ceil(inner_width)) as u32;
+        }
+        let scroll = tail_visual.saturating_sub(visible_height);
+        let paragraph = Paragraph::new(Text::from(display_lines.to_vec()))
+            .scroll((scroll.min(u16::MAX as u32) as u16, 0))
             .wrap(Wrap { trim: false })
             .block(block.clone());
         frame.render_widget(paragraph, area);
