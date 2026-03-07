@@ -409,6 +409,7 @@ fn resolve_prompt(prompt: Option<String>, prompt_file: Option<String>) -> Result
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn cmd_create(
     work_dir: std::path::PathBuf,
     prompt: Option<String>,

@@ -211,7 +211,7 @@ async fn drain_agent_events(
             Ok(Some(event)) => {
                 event_count += 1;
 
-                if event_count <= 3 || event_count % 50 == 0 {
+                if event_count <= 3 || event_count.is_multiple_of(50) {
                     tracing::debug!(
                         worker_id = %handle.worktree_id,
                         event_count,
