@@ -55,6 +55,7 @@ fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut TuiApp) {
     let mut entry_line_map: Vec<(u32, u32)> = Vec::with_capacity(app.entries.len());
 
     let w = inner.width as usize;
+    let mut last_shown_ts = String::new();
     for (i, entry) in app.entries.iter().enumerate() {
         let start = lines.len() as u32;
         let is_focused = app.focused_tool == Some(i);
@@ -69,6 +70,7 @@ fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut TuiApp) {
                     )));
                 }
                 lines.push(Line::from(""));
+                let ts_span = dedup_timestamp(timestamp, &mut last_shown_ts);
                 lines.push(Line::from(vec![
                     Span::styled(
                         "  You:",
@@ -76,10 +78,7 @@ fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut TuiApp) {
                             .fg(theme::HONEY)
                             .add_modifier(Modifier::BOLD),
                     ),
-                    Span::styled(
-                        format!("  {}", timestamp),
-                        Style::default().fg(theme::SMOKE),
-                    ),
+                    ts_span,
                 ]));
                 for line in text.lines() {
                     lines.push(Line::from(Span::styled(
@@ -89,11 +88,11 @@ fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut TuiApp) {
                 }
             }
             ConversationEntry::AssistantText { text, timestamp } => {
-                // Merge consecutive assistant text blocks under one header
-                let prev_was_assistant =
-                    i > 0 && matches!(app.entries[i - 1], ConversationEntry::AssistantText { .. });
-                if !prev_was_assistant {
+                // Merge headers: skip if previous entry (looking past tool calls) was assistant
+                let in_same_turn = is_continuation_of_assistant_turn(&app.entries, i);
+                if !in_same_turn {
                     lines.push(Line::from(""));
+                    let ts_span = dedup_timestamp(timestamp, &mut last_shown_ts);
                     lines.push(Line::from(vec![
                         Span::styled(
                             "  Claude:",
@@ -101,10 +100,7 @@ fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut TuiApp) {
                                 .fg(theme::FROST)
                                 .add_modifier(Modifier::BOLD),
                         ),
-                        Span::styled(
-                            format!("  {}", timestamp),
-                            Style::default().fg(theme::SMOKE),
-                        ),
+                        ts_span,
                     ]));
                 }
                 lines.extend(markdown::render_markdown(text));
@@ -117,7 +113,7 @@ fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut TuiApp) {
                 collapsed,
             } => {
                 let focus_prefix = if is_focused { "▶ " } else { "  " };
-                let tool_style = if is_focused {
+                let tool_style_expanded = if is_focused {
                     Style::default()
                         .fg(theme::HONEY)
                         .add_modifier(Modifier::BOLD)
@@ -125,13 +121,20 @@ fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut TuiApp) {
                     theme::tool_name()
                 };
                 if *collapsed {
-                    // Collapsed: single-line summary
+                    // Collapsed: single-line summary — dimmed to stay in background
                     let (icon, icon_style) = if output.is_none() {
                         ("⋯", theme::muted())
                     } else if *is_error {
                         ("✖", theme::error())
                     } else {
-                        ("✔", theme::success())
+                        ("✔", Style::default().fg(theme::STEEL))
+                    };
+                    let collapsed_tool_style = if is_focused {
+                        Style::default()
+                            .fg(theme::HONEY)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(theme::STEEL)
                     };
                     let preview = input
                         .lines()
@@ -147,8 +150,11 @@ fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut TuiApp) {
                     };
                     lines.push(Line::from(vec![
                         Span::styled(format!("{}{} ", focus_prefix, icon), icon_style),
-                        Span::styled(tool.as_str(), tool_style),
-                        Span::styled(format!("  {}{}", preview, ellipsis), theme::muted()),
+                        Span::styled(tool.as_str(), collapsed_tool_style),
+                        Span::styled(
+                            format!("  {}{}", preview, ellipsis),
+                            Style::default().fg(theme::STEEL),
+                        ),
                     ]));
                 } else {
                     // Expanded: full tool block
@@ -156,7 +162,7 @@ fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut TuiApp) {
                     // Tool header
                     lines.push(Line::from(vec![
                         Span::styled(focus_prefix, theme::muted()),
-                        Span::styled(format!(" {} ", tool), tool_style),
+                        Span::styled(format!(" {} ", tool), tool_style_expanded),
                         Span::styled(
                             " ────────────────────────────",
                             Style::default().fg(theme::STEEL),
@@ -217,11 +223,11 @@ fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut TuiApp) {
 
     // Streaming text (not yet flushed)
     if !app.streaming_text.is_empty() {
-        if !matches!(
-            app.entries.last(),
-            Some(ConversationEntry::AssistantText { .. })
-        ) {
+        // Show Claude header unless this is a continuation of the same turn
+        let need_header = !is_continuation_of_assistant_turn(&app.entries, app.entries.len());
+        if need_header {
             lines.push(Line::from(""));
+            let ts_span = dedup_timestamp(&app.streaming_timestamp, &mut last_shown_ts);
             lines.push(Line::from(vec![
                 Span::styled(
                     "  Claude:",
@@ -229,10 +235,7 @@ fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut TuiApp) {
                         .fg(theme::FROST)
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(
-                    format!("  {}", &app.streaming_timestamp),
-                    Style::default().fg(theme::SMOKE),
-                ),
+                ts_span,
             ]));
         }
         for line in app.streaming_text.lines() {
@@ -282,6 +285,36 @@ fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut TuiApp) {
         .block(block);
 
     frame.render_widget(paragraph, area);
+}
+
+/// Check if entry at `idx` is a continuation of a Claude turn (looking past tool calls).
+/// Returns true if there's an AssistantText before this one with only ToolCalls in between.
+fn is_continuation_of_assistant_turn(entries: &[ConversationEntry], idx: usize) -> bool {
+    if idx == 0 {
+        return false;
+    }
+    // Walk backwards past tool calls
+    for j in (0..idx).rev() {
+        match &entries[j] {
+            ConversationEntry::AssistantText { .. } => return true,
+            ConversationEntry::ToolCall { .. } => continue,
+            _ => return false,
+        }
+    }
+    false
+}
+
+/// Show timestamp only if it differs from the last shown one. Updates `last_shown`.
+fn dedup_timestamp<'a>(timestamp: &'a str, last_shown: &mut String) -> Span<'a> {
+    if timestamp == last_shown.as_str() || timestamp.is_empty() {
+        Span::raw("")
+    } else {
+        *last_shown = timestamp.to_string();
+        Span::styled(
+            format!("  {}", timestamp),
+            Style::default().fg(theme::SMOKE),
+        )
+    }
 }
 
 fn draw_input(frame: &mut Frame, area: Rect, app: &TuiApp) {

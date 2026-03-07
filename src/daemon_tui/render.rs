@@ -555,6 +555,7 @@ fn draw_conversation_entries(
     // Top padding
     lines.push(Line::from(""));
 
+    let mut last_shown_ts = String::new();
     for (i, entry) in conv.entries.iter().enumerate() {
         // In filter mode, skip noise tool calls (unless they errored)
         if conv.filter_noise {
@@ -580,6 +581,7 @@ fn draw_conversation_entries(
                     )));
                 }
                 lines.push(Line::from(""));
+                let ts_span = dedup_timestamp(timestamp, &mut last_shown_ts);
                 lines.push(Line::from(vec![
                     Span::styled(
                         "  You:",
@@ -588,10 +590,7 @@ fn draw_conversation_entries(
                             .bg(theme::FOCUS_BG)
                             .add_modifier(Modifier::BOLD),
                     ),
-                    Span::styled(
-                        format!("  {}", timestamp),
-                        Style::default().fg(theme::SMOKE),
-                    ),
+                    ts_span,
                 ]));
                 for line in text.lines() {
                     lines.push(Line::from(Span::styled(
@@ -601,10 +600,10 @@ fn draw_conversation_entries(
                 }
             }
             ConversationEntry::AssistantText { text, timestamp } => {
-                let prev_was_assistant =
-                    i > 0 && matches!(conv.entries[i - 1], ConversationEntry::AssistantText { .. });
-                if !prev_was_assistant {
+                let in_same_turn = is_continuation_of_assistant_turn(&conv.entries, i);
+                if !in_same_turn {
                     lines.push(Line::from(""));
+                    let ts_span = dedup_timestamp(timestamp, &mut last_shown_ts);
                     lines.push(Line::from(vec![
                         Span::styled(
                             "  Claude:",
@@ -612,10 +611,7 @@ fn draw_conversation_entries(
                                 .fg(theme::FROST)
                                 .add_modifier(Modifier::BOLD),
                         ),
-                        Span::styled(
-                            format!("  {}", timestamp),
-                            Style::default().fg(theme::SMOKE),
-                        ),
+                        ts_span,
                     ]));
                 }
                 lines.extend(markdown::render_markdown(text));
@@ -794,10 +790,8 @@ fn draw_conversation_entries(
 
     // Streaming text
     if !conv.streaming_text.is_empty() {
-        if !matches!(
-            conv.entries.last(),
-            Some(ConversationEntry::AssistantText { .. })
-        ) {
+        let need_header = !is_continuation_of_assistant_turn(&conv.entries, conv.entries.len());
+        if need_header {
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
                 "  Claude:",
@@ -1427,6 +1421,34 @@ fn draw_pr_detail_overlay(frame: &mut Frame, area: Rect, app: &DaemonTuiApp) {
 }
 
 // ── Helpers ─────────────────────────────────────────────────
+
+/// Check if entry at `idx` is a continuation of a Claude turn (looking past tool calls).
+fn is_continuation_of_assistant_turn(entries: &[ConversationEntry], idx: usize) -> bool {
+    if idx == 0 {
+        return false;
+    }
+    for j in (0..idx).rev() {
+        match &entries[j] {
+            ConversationEntry::AssistantText { .. } => return true,
+            ConversationEntry::ToolCall { .. } => continue,
+            _ => return false,
+        }
+    }
+    false
+}
+
+/// Show timestamp only if it differs from the last shown one.
+fn dedup_timestamp<'a>(timestamp: &'a str, last_shown: &mut String) -> Span<'a> {
+    if timestamp == last_shown.as_str() || timestamp.is_empty() {
+        Span::raw("")
+    } else {
+        *last_shown = timestamp.to_string();
+        Span::styled(
+            format!("  {}", timestamp),
+            Style::default().fg(theme::SMOKE),
+        )
+    }
+}
 
 fn truncate_str(s: &str, max: usize) -> String {
     if s.len() <= max {
