@@ -962,9 +962,22 @@ fn draw_conversation_status_bar(
 
     let filter_badge = if is_filtered { " [filtered]" } else { "" };
 
+    let scroll_hint = if let Some(conv) = app
+        .selected_worker()
+        .and_then(|w| app.conversations.get(&w.id))
+    {
+        if !conv.auto_scroll && conv.scroll_offset > 0 {
+            format!("↑{} ", conv.scroll_offset)
+        } else {
+            String::new()
+        }
+    } else {
+        String::new()
+    };
+
     let available = area.width as usize;
     let left = format!(" [{}]{}", phase_text, filter_badge);
-    let right = format!("{}  {} ", hints, right_info);
+    let right = format!("{}{}  {} ", scroll_hint, hints, right_info);
     let padding = available.saturating_sub(left.len() + right.len());
 
     let line = Line::from(vec![
