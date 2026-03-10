@@ -535,7 +535,7 @@ fn draw_conversation_header(
     let (prefix, bg, fg, modifier) = if is_focused {
         (" \u{25b8} ", theme::FOCUS_BG, theme::HONEY, Modifier::BOLD)
     } else {
-        ("   ", theme::COMB, theme::SMOKE, Modifier::empty())
+        ("   ", Color::Rgb(48, 44, 38), theme::SMOKE, Modifier::empty())
     };
 
     let base_style = Style::default().fg(fg).bg(bg).add_modifier(modifier);
