@@ -577,7 +577,7 @@ fn draw_conversation_header(
 
         let line2 = Line::from(vec![
             Span::styled(url_prefix, Style::default().bg(bg)),
-            Span::styled(display_url, Style::default().fg(theme::FROST).bg(bg)),
+            Span::styled(display_url, Style::default().fg(theme::MINT).bg(bg)),
             Span::styled(" ".repeat(url_padding), Style::default().bg(bg)),
         ]);
 
