@@ -144,6 +144,71 @@ pub fn create_worktree(
     Ok(())
 }
 
+/// Symlink gitignored config files from the repo root into a new worktree.
+///
+/// Automatically symlinks:
+/// - `.env*` files (`.env`, `.env.local`, `.env.development`, etc.)
+///
+/// If `.swarm/worktree-links` exists in the repo, also symlinks each
+/// listed path (one relative path per line).
+///
+/// Failures are logged but never fatal — a missing `.env` shouldn't
+/// prevent the worktree from being created.
+pub fn symlink_worktree_files(repo_path: &Path, worktree_path: &Path) -> Vec<PathBuf> {
+    let mut linked = Vec::new();
+
+    // Auto-symlink .env* files from repo root
+    if let Ok(entries) = std::fs::read_dir(repo_path) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if name_str.starts_with(".env")
+                && entry.file_type().is_ok_and(|ft| ft.is_file())
+            {
+                let target = worktree_path.join(&name);
+                if !target.exists() {
+                    if let Err(e) = std::os::unix::fs::symlink(entry.path(), &target) {
+                        eprintln!("failed to symlink {}: {e}", name_str);
+                    } else {
+                        linked.push(PathBuf::from(&*name_str));
+                    }
+                }
+            }
+        }
+    }
+
+    // Read .swarm/worktree-links manifest if present
+    let manifest = repo_path.join(".swarm").join("worktree-links");
+    if let Ok(contents) = std::fs::read_to_string(&manifest) {
+        for line in contents.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let src = repo_path.join(line);
+            let dst = worktree_path.join(line);
+            if !src.exists() {
+                eprintln!("worktree-links: {line} not found in repo, skipping");
+                continue;
+            }
+            if dst.exists() {
+                continue;
+            }
+            // Ensure parent directory exists in worktree
+            if let Some(parent) = dst.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if let Err(e) = std::os::unix::fs::symlink(&src, &dst) {
+                eprintln!("failed to symlink {line}: {e}");
+            } else {
+                linked.push(PathBuf::from(line));
+            }
+        }
+    }
+
+    linked
+}
+
 /// Remove a worktree.
 pub fn remove_worktree(repo_path: &Path, worktree_path: &Path) -> Result<()> {
     let output = Command::new("git")

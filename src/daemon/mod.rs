@@ -938,6 +938,16 @@ async fn handle_request(
                 return;
             }
 
+            // Symlink .env* and other gitignored config files
+            let linked = git::symlink_worktree_files(&repo_path, &worktree_path);
+            if !linked.is_empty() {
+                swarm_log!(
+                    "[daemon] Symlinked {} file(s) into worktree: {}",
+                    linked.len(),
+                    linked.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
+                );
+            }
+
             // Inject profile into worktree
             let profile_slug = profile.as_deref().unwrap_or("default");
             let profile_content = crate::core::profile::load_profile(&work_dir, profile_slug);
