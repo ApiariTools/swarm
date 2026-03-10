@@ -941,10 +941,10 @@ async fn handle_request(
             // Symlink .env* and other gitignored config files
             let linked = git::symlink_worktree_files(&repo_path, &worktree_path);
             if !linked.is_empty() {
-                swarm_log!(
-                    "[daemon] Symlinked {} file(s) into worktree: {}",
-                    linked.len(),
-                    linked.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
+                tracing::info!(
+                    count = linked.len(),
+                    files = %linked.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", "),
+                    "Symlinked config files into worktree"
                 );
             }
 

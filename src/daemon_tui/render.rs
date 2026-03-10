@@ -163,9 +163,9 @@ fn draw_divider(frame: &mut Frame, area: Rect) {
     frame.render_widget(divider, inner);
 }
 
-/// Height of a single worker item: 3 rows (id, agent+time, prompt).
-fn worker_item_height(_worker: &WorkerInfo, _app: &DaemonTuiApp) -> usize {
-    3
+/// Height of a single worker item: 3 rows normally, 4 when a PR URL is present.
+fn worker_item_height(worker: &WorkerInfo, _app: &DaemonTuiApp) -> usize {
+    if worker.pr_url.is_some() { 4 } else { 3 }
 }
 
 fn draw_worker_list(frame: &mut Frame, area: Rect, app: &DaemonTuiApp) {
@@ -231,8 +231,9 @@ fn draw_worker_list(frame: &mut Frame, area: Rect, app: &DaemonTuiApp) {
 
         let is_selected = i == app.selected;
 
-        // Draw the 3-line worker row (possibly clipped)
-        let worker_rows = 3usize.saturating_sub(skip_top).min(render_h);
+        // Draw worker row (3 or 4 lines, possibly clipped)
+        let item_lines = worker_item_height(worker, app);
+        let worker_rows = item_lines.saturating_sub(skip_top).min(render_h);
         if worker_rows > 0 {
             let rect = Rect::new(area.x, render_y, area.width, worker_rows as u16);
             draw_worker_row(frame, rect, worker, is_selected, i, app);
@@ -273,16 +274,16 @@ fn draw_worker_row(
         return;
     }
 
+    let has_pr = worker.pr_url.is_some();
+    let num_rows = if has_pr { 4 } else { 3 };
+
+    let constraints: Vec<Constraint> = (0..num_rows).map(|_| Constraint::Length(1)).collect();
     let row_chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-        ])
+        .constraints(constraints)
         .split(area);
 
-    // Line 1: color bar + selector + status + name + PR
+    // Line 1: color bar + selector + status + name + PR#
     let selector = if selected { "\u{25b8}" } else { " " };
     let selector_style = if selected {
         theme::selected()
@@ -360,10 +361,31 @@ fn draw_worker_row(
         frame.render_widget(Paragraph::new(line2), row_chunks[1]);
     }
 
-    // Line 3: truncated prompt
-    if area.height >= 3 && row_chunks[2].height > 0 {
+    // Line 3 (when PR exists): PR URL
+    let prompt_row = if has_pr {
+        if area.height >= 3 && row_chunks[2].height > 0 {
+            if let Some(ref pr_url) = worker.pr_url {
+                let max_len = (area.width as usize).saturating_sub(3);
+                let line3 = Line::from(vec![
+                    Span::styled("\u{258c}", Style::default().fg(wt_color)),
+                    Span::styled("  ", Style::default()),
+                    Span::styled(
+                        truncate_str(pr_url, max_len),
+                        Style::default().fg(theme::FROST),
+                    ),
+                ]);
+                frame.render_widget(Paragraph::new(line3), row_chunks[2]);
+            }
+        }
+        3 // prompt is on row index 3
+    } else {
+        2 // prompt is on row index 2
+    };
+
+    // Last line: truncated prompt
+    if area.height as usize > prompt_row && row_chunks[prompt_row].height > 0 {
         let max_len = (area.width as usize).saturating_sub(3);
-        let line3 = Line::from(vec![
+        let prompt_line = Line::from(vec![
             Span::styled("\u{258c}", Style::default().fg(wt_color)),
             Span::styled("  ", Style::default()),
             Span::styled(
@@ -371,7 +393,7 @@ fn draw_worker_row(
                 Style::default().fg(Color::Rgb(90, 87, 80)),
             ),
         ]);
-        frame.render_widget(Paragraph::new(line3), row_chunks[2]);
+        frame.render_widget(Paragraph::new(prompt_line), row_chunks[prompt_row]);
     }
 }
 
