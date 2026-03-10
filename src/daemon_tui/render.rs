@@ -455,13 +455,27 @@ fn draw_conversation_panel(frame: &mut Frame, area: Rect, app: &mut DaemonTuiApp
     // Determine if we need an input bar
     let show_input = is_focused && app.mode == Mode::Input;
 
+    // Compute input height: 2 (borders) + wrapped line count, capped at 8
+    let input_height = if show_input {
+        let inner_width = area.width.saturating_sub(4) as usize; // borders + padding
+        let text_lines = if inner_width > 0 {
+            let char_count = app.input_buffer.len();
+            ((char_count / inner_width.max(1)) + 1).min(6) as u16
+        } else {
+            1
+        };
+        text_lines + 2 // borders
+    } else {
+        0
+    };
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),                              // header bar
-            Constraint::Min(1),                                 // conversation
-            Constraint::Length(if show_input { 3 } else { 0 }), // input
-            Constraint::Length(1),                              // status bar
+            Constraint::Length(1),            // header bar
+            Constraint::Min(1),              // conversation
+            Constraint::Length(input_height), // input
+            Constraint::Length(1),            // status bar
         ])
         .split(area);
 
@@ -931,11 +945,20 @@ fn draw_conversation_input(frame: &mut Frame, area: Rect, app: &DaemonTuiApp) {
 
     let input_text = Paragraph::new(app.input_buffer.as_str())
         .style(theme::text())
+        .wrap(Wrap { trim: false })
         .block(input_block);
 
     frame.render_widget(input_text, area);
 
-    frame.set_cursor_position((area.x + 2 + app.input_cursor as u16, area.y + 1));
+    // Compute cursor position accounting for wrapping
+    let inner_width = area.width.saturating_sub(4) as usize; // borders + padding
+    if inner_width > 0 {
+        let cursor_row = (app.input_cursor / inner_width) as u16;
+        let cursor_col = (app.input_cursor % inner_width) as u16;
+        frame.set_cursor_position((area.x + 2 + cursor_col, area.y + 1 + cursor_row));
+    } else {
+        frame.set_cursor_position((area.x + 2, area.y + 1));
+    }
 }
 
 fn draw_conversation_status_bar(
