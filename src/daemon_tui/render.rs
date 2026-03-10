@@ -476,7 +476,7 @@ fn draw_conversation_panel(frame: &mut Frame, area: Rect, app: &mut DaemonTuiApp
     {
         let block = Block::default().borders(Borders::NONE);
         let inner = block.inner(chunks[1]);
-        app.viewport_height = inner.height.saturating_sub(1);
+        app.viewport_height = inner.height;
 
         if let Some(ref id) = selected_id {
             if let Some(conv) = app.conversations.get_mut(id) {
@@ -865,60 +865,36 @@ fn draw_conversation_entries(
 
     if conv.auto_scroll {
         // Auto-scroll: show the bottom of the conversation.
-        // Trim to a small tail so our visual-line estimate stays accurate
-        // (drift accumulates over many lines with ratatui's word-wrapping).
+        // Trim to a tail for performance, then use ratatui's own line_count()
+        // for exact scroll calculation (our manual width estimate drifts with
+        // word wrapping and causes the bottom to get clipped).
         let keep_lines = (visible_height as usize) * 4 + 50;
         let display_lines = if lines.len() > keep_lines {
             &lines[lines.len() - keep_lines..]
         } else {
             &lines[..]
         };
-        // Compute visual line count for the kept tail
-        let mut tail_visual: u32 = 0;
-        for line in display_lines {
-            let w = line.width();
-            tail_visual += (w.max(1).div_ceil(inner_width)) as u32;
-        }
-        let scroll = tail_visual.saturating_sub(visible_height);
         let paragraph = Paragraph::new(Text::from(display_lines.to_vec()))
+            .wrap(Wrap { trim: false });
+        let actual_lines = paragraph.line_count(inner.width) as u32;
+        let scroll = actual_lines.saturating_sub(visible_height);
+        let paragraph = paragraph
             .scroll((scroll.min(u16::MAX as u32) as u16, 0))
-            .wrap(Wrap { trim: false })
             .block(block.clone());
         frame.render_widget(paragraph, area);
     } else {
-        // Manual scroll: use our visual-line estimate for the offset.
-        let total_visual = conv.total_visual_lines;
+        // Manual scroll: compute exact scroll using ratatui's line_count().
+        let paragraph = Paragraph::new(Text::from(lines))
+            .wrap(Wrap { trim: false });
+        let total_visual = paragraph.line_count(inner.width) as u32;
+        // Update stored total so scroll_up/scroll_down clamp correctly
+        conv.total_visual_lines = total_visual;
         let target_scroll = total_visual
             .saturating_sub(visible_height)
             .saturating_sub(conv.scroll_offset);
 
-        // Trim from front when scroll is large to avoid u16 overflow.
-        let (display_lines, effective_scroll) = if target_scroll > 500 {
-            let buffer = visible_height.max(100);
-            let drop_target = target_scroll.saturating_sub(buffer);
-            let mut dropped_visual = 0u32;
-            let mut drop_count = 0usize;
-            for line in lines.iter() {
-                let w = line.width();
-                let vl = (w.max(1).div_ceil(inner_width)) as u32;
-                if dropped_visual + vl > drop_target {
-                    break;
-                }
-                dropped_visual += vl;
-                drop_count += 1;
-            }
-            let adj_scroll = target_scroll - dropped_visual;
-            (
-                Text::from(lines[drop_count..].to_vec()),
-                adj_scroll.min(u16::MAX as u32) as u16,
-            )
-        } else {
-            (Text::from(lines), target_scroll as u16)
-        };
-
-        let paragraph = Paragraph::new(display_lines)
-            .scroll((effective_scroll, 0))
-            .wrap(Wrap { trim: false })
+        let paragraph = paragraph
+            .scroll((target_scroll.min(u16::MAX as u32) as u16, 0))
             .block(block.clone());
         frame.render_widget(paragraph, area);
     }
