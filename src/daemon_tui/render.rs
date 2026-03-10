@@ -163,9 +163,9 @@ fn draw_divider(frame: &mut Frame, area: Rect) {
     frame.render_widget(divider, inner);
 }
 
-/// Height of a single worker item: 3 rows normally, 4 when a PR URL is present.
-fn worker_item_height(worker: &WorkerInfo, _app: &DaemonTuiApp) -> usize {
-    if worker.pr_url.is_some() { 4 } else { 3 }
+/// Height of a single worker item: 3 rows (id, agent+time, prompt).
+fn worker_item_height(_worker: &WorkerInfo, _app: &DaemonTuiApp) -> usize {
+    3
 }
 
 fn draw_worker_list(frame: &mut Frame, area: Rect, app: &DaemonTuiApp) {
@@ -274,13 +274,13 @@ fn draw_worker_row(
         return;
     }
 
-    let has_pr = worker.pr_url.is_some();
-    let num_rows = if has_pr { 4 } else { 3 };
-
-    let constraints: Vec<Constraint> = (0..num_rows).map(|_| Constraint::Length(1)).collect();
     let row_chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints(constraints)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
         .split(area);
 
     // Line 1: color bar + selector + status + name + PR#
@@ -361,31 +361,10 @@ fn draw_worker_row(
         frame.render_widget(Paragraph::new(line2), row_chunks[1]);
     }
 
-    // Line 3 (when PR exists): PR URL
-    let prompt_row = if has_pr {
-        if area.height >= 3 && row_chunks[2].height > 0 {
-            if let Some(ref pr_url) = worker.pr_url {
-                let max_len = (area.width as usize).saturating_sub(3);
-                let line3 = Line::from(vec![
-                    Span::styled("\u{258c}", Style::default().fg(wt_color)),
-                    Span::styled("  ", Style::default()),
-                    Span::styled(
-                        truncate_str(pr_url, max_len),
-                        Style::default().fg(theme::FROST),
-                    ),
-                ]);
-                frame.render_widget(Paragraph::new(line3), row_chunks[2]);
-            }
-        }
-        3 // prompt is on row index 3
-    } else {
-        2 // prompt is on row index 2
-    };
-
-    // Last line: truncated prompt
-    if area.height as usize > prompt_row && row_chunks[prompt_row].height > 0 {
+    // Line 3: truncated prompt
+    if area.height >= 3 && row_chunks[2].height > 0 {
         let max_len = (area.width as usize).saturating_sub(3);
-        let prompt_line = Line::from(vec![
+        let line3 = Line::from(vec![
             Span::styled("\u{258c}", Style::default().fg(wt_color)),
             Span::styled("  ", Style::default()),
             Span::styled(
@@ -393,7 +372,7 @@ fn draw_worker_row(
                 Style::default().fg(Color::Rgb(90, 87, 80)),
             ),
         ]);
-        frame.render_widget(Paragraph::new(prompt_line), row_chunks[prompt_row]);
+        frame.render_widget(Paragraph::new(line3), row_chunks[2]);
     }
 }
 
@@ -469,13 +448,23 @@ fn draw_conversation_panel(frame: &mut Frame, area: Rect, app: &mut DaemonTuiApp
         0
     };
 
+    // Header is 2 lines when selected worker has a PR URL, else 1
+    let header_height = if let Some(ref id) = selected_id
+        && let Some(w) = app.workers.iter().find(|w| w.id == *id)
+        && w.pr_url.is_some()
+    {
+        2
+    } else {
+        1
+    };
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),            // header bar
-            Constraint::Min(1),              // conversation
-            Constraint::Length(input_height), // input
-            Constraint::Length(1),            // status bar
+            Constraint::Length(header_height), // header bar
+            Constraint::Min(1),               // conversation
+            Constraint::Length(input_height),  // input
+            Constraint::Length(1),             // status bar
         ])
         .split(area);
 
@@ -568,13 +557,35 @@ fn draw_conversation_header(
     let right_len = right_text.len();
     let padding = (area.width as usize).saturating_sub(left_len + right_len);
 
-    let line = Line::from(vec![
+    // Line 1: worker name
+    let line1 = Line::from(vec![
         Span::styled(left_text, base_style),
         Span::styled(" ".repeat(padding), Style::default().bg(bg)),
         Span::styled(right_text, base_style),
     ]);
 
-    frame.render_widget(Paragraph::new(line), area);
+    // Line 2: PR URL (if present and area has room)
+    if area.height >= 2
+        && let Some(w) = worker
+        && let Some(ref pr_url) = w.pr_url
+    {
+        let url_prefix = "   ";
+        let max_url_len = (area.width as usize).saturating_sub(url_prefix.len());
+        let display_url = truncate_str(pr_url, max_url_len);
+        let url_len = url_prefix.len() + display_url.len();
+        let url_padding = (area.width as usize).saturating_sub(url_len);
+
+        let line2 = Line::from(vec![
+            Span::styled(url_prefix, Style::default().bg(bg)),
+            Span::styled(display_url, Style::default().fg(theme::FROST).bg(bg)),
+            Span::styled(" ".repeat(url_padding), Style::default().bg(bg)),
+        ]);
+
+        let text = Text::from(vec![line1, line2]);
+        frame.render_widget(Paragraph::new(text), area);
+    } else {
+        frame.render_widget(Paragraph::new(line1), area);
+    }
 }
 
 fn draw_conversation_entries(
