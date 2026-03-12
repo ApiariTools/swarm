@@ -112,7 +112,7 @@ impl ManagedWorker {
             repo_path: self.repo_path.clone(),
             worktree_path: self.worktree_path.clone(),
             created_at: self.created_at,
-            agent: None, // daemon mode: no tmux panes
+            agent: None, // daemon mode: no agent process
             terminals: vec![],
             summary: None,
             pr: self.pr.clone(),

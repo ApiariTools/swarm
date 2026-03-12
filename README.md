@@ -1,6 +1,6 @@
 # swarm
 
-Run agents in parallel. Worktrees + tmux + vibes.
+Run agents in parallel. Git worktrees + custom daemons + vibes.
 
 Swarm is a terminal UI that lets you run multiple AI coding agents simultaneously, each in its own isolated git worktree. Think of it as a multiplayer mode for AI-assisted development.
 
@@ -29,7 +29,6 @@ Each agent gets its own git branch and worktree, so they never conflict. When an
 ## Requirements
 
 - [Rust](https://rustup.rs) (for building)
-- [tmux](https://github.com/tmux/tmux)
 - At least one supported agent CLI:
   - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) (`claude`)
   - [Codex](https://github.com/openai/codex) (`codex`)

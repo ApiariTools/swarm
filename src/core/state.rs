@@ -17,7 +17,7 @@ pub struct PrInfo {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkerPhase {
-    /// Git worktree + tmux pane being set up.
+    /// Git worktree + agent process being set up.
     Creating,
     /// Pane exists, prompt not yet delivered.
     Starting,
@@ -69,7 +69,7 @@ impl std::fmt::Display for WorkerPhase {
     }
 }
 
-/// Persisted tmux pane state.
+/// Persisted agent pane state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaneState {
     pub pane_id: String,

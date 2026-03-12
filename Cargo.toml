@@ -2,7 +2,7 @@
 name = "swarm"
 version = "0.1.0"
 edition.workspace = true
-description = "Run agents in parallel. Worktrees + tmux + vibes."
+description = "Run agents in parallel. Git worktrees + custom daemons + vibes."
 license.workspace = true
 repository = "https://github.com/ApiariTools/swarm"
 

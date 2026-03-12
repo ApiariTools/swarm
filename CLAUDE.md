@@ -1,12 +1,12 @@
 # Swarm
 
-Rust TUI that orchestrates multiple AI coding agents in parallel using git worktrees and tmux.
+Rust TUI that orchestrates multiple AI coding agents in parallel using git worktrees and custom daemon processes.
 
 ## Quick Reference
 
 ```bash
 cargo build --release          # Build
-cargo run                      # Run (launches tmux session with TUI sidebar)
+cargo run                      # Run (launches TUI)
 cargo run -- --help            # CLI help
 cargo test                     # Run tests
 ```
@@ -22,7 +22,7 @@ cargo test                     # Run tests
 
 ```
 src/
-  main.rs              # CLI (clap) + tmux session bootstrap + IPC handlers
+  main.rs              # CLI (clap) + daemon bootstrap + IPC handlers
   core/
     agent.rs           # AgentKind enum (Claude, Codex) + launch commands
     git.rs             # Git worktree/branch operations, multi-repo detection
@@ -30,11 +30,10 @@ src/
     merge.rs           # Commit-all + merge-into-base flows
     shell.rs           # shell_quote() and sanitize() helpers (with unit tests)
     state.rs           # JSON persistence (.swarm/state.json)
-    tmux.rs            # Tmux wrapper: sessions, panes, splits, styling (~30 functions)
   tui/
     mod.rs             # Event loop (100ms tick, crossterm key handling)
     app.rs             # App state machine + all business logic (largest file, ~1500 lines)
-    picker.rs          # Repo/agent picker popup (used by `swarm pick` and tmux popup flow)
+    picker.rs          # Repo/agent picker popup
     render.rs          # Ratatui rendering (sidebar, overlays, welcome screen)
     theme.rs           # Color palette (honey/amber bee theme)
 ```
@@ -42,19 +41,18 @@ src/
 ## Key Concepts
 
 - **Worktree** (`tui/app.rs:Worktree`): The primary unit of work. Each has an isolated git worktree, a branch (`swarm/<sanitized-prompt>-N`), an agent pane, optional terminal panes, PR tracking info, and an LLM-generated summary.
-- **AgentKind** (`core/agent.rs`): Currently `ClaudeTui` (default), `Claude`, and `Codex`. Agents launch via their CLI in a tmux pane with `--dangerously-skip-permissions` for Claude.
-- **Sidebar**: The TUI runs in a narrow left pane (38 chars) using `main-vertical` tmux layout. Agent panes stack vertically to its right.
+- **AgentKind** (`core/agent.rs`): Currently `ClaudeTui` (default), `Claude`, and `Codex`. Agents launch as daemon subprocesses with `--dangerously-skip-permissions` for Claude.
+- **TUI**: Full-screen ratatui interface with worker list, conversation view, and input box. Each worker's agent runs as a background daemon process.
 - **IPC**: External commands write JSONL to `.swarm/inbox.jsonl`, sidebar reads on 500ms tick. Events emitted to `.swarm/events.jsonl`. CLI commands auto-start the sidebar if it's not already running.
 - **State**: Persisted to `.swarm/state.json` on every mutation. Restored on restart with orphan worktree discovery.
 - **Shell utilities** (`core/shell.rs`): `shell_quote(s)` wraps in single quotes using the `'\''` escape idiom. `sanitize(s)` produces safe branch/directory names (lowercase, non-alphanumeric replaced with hyphens, truncated to 40 chars). Both have unit tests.
 
 ## How It Works
 
-1. `swarm` creates/joins a tmux session named `swarm-<dirname>`
-2. The sidebar TUI runs in the leftmost pane
-3. Press `n` to create a new worktree: prompt -> pick agent -> git worktree created -> agent launched in split pane
-4. Each worktree gets a unique color (8-color cycle) for pane borders and sidebar indicator
-5. Pane liveness checked every 3s, PR status via `gh` every 30s
+1. `swarm` launches a full-screen TUI
+2. Press `n` to create a new worktree: prompt -> pick agent -> git worktree created -> agent daemon spawned
+3. Each worker gets a unique color (8-color cycle) for visual identification
+4. Agent process liveness checked every 3s, PR status via `gh` every 30s
 6. `m` merges worktree branch into base (commit all -> merge --no-ff -> cleanup)
 7. `x` closes worktree (kill panes -> remove git worktree -> delete branch)
 
@@ -113,7 +111,7 @@ swarm create "task prompt"         # Queue new worktree (auto-starts sidebar if 
 swarm send <worktree-id> "msg"     # Send message to agent
 swarm close <worktree-id>          # Close a worktree
 swarm merge <worktree-id>          # Merge and close
-swarm pick                         # Run interactive repo/agent picker (tmux popup)
+swarm pick                         # Run interactive repo/agent picker
 ```
 
 ## File Layout on Disk
@@ -157,13 +155,13 @@ swarm create "task prompt"     # Hive dispatches tasks to swarm
   |
   v
 .swarm/state.json              # Keeper reads this for dashboard
-                               # Keeper also checks tmux pane liveness
+                               # Keeper reads this for dashboard display
 ```
 
 | Tool | Relationship |
 |------|-------------|
 | **hive** | Calls swarm CLI as subprocess (`create`, `status`, `send`, `close`, `merge`) to execute tasks |
-| **keeper** | Reads `.swarm/state.json` and checks `swarm-*` tmux sessions for dashboard display |
+| **keeper** | Reads `.swarm/state.json` for dashboard display |
 | **buzz** | No direct interaction (buzz signals go to hive/keeper, not swarm) |
 | **apiari-common** | Shared types and utilities (workspace crate) |
 
@@ -186,7 +184,7 @@ The TUI polls `inbox.jsonl` every 500ms and processes queued messages. IPC comma
 - All git branches created by swarm are prefixed `swarm/`
 - Shell commands use the `'\''` idiom for safe single-quote escaping (see `core/shell.rs`)
 - Branch/directory names are sanitized via `sanitize()`: lowercase, hyphens, truncated to 40 chars
-- Tmux pane IDs are `%N` format (e.g., `%0`, `%3`)
+- Worker IDs are `<repo>-N` format (e.g., `hive-1`, `swarm-2`)
 - Multi-repo: if the working dir contains multiple child git repos, swarm detects and offers a picker
 - Auto-trusts `mise` if repo has `.mise.toml` or `mise.toml`
 - Release binary uses LTO + strip for small size
