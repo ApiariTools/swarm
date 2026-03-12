@@ -1,27 +1,9 @@
 use apiari_claude_sdk::types::ContentBlock;
+pub use apiari_tui::conversation::ConversationEntry;
 use chrono::Local;
 use ratatui::layout::Rect;
 use std::time::Instant;
 use tokio::sync::mpsc;
-
-/// A rendered conversation entry in the TUI.
-#[derive(Debug, Clone)]
-pub enum ConversationEntry {
-    /// User message.
-    User { text: String, timestamp: String },
-    /// Assistant text block (may be streamed incrementally).
-    AssistantText { text: String, timestamp: String },
-    /// A tool call with its result.
-    ToolCall {
-        tool: String,
-        input: String,
-        output: Option<String>,
-        is_error: bool,
-        collapsed: bool,
-    },
-    /// Status message (e.g. "Session started", "Rate limited").
-    Status { text: String },
-}
 
 /// Format a timestamp for display (e.g. "2:34 PM").
 fn now_timestamp() -> String {

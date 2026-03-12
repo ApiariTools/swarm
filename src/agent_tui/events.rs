@@ -1,61 +1,13 @@
 use apiari_common::ipc::JsonlWriter;
+pub use apiari_tui::conversation::ConversationEntry;
+pub use apiari_tui::events_parser::AgentEvent;
 use chrono::{DateTime, Local, Utc};
-use serde::{Deserialize, Serialize};
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
-
-use super::app::ConversationEntry;
 
 /// Format a UTC timestamp as local time for display.
 fn fmt_ts(ts: &DateTime<Utc>) -> String {
     ts.with_timezone(&Local).format("%-I:%M %p").to_string()
-}
-
-/// A structured event written to the agent's event log for hive consumption.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum AgentEvent {
-    /// Session started.
-    Start {
-        timestamp: DateTime<Utc>,
-        prompt: String,
-        model: Option<String>,
-    },
-    /// User sent a follow-up message.
-    UserMessage {
-        timestamp: DateTime<Utc>,
-        text: String,
-    },
-    /// Assistant emitted text.
-    AssistantText {
-        timestamp: DateTime<Utc>,
-        text: String,
-    },
-    /// Assistant requested a tool call.
-    ToolUse {
-        timestamp: DateTime<Utc>,
-        tool: String,
-        input: String,
-    },
-    /// Tool execution completed.
-    ToolResult {
-        timestamp: DateTime<Utc>,
-        tool: String,
-        output: String,
-        is_error: bool,
-    },
-    /// SDK returned a result — session is now idle and resumable if session_id is present.
-    SessionResult {
-        timestamp: DateTime<Utc>,
-        turns: u64,
-        cost_usd: Option<f64>,
-        session_id: Option<String>,
-    },
-    /// Session errored.
-    Error {
-        timestamp: DateTime<Utc>,
-        message: String,
-    },
 }
 
 /// Writes agent events to a JSONL file for hive consumption.

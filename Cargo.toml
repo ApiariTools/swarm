@@ -10,6 +10,7 @@ repository = "https://github.com/ApiariTools/swarm"
 apiari-common.workspace = true
 apiari-claude-sdk.workspace = true
 apiari-codex-sdk.workspace = true
+apiari-tui.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true
 color-eyre.workspace = true
