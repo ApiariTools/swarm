@@ -162,9 +162,7 @@ pub fn symlink_worktree_files(repo_path: &Path, worktree_path: &Path) -> Vec<Pat
         for entry in entries.flatten() {
             let name = entry.file_name();
             let name_str = name.to_string_lossy();
-            if name_str.starts_with(".env")
-                && entry.file_type().is_ok_and(|ft| ft.is_file())
-            {
+            if name_str.starts_with(".env") && entry.file_type().is_ok_and(|ft| ft.is_file()) {
                 let target = worktree_path.join(&name);
                 if !target.exists() {
                     if let Err(e) = std::os::unix::fs::symlink(entry.path(), &target) {

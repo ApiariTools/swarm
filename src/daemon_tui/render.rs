@@ -462,7 +462,7 @@ fn draw_conversation_panel(frame: &mut Frame, area: Rect, app: &mut DaemonTuiApp
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(header_height), // header bar
-            Constraint::Min(1),               // conversation
+            Constraint::Min(1),                // conversation
             Constraint::Length(input_height),  // input
             Constraint::Length(1),             // status bar
         ])
@@ -535,7 +535,12 @@ fn draw_conversation_header(
     let (prefix, bg, fg, modifier) = if is_focused {
         (" \u{25b8} ", theme::FOCUS_BG, theme::HONEY, Modifier::BOLD)
     } else {
-        ("   ", Color::Rgb(48, 44, 38), theme::SMOKE, Modifier::empty())
+        (
+            "   ",
+            Color::Rgb(48, 44, 38),
+            theme::SMOKE,
+            Modifier::empty(),
+        )
     };
 
     let base_style = Style::default().fg(fg).bg(bg).add_modifier(modifier);
@@ -921,8 +926,8 @@ fn draw_conversation_entries(
         } else {
             &lines[..]
         };
-        let paragraph = Paragraph::new(Text::from(display_lines.to_vec()))
-            .wrap(Wrap { trim: false });
+        let paragraph =
+            Paragraph::new(Text::from(display_lines.to_vec())).wrap(Wrap { trim: false });
         let actual_lines = paragraph.line_count(inner.width) as u32;
         let scroll = actual_lines.saturating_sub(visible_height);
         let paragraph = paragraph
@@ -931,8 +936,7 @@ fn draw_conversation_entries(
         frame.render_widget(paragraph, area);
     } else {
         // Manual scroll: compute exact scroll using ratatui's line_count().
-        let paragraph = Paragraph::new(Text::from(lines))
-            .wrap(Wrap { trim: false });
+        let paragraph = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
         let total_visual = paragraph.line_count(inner.width) as u32;
         // Update stored total so scroll_up/scroll_down clamp correctly
         conv.total_visual_lines = total_visual;
