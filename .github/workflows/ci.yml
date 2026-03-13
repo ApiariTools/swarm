@@ -19,12 +19,6 @@ jobs:
         with:
           path: swarm
 
-      - name: Checkout apiari-common
-        uses: actions/checkout@v4
-        with:
-          repository: ApiariTools/apiari-common
-          path: common
-
       - name: Checkout apiari-claude-sdk
         uses: actions/checkout@v4
         with:
@@ -42,7 +36,7 @@ jobs:
           cat > Cargo.toml << 'TOML'
           [workspace]
           resolver = "3"
-          members = ["swarm", "common", "claude-sdk", "codex-sdk"]
+          members = ["swarm", "claude-sdk", "codex-sdk"]
 
           [workspace.package]
           edition = "2024"
@@ -59,9 +53,10 @@ jobs:
           thiserror = "2"
           tracing = "0.1"
           libc = "0.2"
-          ratatui = "0.29"
+          ratatui = { version = "0.29", features = ["unstable-rendered-line-info"] }
           crossterm = { version = "0.28", features = ["event-stream"] }
-          apiari-common = { path = "common" }
+          apiari-common = "0.1.0"
+          apiari-tui = "0.1.0"
           apiari-claude-sdk = { path = "claude-sdk" }
           apiari-codex-sdk = { path = "codex-sdk" }
           TOML
