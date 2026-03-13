@@ -42,7 +42,7 @@ jobs:
         with:
           repository: ApiariTools/tui
           path: tui
-          token: ${{ secrets.GH_PAT }}
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Create workspace root
         run: |
