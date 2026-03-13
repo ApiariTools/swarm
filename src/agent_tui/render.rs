@@ -54,12 +54,8 @@ fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut TuiApp) {
     let mut lines: Vec<Line<'_>> = Vec::new();
 
     // Use shared conversation renderer for entries
-    let entry_line_map = conversation::render_conversation(
-        &mut lines,
-        &app.entries,
-        app.focused_tool,
-        None,
-    );
+    let entry_line_map =
+        conversation::render_conversation(&mut lines, &app.entries, app.focused_tool, None);
 
     // Streaming text (not yet flushed) — swarm-specific
     if !app.streaming_text.is_empty() {
