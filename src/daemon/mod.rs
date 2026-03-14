@@ -907,6 +907,9 @@ async fn handle_request(
                 tracing::warn!(error = %e, "git fetch origin failed");
             }
 
+            // Fast-forward local main so cargo builds use fresh code
+            git::pull_main(&repo_path);
+
             // Default to origin/main when no explicit start_point
             let start_point = start_point.or_else(|| Some("origin/main".to_string()));
 
@@ -1071,6 +1074,7 @@ async fn handle_request(
 
                         let _ = git::remove_worktree(&worker.repo_path, &worker.worktree_path);
                         let _ = git::delete_branch(&worker.repo_path, &worker.branch);
+                        git::pull_main(&worker.repo_path);
 
                         let _ = ipc::emit_event(
                             &ws_path,
@@ -1128,6 +1132,7 @@ async fn handle_request(
                                 let _ =
                                     git::remove_worktree(&worker.repo_path, &worker.worktree_path);
                                 let _ = git::delete_branch(&worker.repo_path, &worker.branch);
+                                git::pull_main(&worker.repo_path);
                                 ws.workers.remove(&worktree_id);
 
                                 let _ = resp_tx.send(DaemonResponse::Ok { data: None });
@@ -1454,6 +1459,7 @@ fn apply_pr_poll_results(
                 worker.phase = WorkerPhase::Completed;
                 let _ = git::remove_worktree(&worker.repo_path, &worker.worktree_path);
                 let _ = git::delete_branch(&worker.repo_path, &worker.branch);
+                git::pull_main(&worker.repo_path);
                 let _ = ipc::emit_event(
                     &result.workspace_path,
                     &ipc::SwarmEvent::WorktreeClosed {

@@ -328,6 +328,50 @@ pub fn detect_repos(dir: &Path) -> Result<Vec<PathBuf>> {
     Ok(repos)
 }
 
+/// Fast-forward local `main` to `origin/main`.
+///
+/// Fetches from origin, checks if main is behind, and performs a fast-forward
+/// merge if needed. All errors are logged as warnings but never propagated —
+/// this is a best-effort operation.
+pub fn pull_main(repo_path: &Path) {
+    match fetch_origin(repo_path) {
+        Ok(false) => {
+            tracing::warn!(repo = %repo_path.display(), "pull_main: fetch origin failed");
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(repo = %repo_path.display(), error = %e, "pull_main: fetch origin failed");
+            return;
+        }
+        Ok(true) => {}
+    }
+
+    let behind = match commits_behind(repo_path, "main", "origin/main") {
+        Ok(n) => n,
+        Err(e) => {
+            tracing::warn!(error = %e, "pull_main: could not check commits behind");
+            return;
+        }
+    };
+
+    if behind == 0 {
+        tracing::debug!(repo = %repo_path.display(), "pull_main: already up to date");
+        return;
+    }
+
+    match merge_ff_only(repo_path, "origin/main") {
+        Ok(true) => {
+            tracing::info!(repo = %repo_path.display(), commits = behind, "pull_main: fast-forwarded local main");
+        }
+        Ok(false) => {
+            tracing::warn!(repo = %repo_path.display(), "pull_main: fast-forward not possible, local main may have diverged");
+        }
+        Err(e) => {
+            tracing::warn!(repo = %repo_path.display(), error = %e, "pull_main: merge failed");
+        }
+    }
+}
+
 /// Generate a `swarm/<sanitized-prompt>-<suffix>` branch name.
 pub fn generate_branch_name(prompt: &str, suffix: &str) -> String {
     format!("swarm/{}-{}", super::shell::sanitize(prompt), suffix)
