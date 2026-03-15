@@ -7,9 +7,7 @@ use std::process::Command;
 pub fn check_prerequisites() -> Result<(), String> {
     // Hard requirement: claude CLI
     if !is_command_available("claude") {
-        return Err(
-            "claude CLI not found. Install it from https://claude.ai/code".to_string(),
-        );
+        return Err("claude CLI not found. Install it from https://claude.ai/code".to_string());
     }
 
     // Soft requirement: gh CLI (warn only)
