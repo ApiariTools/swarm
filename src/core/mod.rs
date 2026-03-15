@@ -4,6 +4,7 @@ pub mod ipc;
 pub mod log;
 pub mod merge;
 pub mod modifier;
+pub mod prerequisites;
 pub mod profile;
 pub mod shell;
 pub mod state;
