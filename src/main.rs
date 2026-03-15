@@ -420,6 +420,11 @@ async fn cmd_create(
     profile: String,
     task_dir_path: Option<String>,
 ) -> Result<()> {
+    // Check prerequisites before doing any work
+    if let Err(msg) = core::prerequisites::check_prerequisites() {
+        return Err(color_eyre::eyre::eyre!("{}", msg));
+    }
+
     let mut prompt = resolve_prompt(prompt, prompt_file)?;
 
     // Resolve --mod slugs and assemble prompt

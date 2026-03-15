@@ -860,6 +860,12 @@ async fn handle_request(
             profile,
             task_dir,
         } => {
+            // Check prerequisites (claude CLI required, gh optional)
+            if let Err(msg) = crate::core::prerequisites::check_prerequisites() {
+                let _ = resp_tx.send(DaemonResponse::Error { message: msg });
+                return;
+            }
+
             let kind = match AgentKind::from_str(&agent) {
                 Some(k) => k,
                 None => {
