@@ -328,10 +328,7 @@ fn find_repos_recursive(dir: &Path, repos: &mut Vec<PathBuf>) {
     for entry in entries.flatten() {
         let path = entry.path();
         // Skip symlinks to avoid cycles.
-        let is_symlink = entry
-            .file_type()
-            .map(|ft| ft.is_symlink())
-            .unwrap_or(false);
+        let is_symlink = entry.file_type().map(|ft| ft.is_symlink()).unwrap_or(false);
         if is_symlink || !path.is_dir() {
             continue;
         }
