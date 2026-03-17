@@ -132,15 +132,15 @@ pub async fn agent_event_loop_with_timeouts(
     match tokio::time::timeout(total, agent_event_loop_impl(handle, opts, Some(first_ev))).await {
         Ok(result) => result,
         Err(_elapsed) => {
-            let secs = total.as_secs();
+            let timeout_display = format_duration(total);
             tracing::warn!(
                 worker_id = %handle.worktree_id,
-                "Agent stalled after message — total response timeout ({}s) exceeded",
-                secs,
+                "Agent stalled after message — total response timeout ({}) exceeded",
+                timeout_display,
             );
             handle.logger.log_error(&format!(
-                "Agent stalled — total response timeout ({}s) exceeded",
-                secs,
+                "Agent stalled — total response timeout ({}) exceeded",
+                timeout_display,
             ));
             let session_id = handle.agent.session_id().map(String::from);
             write_agent_status(&work_dir, &handle.worktree_id, "waiting");
@@ -297,15 +297,15 @@ async fn drain_agent_events(
             match tokio::time::timeout(timeout_dur, handle.agent.next_event()).await {
                 Ok(inner) => inner,
                 Err(_elapsed) => {
-                    let secs = timeout_dur.as_secs();
+                    let timeout_display = format_duration(timeout_dur);
                     tracing::warn!(
                         worker_id = %handle.worktree_id,
-                        "Agent stalled after message — no response within {}s",
-                        secs,
+                        "Agent stalled after message — no response within {}",
+                        timeout_display,
                     );
                     handle.logger.log_error(&format!(
-                        "Agent stalled — no response within {}s after message",
-                        secs,
+                        "Agent stalled — no response within {} after message",
+                        timeout_display,
                     ));
                     return AgentExitReason::Stalled;
                 }
@@ -402,6 +402,17 @@ fn log_agent_event(logger: &EventLogger, event: &AgentEventWire) {
         AgentEventWire::ThinkingDelta { .. }
         | AgentEventWire::TurnComplete
         | AgentEventWire::SessionWaiting { .. } => {}
+    }
+}
+
+/// Format a `Duration` for human-readable log output.
+/// Uses seconds for >= 1s, milliseconds otherwise.
+fn format_duration(d: Duration) -> String {
+    let secs = d.as_secs();
+    if secs > 0 {
+        format!("{}s", secs)
+    } else {
+        format!("{}ms", d.as_millis())
     }
 }
 
@@ -951,14 +962,17 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    // All stall/timeout tests use `start_paused = true` so tokio auto-advances
+    // the timer. This makes tests deterministic regardless of CI runner speed.
+
+    #[tokio::test(start_paused = true)]
     async fn drain_stall_detected_when_first_event_times_out() {
         let dir = tempfile::tempdir().unwrap();
         let (sv_tx, _sv_rx) = mpsc::unbounded_channel();
 
-        // Agent takes 500ms to produce first event, but timeout is 50ms.
+        // Agent takes 10s to produce first event, but timeout is 1s.
         let agent = SlowMockAgent::new(
-            Duration::from_millis(500),
+            Duration::from_secs(10),
             vec![Some(AgentEventWire::TextDelta {
                 text: "late".into(),
             })],
@@ -969,7 +983,7 @@ mod tests {
             &mut handle,
             &sv_tx,
             dir.path(),
-            Some(Duration::from_millis(50)),
+            Some(Duration::from_secs(1)),
         )
         .await;
 
@@ -985,14 +999,14 @@ mod tests {
         assert!(content.contains("stalled"));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn drain_normal_fast_response_with_first_event_timeout() {
         let dir = tempfile::tempdir().unwrap();
         let (sv_tx, _sv_rx) = mpsc::unbounded_channel();
 
-        // Agent responds in 5ms, well within the 200ms timeout.
+        // Agent responds in 1s, well within the 60s timeout.
         let agent = SlowMockAgent::new(
-            Duration::from_millis(5),
+            Duration::from_secs(1),
             vec![
                 Some(AgentEventWire::TextDelta {
                     text: "fast".into(),
@@ -1010,7 +1024,7 @@ mod tests {
             &mut handle,
             &sv_tx,
             dir.path(),
-            Some(Duration::from_millis(200)),
+            Some(Duration::from_secs(60)),
         )
         .await;
 
@@ -1020,13 +1034,13 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn event_loop_with_timeouts_total_timeout_fires() {
         let dir = tempfile::tempdir().unwrap();
         let (sv_tx, mut sv_rx) = mpsc::unbounded_channel();
 
-        // Agent produces events slowly (50ms each) but never completes.
-        // We give it many events so the total timeout fires before it finishes.
+        // Agent produces events slowly (10s each) but never completes.
+        // Total timeout (60s) fires before all 100 events are drained.
         let mut events: Vec<Option<AgentEventWire>> = (0..100)
             .map(|i| {
                 Some(AgentEventWire::TextDelta {
@@ -1036,7 +1050,7 @@ mod tests {
             .collect();
         events.push(None); // EOF at end (but total timeout should fire first)
 
-        let agent = SlowMockAgent::new(Duration::from_millis(50), events);
+        let agent = SlowMockAgent::new(Duration::from_secs(10), events);
         let mut handle = test_handle_dyn(Box::new(agent), dir.path());
 
         let mut restart_count = 0u32;
@@ -1051,8 +1065,8 @@ mod tests {
                 worktree_path: dir.path(),
                 dangerously_skip_permissions: true,
             },
-            Some(Duration::from_millis(200)), // generous first-event timeout
-            Some(Duration::from_millis(300)), // tight total timeout
+            Some(Duration::from_secs(30)), // generous first-event timeout
+            Some(Duration::from_secs(60)), // total timeout
         )
         .await;
 
@@ -1087,13 +1101,13 @@ mod tests {
         assert!(content.contains("stalled") || content.contains("timeout"));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn event_loop_with_timeouts_first_event_stall_returns_waiting() {
         let dir = tempfile::tempdir().unwrap();
         let (sv_tx, mut sv_rx) = mpsc::unbounded_channel();
 
         // Agent never responds (very long delay).
-        let agent = SlowMockAgent::new(Duration::from_secs(60), vec![]);
+        let agent = SlowMockAgent::new(Duration::from_secs(3600), vec![]);
         let mut handle = test_handle_dyn(Box::new(agent), dir.path());
 
         let mut restart_count = 0u32;
@@ -1108,8 +1122,8 @@ mod tests {
                 worktree_path: dir.path(),
                 dangerously_skip_permissions: true,
             },
-            Some(Duration::from_millis(50)), // first-event timeout: 50ms
-            Some(Duration::from_secs(10)),   // total timeout: 10s (won't fire)
+            Some(Duration::from_secs(5)),   // first-event timeout: 5s
+            Some(Duration::from_secs(600)), // total timeout: 10min (won't fire)
         )
         .await;
 
