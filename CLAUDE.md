@@ -1,7 +1,7 @@
 # Worker Profile
 
 ## Formatting (MANDATORY)
-**Run `cargo fmt -p swarm` before every commit.** CI runs `cargo fmt -p swarm --check` and will reject unformatted code. Do not skip this step.
+**Run `cargo fmt -p apiari-swarm` before every commit.** CI runs `cargo fmt -p apiari-swarm --check` and will reject unformatted code. Do not skip this step.
 
 ## Rules
 1. You are working in a git worktree on a `swarm/*` branch. Never commit to main.

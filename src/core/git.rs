@@ -281,10 +281,16 @@ pub fn list_worktrees(repo_path: &Path) -> Result<Vec<(PathBuf, String)>> {
 
 /// Detect git repos in a directory (for multi-repo workspaces).
 /// Recursively walks subdirectories looking for directories that contain a
-/// `.git` folder. Once a git repo is found, its subtree is not traversed
+/// `.git` entry. Once a git repo is found, its subtree is not traversed
 /// further (repos are not expected to be nested).
-/// Falls back to the directory itself if it's a repo with no sub-repos.
+/// If `dir` itself is a git repo, returns it directly without recursing.
 pub fn detect_repos(dir: &Path) -> Result<Vec<PathBuf>> {
+    // Short-circuit: if dir itself is a repo, return it directly to avoid
+    // recursing into potentially large trees (target/, node_modules/, etc.).
+    if dir.join(".git").exists() {
+        return Ok(vec![dir.to_path_buf()]);
+    }
+
     let mut child_repos = Vec::new();
     find_repos_recursive(dir, &mut child_repos);
 
@@ -306,20 +312,14 @@ pub fn detect_repos(dir: &Path) -> Result<Vec<PathBuf>> {
             .collect();
         counted.sort_by(|a, b| b.1.cmp(&a.1));
         child_repos = counted.into_iter().map(|(p, _)| p).collect();
-        return Ok(child_repos);
     }
 
-    // No child repos — use dir itself if it's a repo
-    let mut repos = Vec::new();
-    if is_git_repo(dir) {
-        repos.push(dir.to_path_buf());
-    }
-    Ok(repos)
+    Ok(child_repos)
 }
 
-/// Recursively walk `dir` looking for git repos (directories containing `.git`).
-/// Skips hidden directories (starting with `.`). When a repo is found, it is
-/// added to `repos` and its subtree is not descended into further.
+/// Recursively walk `dir` looking for git repos (directories containing a
+/// `.git` entry). Skips hidden directories and symlinks. When a repo is found,
+/// it is added to `repos` and its subtree is not descended into further.
 fn find_repos_recursive(dir: &Path, repos: &mut Vec<PathBuf>) {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
@@ -327,7 +327,12 @@ fn find_repos_recursive(dir: &Path, repos: &mut Vec<PathBuf>) {
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if !path.is_dir() {
+        // Skip symlinks to avoid cycles.
+        let is_symlink = entry
+            .file_type()
+            .map(|ft| ft.is_symlink())
+            .unwrap_or(false);
+        if is_symlink || !path.is_dir() {
             continue;
         }
         if path

@@ -8,6 +8,9 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+permissions:
+  contents: write
+
 jobs:
   build:
     name: Build (${{ matrix.target }})
@@ -77,7 +80,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Build release
-        run: cargo build --release -p swarm
+        run: cargo build --release -p apiari-swarm
 
       - name: Rename binary
         run: mv target/release/swarm ${{ matrix.binary }}
