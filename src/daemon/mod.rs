@@ -744,7 +744,7 @@ fn spawn_worker_agent(
                     session_id: handle.agent.session_id().map(String::from),
                 });
 
-                let (new_phase, _) = agent_supervisor::agent_event_loop(
+                let (new_phase, _) = agent_supervisor::agent_event_loop_with_timeouts(
                     &mut handle,
                     agent_supervisor::EventLoopOpts {
                         supervisor_tx: &sv_tx,
@@ -755,6 +755,8 @@ fn spawn_worker_agent(
                         worktree_path: &wt_path,
                         dangerously_skip_permissions: true,
                     },
+                    None, // use default SEND_FIRST_EVENT_TIMEOUT
+                    None, // use default SEND_TOTAL_TIMEOUT
                 )
                 .await;
 
