@@ -280,24 +280,13 @@ pub fn list_worktrees(repo_path: &Path) -> Result<Vec<(PathBuf, String)>> {
 }
 
 /// Detect git repos in a directory (for multi-repo workspaces).
-/// Scans immediate children first — if any are git repos, use those.
+/// Recursively walks subdirectories looking for directories that contain a
+/// `.git` folder. Once a git repo is found, its subtree is not traversed
+/// further (repos are not expected to be nested).
 /// Falls back to the directory itself if it's a repo with no sub-repos.
 pub fn detect_repos(dir: &Path) -> Result<Vec<PathBuf>> {
     let mut child_repos = Vec::new();
-
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir()
-                && !path
-                    .file_name()
-                    .is_some_and(|n| n.to_string_lossy().starts_with('.'))
-                && is_git_repo(&path)
-            {
-                child_repos.push(path);
-            }
-        }
-    }
+    find_repos_recursive(dir, &mut child_repos);
 
     if !child_repos.is_empty() {
         // Sort by recent commit count (most active first).
@@ -326,6 +315,33 @@ pub fn detect_repos(dir: &Path) -> Result<Vec<PathBuf>> {
         repos.push(dir.to_path_buf());
     }
     Ok(repos)
+}
+
+/// Recursively walk `dir` looking for git repos (directories containing `.git`).
+/// Skips hidden directories (starting with `.`). When a repo is found, it is
+/// added to `repos` and its subtree is not descended into further.
+fn find_repos_recursive(dir: &Path, repos: &mut Vec<PathBuf>) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        if path
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().starts_with('.'))
+        {
+            continue;
+        }
+        if path.join(".git").exists() {
+            repos.push(path);
+        } else {
+            find_repos_recursive(&path, repos);
+        }
+    }
 }
 
 /// Fast-forward local `main` to `origin/main`.
