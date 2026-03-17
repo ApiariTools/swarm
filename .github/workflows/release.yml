@@ -21,7 +21,7 @@ jobs:
           - os: macos-latest
             target: aarch64-apple-darwin
             binary: swarm-aarch64-apple-darwin
-          - os: macos-13
+          - os: macos-15
             target: x86_64-apple-darwin
             binary: swarm-x86_64-apple-darwin
           - os: ubuntu-latest
@@ -76,14 +76,16 @@ jobs:
           TOML
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
 
       - name: Build release
-        run: cargo build --release -p apiari-swarm
+        run: cargo build --release -p apiari-swarm --target ${{ matrix.target }}
 
       - name: Rename binary
-        run: mv target/release/swarm ${{ matrix.binary }}
+        run: mv target/${{ matrix.target }}/release/swarm ${{ matrix.binary }}
 
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
