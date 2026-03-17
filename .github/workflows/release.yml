@@ -68,8 +68,8 @@ jobs:
           crossterm = { version = "0.28", features = ["event-stream"] }
           apiari-common = "0.1.0"
           apiari-tui = "0.1.0"
-          apiari-claude-sdk = { path = "claude-sdk" }
-          apiari-codex-sdk = { path = "codex-sdk" }
+          apiari-claude-sdk = { version = "0.1.0", path = "claude-sdk" }
+          apiari-codex-sdk = { version = "0.1.0", path = "codex-sdk" }
           TOML
 
       - uses: dtolnay/rust-toolchain@stable
@@ -137,8 +137,8 @@ jobs:
           crossterm = { version = "0.28", features = ["event-stream"] }
           apiari-common = "0.1.0"
           apiari-tui = "0.1.0"
-          apiari-claude-sdk = { path = "claude-sdk" }
-          apiari-codex-sdk = { path = "codex-sdk" }
+          apiari-claude-sdk = { version = "0.1.0", path = "claude-sdk" }
+          apiari-codex-sdk = { version = "0.1.0", path = "codex-sdk" }
           TOML
 
       - uses: dtolnay/rust-toolchain@stable
