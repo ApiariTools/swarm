@@ -6,6 +6,15 @@ description = "Run agents in parallel. Git worktrees + custom daemons + vibes."
 license.workspace = true
 repository = "https://github.com/ApiariTools/swarm"
 
+[[bin]]
+name = "swarm"
+path = "src/main.rs"
+
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/swarm-{ target }{ binary-ext }"
+bin-dir = "swarm{ binary-ext }"
+pkg-fmt = "bin"
+
 [dependencies]
 apiari-common.workspace = true
 apiari-claude-sdk.workspace = true
