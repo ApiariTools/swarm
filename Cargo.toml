@@ -1,5 +1,5 @@
 [package]
-name = "swarm"
+name = "apiari-swarm"
 version = "0.1.0"
 edition.workspace = true
 description = "Run agents in parallel. Git worktrees + custom daemons + vibes."
