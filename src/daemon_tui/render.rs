@@ -170,8 +170,15 @@ fn worker_item_height(_worker: &WorkerInfo, _app: &DaemonTuiApp) -> usize {
 
 fn draw_worker_list(frame: &mut Frame, area: Rect, app: &DaemonTuiApp) {
     if app.workers.is_empty() {
-        let empty = Paragraph::new(" no workers yet\n press n to create").style(theme::muted());
-        frame.render_widget(empty, area);
+        let empty_lines = vec![
+            Line::from(""),
+            Line::from(Span::styled("  No workers yet.", theme::muted())),
+            Line::from(Span::styled(
+                "  Press [n] to dispatch your first task.",
+                theme::muted(),
+            )),
+        ];
+        frame.render_widget(Paragraph::new(empty_lines), area);
         return;
     }
 
@@ -389,10 +396,14 @@ fn draw_sidebar_status_bar(frame: &mut Frame, area: Rect, app: &DaemonTuiApp) {
         let hints = Line::from(vec![
             Span::styled(" n", theme::key_hint()),
             Span::styled(" new  ", theme::key_desc()),
+            Span::styled("x", theme::key_hint()),
+            Span::styled(" close  ", theme::key_desc()),
             Span::styled("\u{21b5}", theme::key_hint()),
-            Span::styled(" focus  ", theme::key_desc()),
+            Span::styled(" open  ", theme::key_desc()),
             Span::styled("?", theme::key_hint()),
-            Span::styled(" help", theme::key_desc()),
+            Span::styled(" help  ", theme::key_desc()),
+            Span::styled("q", theme::key_hint()),
+            Span::styled(" quit", theme::key_desc()),
         ]);
         frame.render_widget(Paragraph::new(hints), area);
     }
@@ -423,8 +434,15 @@ fn draw_conversation_panel(frame: &mut Frame, area: Rect, app: &mut DaemonTuiApp
             area.width,
             area.height.saturating_sub(1),
         );
-        let msg = Paragraph::new("  No workers. Press n to create one.").style(theme::muted());
-        frame.render_widget(msg, rest);
+        let empty_lines = vec![
+            Line::from(""),
+            Line::from(Span::styled("  No workers yet.", theme::muted())),
+            Line::from(Span::styled(
+                "  Press [n] to dispatch your first task.",
+                theme::muted(),
+            )),
+        ];
+        frame.render_widget(Paragraph::new(empty_lines), rest);
         return;
     }
 
