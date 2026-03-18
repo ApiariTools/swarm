@@ -209,6 +209,15 @@ async fn main() -> Result<()> {
 
 /// Default command: auto-start daemon if needed, register workspace, then launch the daemon TUI.
 async fn run_default_tui(work_dir: std::path::PathBuf) -> Result<()> {
+    // Show onboarding screen on first launch (no .swarm/ directory yet)
+    if tui::onboarding::needs_onboarding(&work_dir) {
+        let repos = core::git::detect_repos(&work_dir).unwrap_or_default();
+        match tui::onboarding::show(&work_dir, &repos).await? {
+            tui::onboarding::OnboardingResult::Launch => {} // continue to TUI
+            tui::onboarding::OnboardingResult::Quit => return Ok(()),
+        }
+    }
+
     if !is_daemon_running(&work_dir) {
         eprintln!("[swarm] Starting daemon...");
         let exe = std::env::current_exe()
