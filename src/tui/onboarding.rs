@@ -62,38 +62,34 @@ pub async fn show(work_dir: &Path, repos: &[PathBuf]) -> Result<OnboardingResult
     terminal.draw(|frame| draw(frame, work_dir, repos, agent_index))?;
 
     let result = loop {
-        if let Some(Ok(event)) = event_stream.next().await {
-            if let crossterm::event::Event::Key(key) = event {
-                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+        if let Some(Ok(crossterm::event::Event::Key(key))) = event_stream.next().await {
+            if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+                break OnboardingResult::Quit;
+            }
+            match key.code {
+                KeyCode::Enter => {
+                    let agent = AGENTS[agent_index];
+                    save_default_agent(work_dir, agent).ok();
+                    mark_onboarded(work_dir)?;
+                    break OnboardingResult::Launch;
+                }
+                KeyCode::Char('q') | KeyCode::Esc => {
                     break OnboardingResult::Quit;
                 }
-                match key.code {
-                    KeyCode::Enter => {
-                        let agent = AGENTS[agent_index];
-                        save_default_agent(work_dir, agent).ok();
-                        mark_onboarded(work_dir)?;
-                        break OnboardingResult::Launch;
-                    }
-                    KeyCode::Char('q') | KeyCode::Esc => {
-                        break OnboardingResult::Quit;
-                    }
-                    KeyCode::Left | KeyCode::Char('h') => {
-                        if agent_index > 0 {
-                            agent_index -= 1;
-                        }
-                    }
-                    KeyCode::Right | KeyCode::Char('l') => {
-                        if agent_index + 1 < AGENTS.len() {
-                            agent_index += 1;
-                        }
-                    }
-                    KeyCode::Char(' ') | KeyCode::Tab => {
-                        agent_index = (agent_index + 1) % AGENTS.len();
-                    }
-                    _ => {}
+                KeyCode::Left | KeyCode::Char('h') => {
+                    agent_index = agent_index.saturating_sub(1);
                 }
-                terminal.draw(|frame| draw(frame, work_dir, repos, agent_index))?;
+                KeyCode::Right | KeyCode::Char('l') => {
+                    if agent_index + 1 < AGENTS.len() {
+                        agent_index += 1;
+                    }
+                }
+                KeyCode::Char(' ') | KeyCode::Tab => {
+                    agent_index = (agent_index + 1) % AGENTS.len();
+                }
+                _ => {}
             }
+            terminal.draw(|frame| draw(frame, work_dir, repos, agent_index))?;
         }
     };
 
@@ -128,52 +124,50 @@ fn draw(frame: &mut Frame, work_dir: &Path, repos: &[PathBuf], agent_index: usiz
     frame.render_widget(block, box_area);
 
     // Build content lines
-    let mut lines: Vec<Line<'_>> = Vec::new();
-
-    // Title
-    lines.push(Line::from(vec![Span::styled(
-        "  Welcome to Swarm",
-        Style::default()
-            .fg(theme::HONEY)
-            .add_modifier(Modifier::BOLD),
-    )]));
-    lines.push(Line::from(""));
-
-    // Description
-    lines.push(Line::from(Span::styled(
-        "Swarm runs AI coding agents in parallel worktrees.",
-        theme::text(),
-    )));
-    lines.push(Line::from(Span::styled(
-        "Each agent gets its own git branch and works on a",
-        theme::text(),
-    )));
-    lines.push(Line::from(Span::styled(
-        "task independently \u{2014} no conflicts, no waiting.",
-        theme::text(),
-    )));
-    lines.push(Line::from(""));
-
-    // How it works
-    lines.push(Line::from(Span::styled(
-        "How it works:",
-        Style::default()
-            .fg(theme::FROST)
-            .add_modifier(Modifier::BOLD),
-    )));
-    lines.push(Line::from(Span::styled(
-        "1. Dispatch a task \u{2192} agent creates a worktree",
-        theme::muted(),
-    )));
-    lines.push(Line::from(Span::styled(
-        "2. Agent writes code, commits, opens a PR",
-        theme::muted(),
-    )));
-    lines.push(Line::from(Span::styled(
-        "3. You review and merge when ready",
-        theme::muted(),
-    )));
-    lines.push(Line::from(""));
+    let mut lines: Vec<Line<'_>> = vec![
+        // Title
+        Line::from(vec![Span::styled(
+            "  Welcome to Swarm",
+            Style::default()
+                .fg(theme::HONEY)
+                .add_modifier(Modifier::BOLD),
+        )]),
+        Line::from(""),
+        // Description
+        Line::from(Span::styled(
+            "Swarm runs AI coding agents in parallel worktrees.",
+            theme::text(),
+        )),
+        Line::from(Span::styled(
+            "Each agent gets its own git branch and works on a",
+            theme::text(),
+        )),
+        Line::from(Span::styled(
+            "task independently \u{2014} no conflicts, no waiting.",
+            theme::text(),
+        )),
+        Line::from(""),
+        // How it works
+        Line::from(Span::styled(
+            "How it works:",
+            Style::default()
+                .fg(theme::FROST)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            "1. Dispatch a task \u{2192} agent creates a worktree",
+            theme::muted(),
+        )),
+        Line::from(Span::styled(
+            "2. Agent writes code, commits, opens a PR",
+            theme::muted(),
+        )),
+        Line::from(Span::styled(
+            "3. You review and merge when ready",
+            theme::muted(),
+        )),
+        Line::from(""),
+    ];
 
     // Detected workspace
     let dir_name = work_dir
