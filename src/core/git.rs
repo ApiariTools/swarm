@@ -394,3 +394,135 @@ pub fn pull_main(repo_path: &Path) {
 pub fn generate_branch_name(prompt: &str, suffix: &str) -> String {
     format!("swarm/{}-{}", super::shell::sanitize(prompt), suffix)
 }
+
+/// Use the `claude` CLI to generate a short, meaningful branch name from the prompt.
+///
+/// Falls back to the slug-based `generate_branch_name` if the AI call fails or
+/// times out (2s).
+pub async fn generate_branch_name_ai(prompt: &str, suffix: &str) -> String {
+    let prompt_text = prompt.to_string();
+    let suffix_owned = suffix.to_string();
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        tokio::task::spawn_blocking({
+            let prompt_text = prompt_text.clone();
+            move || {
+                let output = Command::new("claude")
+                    .args([
+                        "-p",
+                        "--model", "haiku",
+                        "--no-session-persistence",
+                        "--system-prompt",
+                        "Generate a short git branch name (max 5 words, kebab-case, no prefix) that summarizes this task. Reply with ONLY the branch name, nothing else.",
+                        &prompt_text,
+                    ])
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::null())
+                    .output();
+
+                match output {
+                    Ok(o) if o.status.success() => {
+                        let raw = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                        let cleaned = sanitize_ai_branch_name(&raw);
+                        if cleaned.is_empty() {
+                            None
+                        } else {
+                            Some(cleaned)
+                        }
+                    }
+                    _ => None,
+                }
+            }
+        }),
+    )
+    .await;
+
+    match result {
+        Ok(Ok(Some(name))) => {
+            tracing::info!(ai_branch = %name, "AI-generated branch name");
+            format!("swarm/{}-{}", name, suffix_owned)
+        }
+        Ok(Ok(None)) => {
+            tracing::debug!("AI branch name was empty, falling back to slug");
+            generate_branch_name(&prompt_text, &suffix_owned)
+        }
+        Ok(Err(e)) => {
+            tracing::debug!(error = %e, "AI branch name task failed, falling back to slug");
+            generate_branch_name(&prompt_text, &suffix_owned)
+        }
+        Err(_) => {
+            tracing::debug!("AI branch name timed out, falling back to slug");
+            generate_branch_name(&prompt_text, &suffix_owned)
+        }
+    }
+}
+
+/// Sanitize an AI-generated branch name: ensure kebab-case, strip unwanted
+/// characters, and truncate.
+fn sanitize_ai_branch_name(raw: &str) -> String {
+    // Strip backticks, quotes, and whitespace that LLMs sometimes add
+    let stripped = raw
+        .trim()
+        .trim_matches(|c| c == '`' || c == '\'' || c == '"');
+    // Remove any `swarm/` prefix the LLM might add despite instructions
+    let stripped = stripped.strip_prefix("swarm/").unwrap_or(stripped);
+    super::shell::sanitize(stripped)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generate_branch_name_basic() {
+        let name = generate_branch_name("fix the auth bug", "a1b2");
+        assert_eq!(name, "swarm/fix-the-auth-bug-a1b2");
+    }
+
+    #[test]
+    fn sanitize_ai_branch_name_clean() {
+        assert_eq!(
+            sanitize_ai_branch_name("config-array-support"),
+            "config-array-support"
+        );
+    }
+
+    #[test]
+    fn sanitize_ai_branch_name_strips_backticks() {
+        assert_eq!(
+            sanitize_ai_branch_name("`config-array-support`"),
+            "config-array-support"
+        );
+    }
+
+    #[test]
+    fn sanitize_ai_branch_name_strips_quotes() {
+        assert_eq!(
+            sanitize_ai_branch_name("\"config-array-support\""),
+            "config-array-support"
+        );
+    }
+
+    #[test]
+    fn sanitize_ai_branch_name_strips_swarm_prefix() {
+        assert_eq!(
+            sanitize_ai_branch_name("swarm/config-array-support"),
+            "config-array-support"
+        );
+    }
+
+    #[test]
+    fn sanitize_ai_branch_name_trims_whitespace() {
+        assert_eq!(
+            sanitize_ai_branch_name("  config-array-support  \n"),
+            "config-array-support"
+        );
+    }
+
+    #[test]
+    fn sanitize_ai_branch_name_empty_returns_empty() {
+        assert_eq!(sanitize_ai_branch_name(""), "");
+    }
+}
