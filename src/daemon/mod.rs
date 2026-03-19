@@ -925,7 +925,7 @@ async fn handle_request(
             let short_id = &uuid::Uuid::new_v4().to_string()[..4];
             let repo_name = git::repo_name(&repo_path);
             let worktree_id = format!("{}-{}", repo_name, short_id);
-            let branch = git::generate_branch_name(&prompt, short_id);
+            let branch = git::generate_branch_name_ai(&prompt, short_id).await;
 
             let work_dir = ws.path.clone();
             let worktree_path = work_dir.join(".swarm").join("wt").join(&worktree_id);
