@@ -68,12 +68,6 @@ cd swarm
 cargo install --path .
 ```
 
-**macOS users:** You must codesign after install (required for process management):
-
-```bash
-codesign -f -s - ~/.cargo/bin/swarm
-```
-
 ## Quick start
 
 ```bash
