@@ -1,4 +1,18 @@
 use serde::{Deserialize, Serialize};
+use std::fmt;
+use std::str::FromStr;
+
+/// Error returned when parsing an unknown agent kind string.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParseAgentKindError(pub String);
+
+impl fmt::Display for ParseAgentKindError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "unknown agent: {}", self.0)
+    }
+}
+
+impl std::error::Error for ParseAgentKindError {}
 
 /// Supported agent types.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -12,17 +26,20 @@ pub enum AgentKind {
     Gemini,
 }
 
-impl AgentKind {
-    /// Parse from string.
-    pub fn from_str(s: &str) -> Option<Self> {
+impl FromStr for AgentKind {
+    type Err = ParseAgentKindError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "claude" | "claude-tui" => Some(Self::Claude),
-            "codex" => Some(Self::Codex),
-            "gemini" => Some(Self::Gemini),
-            _ => None,
+            "claude" | "claude-tui" => Ok(Self::Claude),
+            "codex" => Ok(Self::Codex),
+            "gemini" => Ok(Self::Gemini),
+            _ => Err(ParseAgentKindError(s.to_string())),
         }
     }
+}
 
+impl AgentKind {
     /// Display name.
     pub fn name(&self) -> &str {
         match self {
@@ -71,8 +88,12 @@ mod tests {
     #[test]
     fn from_str_backward_compat() {
         // "claude-tui" should still parse as Claude
-        assert_eq!(AgentKind::from_str("claude-tui"), Some(AgentKind::Claude));
-        assert_eq!(AgentKind::from_str("claude"), Some(AgentKind::Claude));
+        assert_eq!(
+            "claude-tui".parse::<AgentKind>().unwrap(),
+            AgentKind::Claude
+        );
+        assert_eq!("claude".parse::<AgentKind>().unwrap(), AgentKind::Claude);
+        assert!("unknown".parse::<AgentKind>().is_err());
     }
 
     #[test]

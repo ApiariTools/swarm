@@ -9,7 +9,7 @@ repository = "https://github.com/ApiariTools/swarm"
 [[bin]]
 name = "swarm"
 path = "src/main.rs"
-required-features = ["tui"]
+required-features = ["tui", "daemon-ipc"]
 
 [package.metadata.binstall]
 pkg-url = "{ repo }/releases/download/v{ version }/swarm-{ target }{ binary-ext }"
