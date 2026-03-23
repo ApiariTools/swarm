@@ -869,11 +869,11 @@ async fn handle_request(
                 return;
             }
 
-            let kind = match AgentKind::from_str(&agent) {
-                Some(k) => k,
-                None => {
+            let kind = match agent.parse::<AgentKind>() {
+                Ok(k) => k,
+                Err(e) => {
                     let _ = resp_tx.send(DaemonResponse::Error {
-                        message: format!("unknown agent: {}", agent),
+                        message: e.to_string(),
                     });
                     return;
                 }
