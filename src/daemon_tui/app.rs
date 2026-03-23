@@ -11,7 +11,7 @@ use std::time::Instant;
 
 /// Agents available in the daemon TUI.
 pub fn daemon_agents() -> Vec<AgentKind> {
-    vec![AgentKind::Claude, AgentKind::Codex]
+    vec![AgentKind::Claude, AgentKind::Codex, AgentKind::Gemini]
 }
 
 /// Which panel has focus.

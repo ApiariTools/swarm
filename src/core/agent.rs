@@ -9,6 +9,7 @@ pub enum AgentKind {
     #[serde(alias = "claude-tui")]
     Claude,
     Codex,
+    Gemini,
 }
 
 impl AgentKind {
@@ -17,6 +18,7 @@ impl AgentKind {
         match s.to_lowercase().as_str() {
             "claude" | "claude-tui" => Some(Self::Claude),
             "codex" => Some(Self::Codex),
+            "gemini" => Some(Self::Gemini),
             _ => None,
         }
     }
@@ -26,6 +28,7 @@ impl AgentKind {
         match self {
             Self::Claude => "Claude",
             Self::Codex => "Codex",
+            Self::Gemini => "Gemini",
         }
     }
 
@@ -34,6 +37,7 @@ impl AgentKind {
         match self {
             Self::Claude => "Claude",
             Self::Codex => "Codex",
+            Self::Gemini => "Gemini",
         }
     }
 
@@ -42,6 +46,7 @@ impl AgentKind {
         match self {
             Self::Claude => "claude",
             Self::Codex => "codex",
+            Self::Gemini => "gemini",
         }
     }
 }
@@ -60,6 +65,7 @@ mod tests {
     fn daemon_name_values() {
         assert_eq!(AgentKind::Claude.daemon_name(), "Claude");
         assert_eq!(AgentKind::Codex.daemon_name(), "Codex");
+        assert_eq!(AgentKind::Gemini.daemon_name(), "Gemini");
     }
 
     #[test]

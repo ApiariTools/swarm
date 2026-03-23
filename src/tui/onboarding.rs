@@ -14,7 +14,7 @@ use std::io::stdout;
 use std::path::{Path, PathBuf};
 
 /// Available default agents.
-const AGENTS: &[&str] = &["claude", "codex"];
+const AGENTS: &[&str] = &["claude", "codex", "gemini"];
 
 /// Check whether onboarding has already been completed for this workspace.
 pub fn needs_onboarding(work_dir: &Path) -> bool {

@@ -19,6 +19,7 @@ pkg-fmt = "bin"
 apiari-common.workspace = true
 apiari-claude-sdk.workspace = true
 apiari-codex-sdk.workspace = true
+apiari-gemini-sdk.workspace = true
 apiari-tui.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true
