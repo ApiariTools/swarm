@@ -42,12 +42,18 @@ jobs:
           repository: ApiariTools/apiari-codex-sdk
           path: codex-sdk
 
+      - name: Checkout apiari-gemini-sdk
+        uses: actions/checkout@v4
+        with:
+          repository: ApiariTools/gemini-sdk
+          path: gemini-sdk
+
       - name: Create workspace root
         run: |
           cat > Cargo.toml << 'TOML'
           [workspace]
           resolver = "3"
-          members = ["swarm", "claude-sdk", "codex-sdk"]
+          members = ["swarm", "claude-sdk", "codex-sdk", "gemini-sdk"]
 
           [workspace.package]
           edition = "2024"
@@ -70,6 +76,7 @@ jobs:
           apiari-tui = "0.1.0"
           apiari-claude-sdk = { version = "0.1.0", path = "claude-sdk" }
           apiari-codex-sdk = { version = "0.1.0", path = "codex-sdk" }
+          apiari-gemini-sdk = { version = "0.1.0", path = "gemini-sdk" }
           TOML
 
       - uses: dtolnay/rust-toolchain@stable
@@ -111,12 +118,18 @@ jobs:
           repository: ApiariTools/apiari-codex-sdk
           path: codex-sdk
 
+      - name: Checkout apiari-gemini-sdk
+        uses: actions/checkout@v4
+        with:
+          repository: ApiariTools/gemini-sdk
+          path: gemini-sdk
+
       - name: Create workspace root
         run: |
           cat > Cargo.toml << 'TOML'
           [workspace]
           resolver = "3"
-          members = ["swarm", "claude-sdk", "codex-sdk"]
+          members = ["swarm", "claude-sdk", "codex-sdk", "gemini-sdk"]
 
           [workspace.package]
           edition = "2024"
@@ -139,6 +152,7 @@ jobs:
           apiari-tui = "0.1.0"
           apiari-claude-sdk = { version = "0.1.0", path = "claude-sdk" }
           apiari-codex-sdk = { version = "0.1.0", path = "codex-sdk" }
+          apiari-gemini-sdk = { version = "0.1.0", path = "gemini-sdk" }
           TOML
 
       - uses: dtolnay/rust-toolchain@stable
