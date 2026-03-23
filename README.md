@@ -51,9 +51,9 @@ Swarm gives each agent its own [git worktree](https://git-scm.com/docs/git-workt
 - [Rust](https://rustup.rs) (for building from source)
 - [Git](https://git-scm.com)
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI (`claude`)
+- [Codex CLI](https://github.com/openai/codex) (`codex`) — optional, for Codex agent
+- [Gemini CLI](https://github.com/google-gemini/gemini-cli) (`gemini`) — optional, for Gemini agent
 - [GitHub CLI](https://cli.github.com) (`gh`) — optional, for PR status tracking
-- [Google Gemini CLI](https://ai.google.dev/cli) (`gemini`) — optional, for Gemini agents
-- [Codex CLI](https://openai.com/index/codex) (`codex`) — optional, for Codex agents
 
 ## Install
 
