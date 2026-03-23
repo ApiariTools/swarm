@@ -39,7 +39,7 @@ Swarm gives each agent its own [git worktree](https://git-scm.com/docs/git-workt
 ## Features
 
 - Creates isolated git worktrees for parallel coding tasks
-- Spawns AI agents (Claude, Codex) in each worktree via a background daemon
+- Spawns AI agents (Claude, Codex, Gemini) in each worktree via a background daemon
 - Tracks agent status, PR URLs, and waiting/running state in a live TUI
 - Merge agent branches back to your base branch with one keystroke
 - Auto-pulls local main branch on worktree create and close
@@ -52,6 +52,8 @@ Swarm gives each agent its own [git worktree](https://git-scm.com/docs/git-workt
 - [Git](https://git-scm.com)
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI (`claude`)
 - [GitHub CLI](https://cli.github.com) (`gh`) — optional, for PR status tracking
+- [Google Gemini CLI](https://ai.google.dev/cli) (`gemini`) — optional, for Gemini agents
+- [Codex CLI](https://openai.com/index/codex) (`codex`) — optional, for Codex agents
 
 ## Install
 
@@ -133,6 +135,7 @@ Always pass `--dir <workspace-root>` or run from the workspace root.
 | `claude-tui` (default) | _none_ | Persistent — stays alive after task, accepts follow-up messages |
 | `claude` | `--agent claude` | Autonomous — exits after completing the task |
 | `codex` | `--agent codex` | Uses OpenAI Codex in full-auto mode |
+| `gemini` | `--agent gemini` | Uses Google Gemini CLI in autonomous mode |
 
 ### Keyboard shortcuts
 
@@ -155,18 +158,18 @@ Swarm orchestrates three things: **worktrees**, a **daemon**, and **agent proces
 ```
                   swarm (TUI)
                       │
-          ┌───────────┼───────────┐
-          ▼           ▼           ▼
-     ┌─────────┐ ┌─────────┐ ┌─────────┐
-     │ worktree│ │ worktree│ │ worktree│   ← isolated git worktrees
-     │ branch/1│ │ branch/2│ │ branch/3│      (separate directories)
-     └────┬────┘ └────┬────┘ └────┬────┘
-          │           │           │
-          ▼           ▼           ▼
-     ┌─────────┐ ┌─────────┐ ┌─────────┐
-     │ claude  │ │ claude  │ │ codex   │   ← agent processes
-     │ (daemon)│ │ (daemon)│ │ (daemon)│      (one per worktree)
-     └─────────┘ └─────────┘ └─────────┘
+          ┌───────────┼───────────┬───────────┐
+          ▼           ▼           ▼           ▼
+     ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐
+     │ worktree│ │ worktree│ │ worktree│ │worktree │   ← isolated git worktrees
+     │ branch/1│ │ branch/2│ │ branch/3│ │branch/4 │      (separate directories)
+     └────┬────┘ └────┬────┘ └────┬────┘ └────┬────┘
+          │           │           │           │
+          ▼           ▼           ▼           ▼
+     ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐
+     │ claude  │ │ claude  │ │ codex   │ │ gemini  │   ← agent processes
+     │ (daemon)│ │ (daemon)│ │ (daemon)│ │ (daemon)│      (one per worktree)
+     └─────────┘ └─────────┘ └─────────┘ └─────────┘
 ```
 
 **Worktrees.** When you create a worker, swarm runs `git worktree add` to create a new working directory branched from your current HEAD. Each agent operates in total isolation — no merge conflicts, no lock contention, no stepping on each other's files.
