@@ -590,9 +590,14 @@ impl ManagedAgent for GeminiManagedAgent {
                     }
                 }
                 Ok(None) => {
-                    // EOF — execution finished.
+                    // EOF — execution finished. Emit SessionResult with thread_id
+                    // so the daemon can resume the session later.
                     self.state = GeminiState::Waiting;
-                    return Ok(None);
+                    return Ok(Some(AgentEventWire::SessionResult {
+                        turns: 0,
+                        cost_usd: None,
+                        session_id: self.thread_id.clone(),
+                    }));
                 }
                 Err(e) => {
                     self.state = GeminiState::Finished;
@@ -702,13 +707,10 @@ fn translate_gemini_event(event: &apiari_gemini_sdk::Event) -> Option<AgentEvent
                 input: files.join(", "),
             })
         }
-        Event::TurnCompleted { usage } => {
-            let turns = usage.as_ref().map(|u| u.total_tokens).unwrap_or(0);
-            Some(AgentEventWire::SessionResult {
-                turns,
-                cost_usd: None,
-                session_id: None,
-            })
+        Event::TurnCompleted { .. } => {
+            // TurnCompleted just signals end-of-turn, not end-of-session.
+            // SessionResult is emitted at EOF with the tracked thread_id.
+            None
         }
         Event::TurnFailed { error, .. } => {
             let msg = error
