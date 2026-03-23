@@ -9,6 +9,7 @@ repository = "https://github.com/ApiariTools/swarm"
 [[bin]]
 name = "swarm"
 path = "src/main.rs"
+required-features = ["tui"]
 
 [package.metadata.binstall]
 pkg-url = "{ repo }/releases/download/v{ version }/swarm-{ target }{ binary-ext }"
@@ -21,7 +22,7 @@ apiari-common.workspace = true
 apiari-claude-sdk.workspace = true
 apiari-codex-sdk.workspace = true
 apiari-gemini-sdk.workspace = true
-apiari-tui.workspace = true
+apiari-tui = { workspace = true, optional = true }
 color-eyre.workspace = true
 tokio.workspace = true
 serde.workspace = true
@@ -33,8 +34,8 @@ uuid.workspace = true
 clap.workspace = true
 libc.workspace = true
 tracing.workspace = true
-ratatui.workspace = true
-crossterm.workspace = true
+ratatui = { workspace = true, optional = true }
+crossterm = { workspace = true, optional = true }
 pulldown-cmark = "0.13"
 async-trait = "0.1"
 futures = "0.3"
@@ -44,9 +45,11 @@ tracing-appender = "0.2"
 # Features
 [features]
 # Default features for binary build
-default = ["daemon-ipc"]
+default = ["daemon-ipc", "tui"]
 # Daemon IPC support (requires daemon module); disabled for lib-only builds
 daemon-ipc = []
+# TUI dependencies (ratatui, crossterm, apiari-tui); disable for lightweight lib builds
+tui = ["dep:ratatui", "dep:crossterm", "dep:apiari-tui"]
 
 [dev-dependencies]
 tempfile = "3"

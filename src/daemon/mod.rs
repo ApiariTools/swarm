@@ -1,4 +1,5 @@
 pub mod agent_supervisor;
+pub mod ipc_client;
 pub mod managed_agent;
 pub mod protocol;
 pub mod socket_server;

@@ -225,7 +225,7 @@ async fn run_default_tui(work_dir: std::path::PathBuf) -> Result<()> {
         // Daemon already running — register workspace in background (don't block TUI startup)
         let bg_dir = work_dir.clone();
         tokio::task::spawn_blocking(move || {
-            let _ = core::ipc::send_daemon_request(
+            let _ = daemon::ipc_client::send_daemon_request(
                 &bg_dir,
                 &daemon::protocol::DaemonRequest::RegisterWorkspace {
                     path: bg_dir.clone(),
@@ -510,7 +510,7 @@ async fn cmd_create(
     ensure_daemon_running(&work_dir).await?;
 
     // Register this workspace first (idempotent)
-    let _ = core::ipc::send_daemon_request(
+    let _ = daemon::ipc_client::send_daemon_request(
         &work_dir,
         &daemon::protocol::DaemonRequest::RegisterWorkspace {
             path: work_dir.clone(),
@@ -540,7 +540,7 @@ async fn cmd_create(
         profile: Some(profile),
         task_dir,
     };
-    match core::ipc::send_daemon_request(&work_dir, &req) {
+    match daemon::ipc_client::send_daemon_request(&work_dir, &req) {
         Ok(daemon::protocol::DaemonResponse::Ok { data }) => {
             if let Some(data) = data
                 && let Some(wt_id) = data.get("worktree_id").and_then(|v| v.as_str())
@@ -567,7 +567,7 @@ async fn cmd_send(work_dir: std::path::PathBuf, worktree: String, message: Strin
         worktree_id: worktree,
         message,
     };
-    match core::ipc::send_daemon_request(&work_dir, &req) {
+    match daemon::ipc_client::send_daemon_request(&work_dir, &req) {
         Ok(daemon::protocol::DaemonResponse::Ok { .. }) => {
             println!("sent");
         }
@@ -587,7 +587,7 @@ async fn cmd_close(work_dir: std::path::PathBuf, worktree: String) -> Result<()>
     let req = daemon::protocol::DaemonRequest::CloseWorker {
         worktree_id: worktree,
     };
-    match core::ipc::send_daemon_request(&work_dir, &req) {
+    match daemon::ipc_client::send_daemon_request(&work_dir, &req) {
         Ok(daemon::protocol::DaemonResponse::Ok { .. }) => {
             println!("closed");
         }
@@ -607,7 +607,7 @@ async fn cmd_merge(work_dir: std::path::PathBuf, worktree: String) -> Result<()>
     let req = daemon::protocol::DaemonRequest::MergeWorker {
         worktree_id: worktree,
     };
-    match core::ipc::send_daemon_request(&work_dir, &req) {
+    match daemon::ipc_client::send_daemon_request(&work_dir, &req) {
         Ok(daemon::protocol::DaemonResponse::Ok { .. }) => {
             println!("merged");
         }
