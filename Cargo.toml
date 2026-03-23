@@ -15,14 +15,13 @@ pkg-url = "{ repo }/releases/download/v{ version }/swarm-{ target }{ binary-ext 
 bin-dir = "swarm{ binary-ext }"
 pkg-fmt = "bin"
 
+# Core dependencies used by both lib and binary
 [dependencies]
 apiari-common.workspace = true
 apiari-claude-sdk.workspace = true
 apiari-codex-sdk.workspace = true
 apiari-gemini-sdk.workspace = true
 apiari-tui.workspace = true
-ratatui.workspace = true
-crossterm.workspace = true
 color-eyre.workspace = true
 tokio.workspace = true
 serde.workspace = true
@@ -32,13 +31,22 @@ dirs = "6"
 chrono.workspace = true
 uuid.workspace = true
 clap.workspace = true
-pulldown-cmark = "0.13"
 libc.workspace = true
+tracing.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
+pulldown-cmark = "0.13"
 async-trait = "0.1"
 futures = "0.3"
-tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 tracing-appender = "0.2"
+
+# Features
+[features]
+# Default features for binary build
+default = ["daemon-ipc"]
+# Daemon IPC support (requires daemon module); disabled for lib-only builds
+daemon-ipc = []
 
 [dev-dependencies]
 tempfile = "3"

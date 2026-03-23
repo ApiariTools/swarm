@@ -141,6 +141,7 @@ pub fn socket_path(work_dir: &Path) -> std::path::PathBuf {
     work_dir.join(".swarm").join("swarm.sock")
 }
 
+#[cfg(feature = "daemon-ipc")]
 /// Send a DaemonRequest to a specific socket path and return the response.
 fn send_daemon_request_to(
     sock: &Path,
@@ -168,6 +169,7 @@ fn send_daemon_request_to(
     Ok(resp)
 }
 
+#[cfg(feature = "daemon-ipc")]
 /// Send a DaemonRequest to the daemon socket and return the response.
 /// Tries per-workspace socket first (for test isolation), then global.
 pub fn send_daemon_request(
