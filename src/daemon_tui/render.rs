@@ -355,6 +355,7 @@ fn draw_worker_row(
                 match worker.agent.as_str() {
                     "claude-tui" => "claude",
                     "codex" => "codex",
+                    "gemini" => "gemini",
                     "claude" => "claude code",
                     other => other,
                 },

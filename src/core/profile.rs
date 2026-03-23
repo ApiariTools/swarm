@@ -26,6 +26,7 @@ pub fn convention_filename(kind: &AgentKind) -> &'static str {
     match kind {
         AgentKind::Claude => "CLAUDE.md",
         AgentKind::Codex => "AGENTS.md",
+        AgentKind::Gemini => "GEMINI.md",
     }
 }
 
