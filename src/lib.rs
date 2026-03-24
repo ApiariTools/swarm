@@ -21,11 +21,33 @@
 /// `swarm` binary crate.
 pub mod core {
     pub mod agent;
+    #[cfg(feature = "client")]
+    pub mod ipc;
     pub mod state;
+}
+
+/// Daemon communication: protocol types and IPC client.
+///
+/// Exposed only with the `client` feature enabled. Allows external crates
+/// to communicate with the swarm daemon over its Unix socket.
+#[cfg(feature = "client")]
+pub mod daemon {
+    pub mod ipc_client;
+    pub mod protocol;
 }
 
 // Re-export the most commonly used types at the crate root for convenience.
 pub use core::agent::AgentKind;
 pub use core::state::{
     PaneState, PrInfo, SwarmState, WorkerPhase, WorktreeState, load_state, save_state, state_path,
+};
+
+// Client feature: expose daemon communication types for external crates
+#[cfg(feature = "client")]
+pub use core::ipc::{global_socket_path, socket_path};
+#[cfg(feature = "client")]
+pub use daemon::ipc_client::send_daemon_request;
+#[cfg(feature = "client")]
+pub use daemon::protocol::{
+    AgentEventWire, DaemonRequest, DaemonResponse, TaskDirPayload, WorkerInfo, WorkspaceInfo,
 };
