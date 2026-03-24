@@ -1,9 +1,9 @@
 //! Integration test verifying that `client` feature exposes the expected types
 //! and they serialize/deserialize correctly.
 
-#![cfg(feature = "client")]
+#![cfg(all(unix, feature = "client"))]
 
-use apiari_swarm::{
+use apiari_swarm::client::{
     AgentEventWire, DaemonRequest, DaemonResponse, WorkerInfo, global_socket_path,
     send_daemon_request, socket_path,
 };
@@ -39,7 +39,6 @@ fn agent_event_wire_round_trips() {
 
 #[test]
 fn socket_path_helpers_are_accessible() {
-    // Just verify the functions are callable from external code
     let path = socket_path(std::path::Path::new("/tmp/test"));
     assert!(path.to_string_lossy().contains("swarm.sock"));
 
@@ -48,11 +47,31 @@ fn socket_path_helpers_are_accessible() {
 }
 
 #[test]
-fn send_daemon_request_is_accessible() {
-    // Verify the function signature is accessible (will fail to connect, but that's expected)
-    let result = send_daemon_request(
-        std::path::Path::new("/tmp/nonexistent-swarm-test"),
-        &DaemonRequest::Ping,
-    );
-    assert!(result.is_err()); // No daemon running, but the function is callable
+fn send_daemon_request_uses_nonexistent_path() {
+    // Use a unique temp dir that cannot have a real daemon socket,
+    // avoiding flakiness when a live daemon is running on the machine.
+    let dir = tempfile::tempdir().unwrap();
+    let result = send_daemon_request(dir.path(), &DaemonRequest::Ping);
+    assert!(result.is_err());
+}
+
+#[test]
+fn worker_info_is_accessible() {
+    // Verify WorkerInfo is usable from external code
+    let info = WorkerInfo {
+        id: "test".into(),
+        branch: "swarm/test".into(),
+        prompt: "fix it".into(),
+        agent: "claude".into(),
+        phase: apiari_swarm::WorkerPhase::Running,
+        session_id: None,
+        pr_url: None,
+        pr_number: None,
+        pr_title: None,
+        pr_state: None,
+        restart_count: 0,
+        created_at: None,
+    };
+    let json = serde_json::to_string(&info).unwrap();
+    assert!(json.contains("\"id\":\"test\""));
 }

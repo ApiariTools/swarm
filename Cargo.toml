@@ -46,7 +46,7 @@ tracing-appender = "0.2"
 [features]
 # Default features for binary build
 default = ["daemon-ipc", "tui"]
-# Client-side IPC types and helpers for talking to the swarm daemon
+# Client-side IPC types and helpers for talking to the swarm daemon (Unix-only)
 client = []
 # Daemon IPC support (requires daemon module); disabled for lib-only builds
 daemon-ipc = []

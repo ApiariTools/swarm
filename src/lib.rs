@@ -14,23 +14,30 @@
 //! (`ratatui`, `crossterm`) are gated behind the `tui` feature (enabled by default).
 //! For lightweight lib-only builds, use `default-features = false`.
 //!
-//! The `client` feature exposes the daemon IPC client types and helpers so
-//! external crates can talk to the swarm daemon over its Unix socket.
+//! The `client` feature (Unix-only) exposes the daemon IPC protocol types and
+//! a helper to talk to the swarm daemon over its Unix socket. It exposes:
+//! - [`daemon::protocol`] — request/response enums and wire types
+//! - [`daemon::ipc_client`] — `send_daemon_request` helper
+//! - Socket path helpers from [`core::ipc`]
 
 /// Core swarm types: agent kinds, worktree/swarm state, and state I/O.
 ///
-/// Only the library-safe submodules (`agent`, `state`) are exposed here.
-/// Binary-only modules (git, daemon, etc.) live exclusively in the
+/// The `agent` and `state` submodules are always available. Additional
+/// submodules (e.g. `ipc`) are gated behind the `client` feature.
+/// Binary-only modules (git, shell, etc.) live exclusively in the
 /// `swarm` binary crate.
 pub mod core {
     pub mod agent;
-    #[cfg(feature = "client")]
-    pub mod ipc;
+    // Exposed under `client` for socket_path / global_socket_path only.
+    // The module is public so downstream can reach it, but the re-exports
+    // at the crate root are the intended API surface.
+    #[cfg(all(unix, feature = "client"))]
+    pub(crate) mod ipc;
     pub mod state;
 }
 
-/// Daemon protocol types and IPC client (requires `client` feature).
-#[cfg(feature = "client")]
+/// Daemon protocol types and IPC client (Unix-only, requires `client` feature).
+#[cfg(all(unix, feature = "client"))]
 pub mod daemon {
     pub mod ipc_client;
     pub mod protocol;
@@ -42,9 +49,14 @@ pub use core::state::{
     PaneState, PrInfo, SwarmState, WorkerPhase, WorktreeState, load_state, save_state, state_path,
 };
 
-#[cfg(feature = "client")]
-pub use core::ipc::{global_socket_path, socket_path};
-#[cfg(feature = "client")]
-pub use daemon::ipc_client::send_daemon_request;
-#[cfg(feature = "client")]
-pub use daemon::protocol::{AgentEventWire, DaemonRequest, DaemonResponse, WorkerInfo};
+// Client re-exports — kept under a `client` sub-module to avoid polluting
+// the crate root namespace and to prevent naming conflicts.
+#[cfg(all(unix, feature = "client"))]
+pub mod client {
+    //! Convenience re-exports for daemon IPC consumers (Unix-only).
+    pub use crate::core::ipc::{global_socket_path, socket_path};
+    pub use crate::daemon::ipc_client::send_daemon_request;
+    pub use crate::daemon::protocol::{
+        AgentEventWire, DaemonRequest, DaemonResponse, TaskDirPayload, WorkerInfo, WorkspaceInfo,
+    };
+}
