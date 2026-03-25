@@ -348,25 +348,23 @@ fn find_repos_recursive(dir: &Path, repos: &mut Vec<PathBuf>) {
 
 /// Ensure the base repo is checked out to `main`.
 ///
-/// All errors are logged as warnings but never propagated — this is a
-/// best-effort operation so it does not block worktree cleanup.
-pub fn checkout_main(repo_path: &Path) {
-    let output = match Command::new("git")
+/// Returns `Ok(())` on success. Errors are logged as warnings and also
+/// returned so callers can skip `pull_main` when checkout fails (to avoid
+/// fast-forwarding an unrelated branch).
+pub fn checkout_main(repo_path: &Path) -> Result<()> {
+    let output = Command::new("git")
         .args(["checkout", "main"])
         .current_dir(repo_path)
-        .output()
-    {
-        Ok(o) => o,
-        Err(e) => {
-            tracing::warn!(repo = %repo_path.display(), error = %e, "checkout_main: failed to run git checkout");
-            return;
-        }
-    };
+        .output()?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        tracing::warn!(repo = %repo_path.display(), stderr = %stderr, "checkout_main: git checkout main failed");
+        let err = eyre!("git checkout main failed: {}", stderr);
+        tracing::warn!(repo = %repo_path.display(), error = %err, "checkout_main: failed");
+        return Err(err);
     }
+
+    Ok(())
 }
 
 /// Fast-forward local `main` to `origin/main`.
