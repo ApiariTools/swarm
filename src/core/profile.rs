@@ -20,6 +20,14 @@ pub fn load_profile(work_dir: &Path, slug: &str) -> String {
     format!("<!-- profile '{slug}' not found, using default -->\n{DEFAULT_PROFILE}")
 }
 
+/// Build the effective prompt by prepending the worker profile to the user's prompt.
+///
+/// This is the agent-agnostic way to inject profile content: it goes through the
+/// prompt rather than convention files, so it works for Claude, Codex, and Gemini.
+pub fn build_effective_prompt(profile: &str, user_prompt: &str) -> String {
+    format!("{profile}\n\n---\n\n{user_prompt}")
+}
+
 /// List available profile slugs from `.swarm/profiles/`.
 /// Always includes "default" (the embedded fallback).
 #[allow(dead_code)]
@@ -95,6 +103,19 @@ mod tests {
 
         let slugs = list_profiles(tmp.path());
         assert_eq!(slugs, vec!["default", "relaxed", "strict"]);
+    }
+
+    #[test]
+    fn build_effective_prompt_prepends_profile() {
+        let result = build_effective_prompt("# Profile", "Fix the bug");
+        assert_eq!(result, "# Profile\n\n---\n\nFix the bug");
+    }
+
+    #[test]
+    fn build_effective_prompt_preserves_user_prompt() {
+        let result = build_effective_prompt("# Profile", "Fix the bug");
+        assert!(result.ends_with("Fix the bug"));
+        assert!(result.starts_with("# Profile"));
     }
 
     #[test]

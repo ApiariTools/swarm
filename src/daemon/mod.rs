@@ -960,11 +960,13 @@ async fn handle_request(
                 );
             }
 
-            // Load profile and prepend it to the prompt so it works for all agent kinds
-            // without touching any convention files (CLAUDE.md, AGENTS.md, etc.).
+            // Load profile and build an effective prompt (profile + user prompt) for
+            // the agent. The raw `prompt` is kept for display/persistence in WorkerState;
+            // only the agent spawn call receives the effective prompt.
             let profile_slug = profile.as_deref().unwrap_or("default");
             let profile_content = crate::core::profile::load_profile(&work_dir, profile_slug);
-            let prompt = format!("{profile_content}\n\n---\n\n{prompt}");
+            let effective_prompt =
+                crate::core::profile::build_effective_prompt(&profile_content, &prompt);
 
             // Seed .task/ directory if artifacts provided
             if let Some(ref payload) = task_dir {
@@ -1004,7 +1006,7 @@ async fn handle_request(
             let msg_tx = spawn_worker_agent(
                 worktree_id.clone(),
                 kind.clone(),
-                prompt.clone(),
+                effective_prompt,
                 worktree_path.clone(),
                 work_dir.clone(),
                 None, // new worker, no session to resume
