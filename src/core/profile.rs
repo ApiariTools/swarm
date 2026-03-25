@@ -30,29 +30,38 @@ pub fn convention_filename(kind: &AgentKind) -> &'static str {
     }
 }
 
-/// Local convention filename per agent kind, used for injecting profiles without
-/// overwriting the repo's shared convention file.
-/// Claude → "CLAUDE.local.md", Codex → "AGENTS.local.md", Gemini → "GEMINI.local.md".
-pub fn local_convention_filename(kind: &AgentKind) -> &'static str {
-    match kind {
-        AgentKind::Claude => "CLAUDE.local.md",
-        AgentKind::Codex => "AGENTS.local.md",
-        AgentKind::Gemini => "GEMINI.local.md",
-    }
-}
+/// Separator comment used when appending a worker profile to an existing convention file.
+const PROFILE_SEPARATOR: &str = "\n\n<!-- swarm worker profile -->\n";
 
-/// Write profile content as the agent-appropriate local convention file in the worktree root.
+/// Write profile content into the worktree without destroying existing repo instructions.
 ///
-/// Uses the `.local.md` variant so the repo's shared convention file (e.g. `CLAUDE.md`)
-/// is preserved. The agent reads both files automatically.
+/// - **Claude**: writes to `CLAUDE.local.md` (Claude Code reads both `CLAUDE.md` and
+///   `CLAUDE.local.md` automatically, so the repo's shared file is preserved).
+/// - **Codex / Gemini**: these agents do not support a `.local.md` override, so the
+///   profile is appended to the existing convention file behind a separator comment.
+///   If no convention file exists yet, it is created fresh.
 pub fn inject_profile(
     worktree_path: &Path,
     kind: &AgentKind,
     content: &str,
 ) -> std::io::Result<()> {
-    let filename = local_convention_filename(kind);
-    let dest = worktree_path.join(filename);
-    std::fs::write(&dest, content)
+    match kind {
+        AgentKind::Claude => {
+            let dest = worktree_path.join("CLAUDE.local.md");
+            std::fs::write(&dest, content)
+        }
+        _ => {
+            let filename = convention_filename(kind);
+            let dest = worktree_path.join(filename);
+            if dest.is_file() {
+                let existing = std::fs::read_to_string(&dest)?;
+                let merged = format!("{existing}{PROFILE_SEPARATOR}{content}");
+                std::fs::write(&dest, merged)
+            } else {
+                std::fs::write(&dest, content)
+            }
+        }
+    }
 }
 
 /// List available profile slugs from `.swarm/profiles/`.
@@ -122,24 +131,10 @@ mod tests {
         assert_eq!(convention_filename(&AgentKind::Codex), "AGENTS.md");
     }
 
-    #[test]
-    fn local_convention_filename_claude() {
-        assert_eq!(
-            local_convention_filename(&AgentKind::Claude),
-            "CLAUDE.local.md"
-        );
-    }
+    // --- Claude: writes to CLAUDE.local.md ---
 
     #[test]
-    fn local_convention_filename_codex() {
-        assert_eq!(
-            local_convention_filename(&AgentKind::Codex),
-            "AGENTS.local.md"
-        );
-    }
-
-    #[test]
-    fn inject_profile_writes_local_claude_md() {
+    fn inject_profile_claude_writes_local_md() {
         let tmp = TempDir::new().unwrap();
         inject_profile(tmp.path(), &AgentKind::Claude, "# Test Profile").unwrap();
         let content = fs::read_to_string(tmp.path().join("CLAUDE.local.md")).unwrap();
@@ -147,15 +142,7 @@ mod tests {
     }
 
     #[test]
-    fn inject_profile_writes_local_agents_md_for_codex() {
-        let tmp = TempDir::new().unwrap();
-        inject_profile(tmp.path(), &AgentKind::Codex, "# Codex Profile").unwrap();
-        let content = fs::read_to_string(tmp.path().join("AGENTS.local.md")).unwrap();
-        assert_eq!(content, "# Codex Profile");
-    }
-
-    #[test]
-    fn inject_profile_does_not_overwrite_shared_convention_file() {
+    fn inject_profile_claude_does_not_overwrite_shared_file() {
         let tmp = TempDir::new().unwrap();
         fs::write(tmp.path().join("CLAUDE.md"), "# Repo Instructions").unwrap();
         inject_profile(tmp.path(), &AgentKind::Claude, "# Worker Profile").unwrap();
@@ -163,6 +150,48 @@ mod tests {
         assert_eq!(shared, "# Repo Instructions");
         let local = fs::read_to_string(tmp.path().join("CLAUDE.local.md")).unwrap();
         assert_eq!(local, "# Worker Profile");
+    }
+
+    // --- Codex: appends to AGENTS.md or creates it ---
+
+    #[test]
+    fn inject_profile_codex_creates_agents_md_when_missing() {
+        let tmp = TempDir::new().unwrap();
+        inject_profile(tmp.path(), &AgentKind::Codex, "# Codex Profile").unwrap();
+        let content = fs::read_to_string(tmp.path().join("AGENTS.md")).unwrap();
+        assert_eq!(content, "# Codex Profile");
+    }
+
+    #[test]
+    fn inject_profile_codex_appends_to_existing_agents_md() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("AGENTS.md"), "# Repo Rules").unwrap();
+        inject_profile(tmp.path(), &AgentKind::Codex, "# Worker Profile").unwrap();
+        let content = fs::read_to_string(tmp.path().join("AGENTS.md")).unwrap();
+        assert!(content.starts_with("# Repo Rules"));
+        assert!(content.contains("<!-- swarm worker profile -->"));
+        assert!(content.ends_with("# Worker Profile"));
+    }
+
+    // --- Gemini: appends to GEMINI.md or creates it ---
+
+    #[test]
+    fn inject_profile_gemini_creates_gemini_md_when_missing() {
+        let tmp = TempDir::new().unwrap();
+        inject_profile(tmp.path(), &AgentKind::Gemini, "# Gemini Profile").unwrap();
+        let content = fs::read_to_string(tmp.path().join("GEMINI.md")).unwrap();
+        assert_eq!(content, "# Gemini Profile");
+    }
+
+    #[test]
+    fn inject_profile_gemini_appends_to_existing_gemini_md() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("GEMINI.md"), "# Existing Config").unwrap();
+        inject_profile(tmp.path(), &AgentKind::Gemini, "# Worker Profile").unwrap();
+        let content = fs::read_to_string(tmp.path().join("GEMINI.md")).unwrap();
+        assert!(content.starts_with("# Existing Config"));
+        assert!(content.contains("<!-- swarm worker profile -->"));
+        assert!(content.ends_with("# Worker Profile"));
     }
 
     #[test]
