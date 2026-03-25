@@ -346,6 +346,34 @@ fn find_repos_recursive(dir: &Path, repos: &mut Vec<PathBuf>) {
     }
 }
 
+/// Ensure the base repo is checked out to `main`.
+///
+/// Returns `Ok(())` on success. Errors are logged as warnings and also
+/// returned so callers can skip `pull_main` when checkout fails (to avoid
+/// fast-forwarding an unrelated branch).
+pub fn checkout_main(repo_path: &Path) -> Result<()> {
+    let output = match Command::new("git")
+        .args(["checkout", "main"])
+        .current_dir(repo_path)
+        .output()
+    {
+        Ok(o) => o,
+        Err(e) => {
+            tracing::warn!(repo = %repo_path.display(), error = %e, "checkout_main: failed to spawn git");
+            return Err(e.into());
+        }
+    };
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let err = eyre!("git checkout main failed: {}", stderr);
+        tracing::warn!(repo = %repo_path.display(), error = %err, "checkout_main: failed");
+        return Err(err);
+    }
+
+    Ok(())
+}
+
 /// Fast-forward local `main` to `origin/main`.
 ///
 /// Fetches from origin, checks if main is behind, and performs a fast-forward
@@ -524,5 +552,77 @@ mod tests {
     #[test]
     fn sanitize_ai_branch_name_empty_returns_empty() {
         assert_eq!(sanitize_ai_branch_name(""), "");
+    }
+
+    #[test]
+    fn checkout_main_switches_to_main() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+
+        // Init a repo with a commit on main
+        Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args([
+                "-c",
+                "user.name=test",
+                "-c",
+                "user.email=test@test",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "init",
+            ])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        // Create and switch to another branch
+        Command::new("git")
+            .args(["checkout", "-b", "other"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+
+        assert!(checkout_main(repo).is_ok());
+
+        // Verify we're on main
+        let out = Command::new("git")
+            .args(["rev-parse", "--abbrev-ref", "HEAD"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "main");
+    }
+
+    #[test]
+    fn checkout_main_fails_without_main_branch() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+
+        // Init a repo with a commit on a non-main branch
+        Command::new("git")
+            .args(["init", "-b", "develop"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args([
+                "-c",
+                "user.name=test",
+                "-c",
+                "user.email=test@test",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "init",
+            ])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+
+        assert!(checkout_main(repo).is_err());
     }
 }
