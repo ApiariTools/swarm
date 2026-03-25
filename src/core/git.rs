@@ -560,7 +560,11 @@ mod tests {
         let repo = dir.path();
 
         // Init a repo with a commit on main
-        Command::new("git").args(["init"]).current_dir(repo).output().unwrap();
+        Command::new("git")
+            .args(["init"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
         Command::new("git")
             .args(["commit", "--allow-empty", "-m", "init"])
             .current_dir(repo)
@@ -596,7 +600,11 @@ mod tests {
         let repo = dir.path();
 
         // Init a repo with a commit on a non-main branch
-        Command::new("git").args(["init"]).current_dir(repo).output().unwrap();
+        Command::new("git")
+            .args(["init"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
         Command::new("git")
             .args(["commit", "--allow-empty", "-m", "init"])
             .current_dir(repo)
