@@ -1081,10 +1081,10 @@ async fn handle_request(
                         *state_dirty = true;
 
                         let _ = git::remove_worktree(&worker.repo_path, &worker.worktree_path);
-                        let _ = git::delete_branch(&worker.repo_path, &worker.branch);
                         if git::checkout_main(&worker.repo_path).is_ok() {
                             git::pull_main(&worker.repo_path);
                         }
+                        let _ = git::delete_branch(&worker.repo_path, &worker.branch);
 
                         let _ = ipc::emit_event(
                             &ws_path,
@@ -1141,10 +1141,10 @@ async fn handle_request(
 
                                 let _ =
                                     git::remove_worktree(&worker.repo_path, &worker.worktree_path);
-                                let _ = git::delete_branch(&worker.repo_path, &worker.branch);
                                 if git::checkout_main(&worker.repo_path).is_ok() {
                                     git::pull_main(&worker.repo_path);
                                 }
+                                let _ = git::delete_branch(&worker.repo_path, &worker.branch);
                                 ws.workers.remove(&worktree_id);
 
                                 let _ = resp_tx.send(DaemonResponse::Ok { data: None });
@@ -1470,10 +1470,10 @@ fn apply_pr_poll_results(
                 worker.message_tx = None;
                 worker.phase = WorkerPhase::Completed;
                 let _ = git::remove_worktree(&worker.repo_path, &worker.worktree_path);
-                let _ = git::delete_branch(&worker.repo_path, &worker.branch);
                 if git::checkout_main(&worker.repo_path).is_ok() {
                     git::pull_main(&worker.repo_path);
                 }
+                let _ = git::delete_branch(&worker.repo_path, &worker.branch);
                 let _ = ipc::emit_event(
                     &result.workspace_path,
                     &ipc::SwarmEvent::WorktreeClosed {
