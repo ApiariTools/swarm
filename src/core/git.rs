@@ -561,18 +561,21 @@ mod tests {
 
         // Init a repo with a commit on main
         Command::new("git")
-            .args(["init"])
+            .args(["init", "-b", "main"])
             .current_dir(repo)
             .output()
             .unwrap();
         Command::new("git")
-            .args(["commit", "--allow-empty", "-m", "init"])
-            .current_dir(repo)
-            .output()
-            .unwrap();
-        // Rename default branch to main (in case default is different)
-        Command::new("git")
-            .args(["branch", "-M", "main"])
+            .args([
+                "-c",
+                "user.name=test",
+                "-c",
+                "user.email=test@test",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "init",
+            ])
             .current_dir(repo)
             .output()
             .unwrap();
@@ -601,17 +604,21 @@ mod tests {
 
         // Init a repo with a commit on a non-main branch
         Command::new("git")
-            .args(["init"])
+            .args(["init", "-b", "develop"])
             .current_dir(repo)
             .output()
             .unwrap();
         Command::new("git")
-            .args(["commit", "--allow-empty", "-m", "init"])
-            .current_dir(repo)
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["branch", "-M", "develop"])
+            .args([
+                "-c",
+                "user.name=test",
+                "-c",
+                "user.email=test@test",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "init",
+            ])
             .current_dir(repo)
             .output()
             .unwrap();
