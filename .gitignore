@@ -17,6 +17,11 @@ rust-toolchain
 # Environment / secrets
 .env
 
+# Local agent convention files (written by swarm, not committed)
+CLAUDE.local.md
+AGENTS.local.md
+GEMINI.local.md
+
 # Editor
 .DS_Store
 .idea/

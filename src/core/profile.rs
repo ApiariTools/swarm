@@ -30,13 +30,27 @@ pub fn convention_filename(kind: &AgentKind) -> &'static str {
     }
 }
 
-/// Write profile content as the agent-appropriate convention file in the worktree root.
+/// Local convention filename per agent kind, used for injecting profiles without
+/// overwriting the repo's shared convention file.
+/// Claude → "CLAUDE.local.md", Codex → "AGENTS.local.md", Gemini → "GEMINI.local.md".
+pub fn local_convention_filename(kind: &AgentKind) -> &'static str {
+    match kind {
+        AgentKind::Claude => "CLAUDE.local.md",
+        AgentKind::Codex => "AGENTS.local.md",
+        AgentKind::Gemini => "GEMINI.local.md",
+    }
+}
+
+/// Write profile content as the agent-appropriate local convention file in the worktree root.
+///
+/// Uses the `.local.md` variant so the repo's shared convention file (e.g. `CLAUDE.md`)
+/// is preserved. The agent reads both files automatically.
 pub fn inject_profile(
     worktree_path: &Path,
     kind: &AgentKind,
     content: &str,
 ) -> std::io::Result<()> {
-    let filename = convention_filename(kind);
+    let filename = local_convention_filename(kind);
     let dest = worktree_path.join(filename);
     std::fs::write(&dest, content)
 }
@@ -109,19 +123,46 @@ mod tests {
     }
 
     #[test]
-    fn inject_profile_writes_claude_md() {
+    fn local_convention_filename_claude() {
+        assert_eq!(
+            local_convention_filename(&AgentKind::Claude),
+            "CLAUDE.local.md"
+        );
+    }
+
+    #[test]
+    fn local_convention_filename_codex() {
+        assert_eq!(
+            local_convention_filename(&AgentKind::Codex),
+            "AGENTS.local.md"
+        );
+    }
+
+    #[test]
+    fn inject_profile_writes_local_claude_md() {
         let tmp = TempDir::new().unwrap();
         inject_profile(tmp.path(), &AgentKind::Claude, "# Test Profile").unwrap();
-        let content = fs::read_to_string(tmp.path().join("CLAUDE.md")).unwrap();
+        let content = fs::read_to_string(tmp.path().join("CLAUDE.local.md")).unwrap();
         assert_eq!(content, "# Test Profile");
     }
 
     #[test]
-    fn inject_profile_writes_agents_md_for_codex() {
+    fn inject_profile_writes_local_agents_md_for_codex() {
         let tmp = TempDir::new().unwrap();
         inject_profile(tmp.path(), &AgentKind::Codex, "# Codex Profile").unwrap();
-        let content = fs::read_to_string(tmp.path().join("AGENTS.md")).unwrap();
+        let content = fs::read_to_string(tmp.path().join("AGENTS.local.md")).unwrap();
         assert_eq!(content, "# Codex Profile");
+    }
+
+    #[test]
+    fn inject_profile_does_not_overwrite_shared_convention_file() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("CLAUDE.md"), "# Repo Instructions").unwrap();
+        inject_profile(tmp.path(), &AgentKind::Claude, "# Worker Profile").unwrap();
+        let shared = fs::read_to_string(tmp.path().join("CLAUDE.md")).unwrap();
+        assert_eq!(shared, "# Repo Instructions");
+        let local = fs::read_to_string(tmp.path().join("CLAUDE.local.md")).unwrap();
+        assert_eq!(local, "# Worker Profile");
     }
 
     #[test]
