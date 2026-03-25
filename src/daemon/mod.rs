@@ -1082,6 +1082,7 @@ async fn handle_request(
 
                         let _ = git::remove_worktree(&worker.repo_path, &worker.worktree_path);
                         let _ = git::delete_branch(&worker.repo_path, &worker.branch);
+                        git::checkout_main(&worker.repo_path);
                         git::pull_main(&worker.repo_path);
 
                         let _ = ipc::emit_event(
@@ -1140,6 +1141,7 @@ async fn handle_request(
                                 let _ =
                                     git::remove_worktree(&worker.repo_path, &worker.worktree_path);
                                 let _ = git::delete_branch(&worker.repo_path, &worker.branch);
+                                git::checkout_main(&worker.repo_path);
                                 git::pull_main(&worker.repo_path);
                                 ws.workers.remove(&worktree_id);
 
@@ -1467,6 +1469,7 @@ fn apply_pr_poll_results(
                 worker.phase = WorkerPhase::Completed;
                 let _ = git::remove_worktree(&worker.repo_path, &worker.worktree_path);
                 let _ = git::delete_branch(&worker.repo_path, &worker.branch);
+                git::checkout_main(&worker.repo_path);
                 git::pull_main(&worker.repo_path);
                 let _ = ipc::emit_event(
                     &result.workspace_path,
