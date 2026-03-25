@@ -960,14 +960,13 @@ async fn handle_request(
                 );
             }
 
-            // Inject profile into worktree
+            // Load profile and build an effective prompt (profile + user prompt) for
+            // the agent. The raw `prompt` is kept for display/persistence in WorkerState;
+            // only the agent spawn call receives the effective prompt.
             let profile_slug = profile.as_deref().unwrap_or("default");
             let profile_content = crate::core::profile::load_profile(&work_dir, profile_slug);
-            if let Err(e) =
-                crate::core::profile::inject_profile(&worktree_path, &kind, &profile_content)
-            {
-                tracing::warn!(error = %e, "Failed to inject profile");
-            }
+            let effective_prompt =
+                crate::core::profile::build_effective_prompt(&profile_content, &prompt);
 
             // Seed .task/ directory if artifacts provided
             if let Some(ref payload) = task_dir {
@@ -1007,7 +1006,7 @@ async fn handle_request(
             let msg_tx = spawn_worker_agent(
                 worktree_id.clone(),
                 kind.clone(),
-                prompt.clone(),
+                effective_prompt,
                 worktree_path.clone(),
                 work_dir.clone(),
                 None, // new worker, no session to resume

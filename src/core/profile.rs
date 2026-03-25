@@ -1,4 +1,3 @@
-use crate::core::agent::AgentKind;
 use std::path::Path;
 
 /// Embedded default profile (shipped with the binary).
@@ -21,24 +20,12 @@ pub fn load_profile(work_dir: &Path, slug: &str) -> String {
     format!("<!-- profile '{slug}' not found, using default -->\n{DEFAULT_PROFILE}")
 }
 
-/// Convention filename per agent kind: Claude → "CLAUDE.md", Codex → "AGENTS.md".
-pub fn convention_filename(kind: &AgentKind) -> &'static str {
-    match kind {
-        AgentKind::Claude => "CLAUDE.md",
-        AgentKind::Codex => "AGENTS.md",
-        AgentKind::Gemini => "GEMINI.md",
-    }
-}
-
-/// Write profile content as the agent-appropriate convention file in the worktree root.
-pub fn inject_profile(
-    worktree_path: &Path,
-    kind: &AgentKind,
-    content: &str,
-) -> std::io::Result<()> {
-    let filename = convention_filename(kind);
-    let dest = worktree_path.join(filename);
-    std::fs::write(&dest, content)
+/// Build the effective prompt by prepending the worker profile to the user's prompt.
+///
+/// This is the agent-agnostic way to inject profile content: it goes through the
+/// prompt rather than convention files, so it works for Claude, Codex, and Gemini.
+pub fn build_effective_prompt(profile: &str, user_prompt: &str) -> String {
+    format!("{profile}\n\n---\n\n{user_prompt}")
 }
 
 /// List available profile slugs from `.swarm/profiles/`.
@@ -99,32 +86,6 @@ mod tests {
     }
 
     #[test]
-    fn convention_filename_claude() {
-        assert_eq!(convention_filename(&AgentKind::Claude), "CLAUDE.md");
-    }
-
-    #[test]
-    fn convention_filename_codex() {
-        assert_eq!(convention_filename(&AgentKind::Codex), "AGENTS.md");
-    }
-
-    #[test]
-    fn inject_profile_writes_claude_md() {
-        let tmp = TempDir::new().unwrap();
-        inject_profile(tmp.path(), &AgentKind::Claude, "# Test Profile").unwrap();
-        let content = fs::read_to_string(tmp.path().join("CLAUDE.md")).unwrap();
-        assert_eq!(content, "# Test Profile");
-    }
-
-    #[test]
-    fn inject_profile_writes_agents_md_for_codex() {
-        let tmp = TempDir::new().unwrap();
-        inject_profile(tmp.path(), &AgentKind::Codex, "# Codex Profile").unwrap();
-        let content = fs::read_to_string(tmp.path().join("AGENTS.md")).unwrap();
-        assert_eq!(content, "# Codex Profile");
-    }
-
-    #[test]
     fn list_profiles_includes_default() {
         let tmp = TempDir::new().unwrap();
         let slugs = list_profiles(tmp.path());
@@ -142,6 +103,19 @@ mod tests {
 
         let slugs = list_profiles(tmp.path());
         assert_eq!(slugs, vec!["default", "relaxed", "strict"]);
+    }
+
+    #[test]
+    fn build_effective_prompt_prepends_profile() {
+        let result = build_effective_prompt("# Profile", "Fix the bug");
+        assert_eq!(result, "# Profile\n\n---\n\nFix the bug");
+    }
+
+    #[test]
+    fn build_effective_prompt_preserves_user_prompt() {
+        let result = build_effective_prompt("# Profile", "Fix the bug");
+        assert!(result.ends_with("Fix the bug"));
+        assert!(result.starts_with("# Profile"));
     }
 
     #[test]
