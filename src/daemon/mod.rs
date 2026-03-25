@@ -960,14 +960,11 @@ async fn handle_request(
                 );
             }
 
-            // Inject profile into worktree
+            // Load profile and prepend it to the prompt so it works for all agent kinds
+            // without touching any convention files (CLAUDE.md, AGENTS.md, etc.).
             let profile_slug = profile.as_deref().unwrap_or("default");
             let profile_content = crate::core::profile::load_profile(&work_dir, profile_slug);
-            if let Err(e) =
-                crate::core::profile::inject_profile(&worktree_path, &kind, &profile_content)
-            {
-                tracing::warn!(error = %e, "Failed to inject profile");
-            }
+            let prompt = format!("{profile_content}\n\n---\n\n{prompt}");
 
             // Seed .task/ directory if artifacts provided
             if let Some(ref payload) = task_dir {
