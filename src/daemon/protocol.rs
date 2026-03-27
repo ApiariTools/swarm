@@ -1,5 +1,6 @@
 use crate::core::ipc::InboxMessage;
 use crate::core::state::WorkerPhase;
+use a2a_types::AgentCard;
 use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -145,6 +146,9 @@ pub struct WorkerInfo {
     pub restart_count: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<DateTime<Local>>,
+    /// A2A Agent Card describing this worker's capabilities.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_card: Option<AgentCard>,
 }
 
 /// Wire-format agent events streamed to subscribers.
@@ -420,6 +424,7 @@ mod tests {
                 pr_state: None,
                 restart_count: 0,
                 created_at: None,
+                agent_card: None,
             }],
         };
         let json = serde_json::to_string(&resp).unwrap();

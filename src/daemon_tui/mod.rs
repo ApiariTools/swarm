@@ -1262,6 +1262,7 @@ mod tests {
             pr_state: None,
             restart_count: 0,
             created_at: None,
+            agent_card: None,
         }
     }
 
