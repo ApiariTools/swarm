@@ -27,12 +27,15 @@
 /// Binary-only modules (git, shell, etc.) live exclusively in the
 /// `swarm` binary crate.
 pub mod core {
+    pub mod a2a_state;
     pub mod agent;
+    pub mod agent_card;
     // Exposed under `client` for socket_path / global_socket_path only.
     // The module is public so downstream can reach it, but the re-exports
     // at the crate root are the intended API surface.
     #[cfg(all(unix, feature = "client"))]
     pub(crate) mod ipc;
+    pub mod profile;
     pub mod state;
 }
 
@@ -44,7 +47,9 @@ pub mod daemon {
 }
 
 // Re-export the most commonly used types at the crate root for convenience.
+pub use core::a2a_state::worktree_to_task_state;
 pub use core::agent::AgentKind;
+pub use core::agent_card::build_agent_card;
 pub use core::state::{
     PaneState, PrInfo, SwarmState, WorkerPhase, WorktreeState, load_state, save_state, state_path,
 };

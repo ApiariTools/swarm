@@ -88,6 +88,7 @@ impl ManagedWorker {
             pr_state: self.pr.as_ref().map(|p| p.state.clone()),
             restart_count: self.restart_count,
             created_at: Some(self.created_at),
+            agent_card: None,
         }
     }
 

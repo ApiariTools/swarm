@@ -37,6 +37,7 @@ tracing.workspace = true
 ratatui = { workspace = true, optional = true }
 crossterm = { workspace = true, optional = true }
 pulldown-cmark = "0.13"
+a2a-types = "0.1"
 async-trait = "0.1"
 futures = "0.3"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }

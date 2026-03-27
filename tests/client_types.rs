@@ -71,6 +71,7 @@ fn worker_info_is_accessible() {
         pr_state: None,
         restart_count: 0,
         created_at: None,
+        agent_card: None,
     };
     let json = serde_json::to_string(&info).unwrap();
     assert!(json.contains("\"id\":\"test\""));

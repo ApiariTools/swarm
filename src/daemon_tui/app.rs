@@ -877,6 +877,7 @@ mod tests {
             pr_state: None,
             restart_count: 0,
             created_at: None,
+            agent_card: None,
         }]);
         assert_eq!(app.selected, 0);
     }
@@ -898,6 +899,7 @@ mod tests {
                 pr_state: None,
                 restart_count: 0,
                 created_at: None,
+                agent_card: None,
             })
             .collect();
         app.update_worker_list(workers);
@@ -1113,6 +1115,7 @@ mod tests {
             pr_state: Some("OPEN".into()),
             restart_count: 0,
             created_at: None,
+            agent_card: None,
         };
         let detail = PrDetailInfo::from_worker(&w).unwrap();
         assert_eq!(detail.number, 42);
@@ -1136,6 +1139,7 @@ mod tests {
             pr_state: None,
             restart_count: 0,
             created_at: None,
+            agent_card: None,
         };
         assert!(PrDetailInfo::from_worker(&w).is_none());
     }
@@ -1155,6 +1159,7 @@ mod tests {
             pr_state: None,
             restart_count: 0,
             created_at: None,
+            agent_card: None,
         };
         let detail = PrDetailInfo::from_worker(&w).unwrap();
         assert_eq!(detail.number, 99);
@@ -1178,6 +1183,7 @@ mod tests {
             pr_state: None,
             restart_count: 0,
             created_at: None,
+            agent_card: None,
         }]);
         assert_eq!(app.workers[0].phase, WorkerPhase::Running);
 
