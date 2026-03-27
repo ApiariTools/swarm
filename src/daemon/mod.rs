@@ -72,10 +72,8 @@ struct ManagedWorker {
     created_at: chrono::DateTime<Local>,
     /// Channel to send messages to the agent supervisor task.
     message_tx: Option<mpsc::UnboundedSender<String>>,
-    /// Repository name (for Agent Card generation).
-    repo_name: String,
-    /// Profile content loaded at creation time (for Agent Card generation).
-    profile: String,
+    /// Cached A2A Agent Card, built at creation time.
+    agent_card: a2a_types::AgentCard,
 }
 
 impl ManagedWorker {
@@ -93,12 +91,7 @@ impl ManagedWorker {
             pr_state: self.pr.as_ref().map(|p| p.state.clone()),
             restart_count: self.restart_count,
             created_at: Some(self.created_at),
-            agent_card: Some(build_agent_card(
-                &self.id,
-                &self.repo_name,
-                self.kind.label(),
-                &self.profile,
-            )),
+            agent_card: Some(self.agent_card.clone()),
         }
     }
 
@@ -272,8 +265,12 @@ async fn register_workspace(
                         pr: wt.pr.clone(),
                         created_at: wt.created_at,
                         message_tx: None,
-                        repo_name: git::repo_name(&wt.repo_path),
-                        profile: crate::core::profile::load_profile(&canonical, "default"),
+                        agent_card: build_agent_card(
+                            &wt.id,
+                            &git::repo_name(&wt.repo_path),
+                            wt.agent_kind.label(),
+                            &crate::core::profile::load_profile(&canonical, "default"),
+                        ),
                     },
                 );
             }
@@ -397,9 +394,11 @@ async fn run_daemon(
                                     pr: wt.pr.clone(),
                                     created_at: wt.created_at,
                                     message_tx: None,
-                                    repo_name: git::repo_name(&wt.repo_path),
-                                    profile: crate::core::profile::load_profile(
-                                        &canonical, "default",
+                                    agent_card: build_agent_card(
+                                        &wt.id,
+                                        &git::repo_name(&wt.repo_path),
+                                        wt.agent_kind.label(),
+                                        &crate::core::profile::load_profile(&canonical, "default"),
                                     ),
                                 },
                             );
@@ -1014,8 +1013,12 @@ async fn handle_request(
                 pr: None,
                 created_at: Local::now(),
                 message_tx: None,
-                repo_name: repo_name.clone(),
-                profile: profile_content.clone(),
+                agent_card: build_agent_card(
+                    &worktree_id,
+                    &repo_name,
+                    kind.label(),
+                    &profile_content,
+                ),
             };
 
             ws.workers.insert(worktree_id.clone(), worker);
@@ -1536,8 +1539,7 @@ mod tests {
             pr: None,
             created_at: Local::now(),
             message_tx: None,
-            repo_name: "repo".to_string(),
-            profile: "## Testing\nRun tests.".to_string(),
+            agent_card: build_agent_card(id, "repo", "claude", "## Testing\nRun tests."),
         }
     }
 

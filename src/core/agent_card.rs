@@ -9,18 +9,18 @@ use a2a_types::{AgentCapabilities, AgentCard, AgentSkill};
 ///
 /// The URL is a placeholder — real A2A endpoints will be wired in a later phase.
 /// Callers that need a routable URL should override the `url` field.
-#[allow(dead_code)]
 pub fn build_agent_card(worker_id: &str, repo: &str, agent: &str, profile: &str) -> AgentCard {
     let skills = parse_skills_from_profile(profile);
 
     // Placeholder URL — swarm workers don't yet expose A2A HTTP endpoints.
     // Port 0 signals "not allocated"; callers should replace this once
     // transport is wired up.
+    let encoded_id = url_encode_path_segment(worker_id);
     AgentCard::new(
         worker_id,
         format!("Swarm worker for {repo} ({agent})"),
         env!("CARGO_PKG_VERSION"),
-        format!("http://localhost:0/a2a/workers/{worker_id}"),
+        format!("http://localhost:0/a2a/workers/{encoded_id}"),
     )
     .with_capabilities(AgentCapabilities {
         streaming: Some(false),
@@ -63,6 +63,23 @@ fn parse_skills_from_profile(profile: &str) -> Vec<AgentSkill> {
     }
 
     skills
+}
+
+/// Percent-encode a string for use as a URL path segment (RFC 3986).
+fn url_encode_path_segment(s: &str) -> String {
+    let mut encoded = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            // unreserved chars + sub-delims safe in path segments
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(b as char);
+            }
+            _ => {
+                encoded.push_str(&format!("%{:02X}", b));
+            }
+        }
+    }
+    encoded
 }
 
 fn make_skill(name: &str, body: &str) -> AgentSkill {
