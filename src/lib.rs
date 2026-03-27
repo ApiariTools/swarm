@@ -30,9 +30,8 @@ pub mod core {
     pub mod a2a_state;
     pub mod agent;
     pub mod agent_card;
-    // Exposed under `client` for socket_path / global_socket_path only.
-    // The module is public so downstream can reach it, but the re-exports
-    // at the crate root are the intended API surface.
+    // Used internally by the `client` re-exports (socket_path, global_socket_path).
+    // Downstream should use the `client` module at the crate root, not this directly.
     #[cfg(all(unix, feature = "client"))]
     pub(crate) mod ipc;
     pub mod profile;

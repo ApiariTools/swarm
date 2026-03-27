@@ -6,15 +6,21 @@ use a2a_types::{AgentCapabilities, AgentCard, AgentSkill};
 /// `repo`      — repository name the worker is operating on
 /// `agent`     — agent type string ("claude", "codex", "gemini")
 /// `profile`   — raw markdown profile content (used to derive skills)
+///
+/// The URL is a placeholder — real A2A endpoints will be wired in a later phase.
+/// Callers that need a routable URL should override the `url` field.
 #[allow(dead_code)]
 pub fn build_agent_card(worker_id: &str, repo: &str, agent: &str, profile: &str) -> AgentCard {
     let skills = parse_skills_from_profile(profile);
 
+    // Placeholder URL — swarm workers don't yet expose A2A HTTP endpoints.
+    // Port 0 signals "not allocated"; callers should replace this once
+    // transport is wired up.
     AgentCard::new(
         worker_id,
         format!("Swarm worker for {repo} ({agent})"),
         env!("CARGO_PKG_VERSION"),
-        format!("http://localhost:0/workers/{worker_id}"),
+        format!("http://localhost:0/a2a/workers/{worker_id}"),
     )
     .with_capabilities(AgentCapabilities {
         streaming: Some(false),
