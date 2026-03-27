@@ -248,6 +248,11 @@ async fn register_workspace(
     // Load existing workers from state.json
     let mut workers = HashMap::new();
     if let Ok(Some(existing_state)) = state::load_state(&canonical) {
+        // Cache the default profile to avoid re-reading from disk per worker.
+        // TODO: profile slug is not persisted in state.json yet, so restored
+        // workers always use "default". A future PR should add a
+        // `profile_slug` field to WorktreeState.
+        let default_profile = crate::core::profile::load_profile(&canonical, "default");
         for wt in &existing_state.worktrees {
             if wt.phase.is_active() {
                 workers.insert(
@@ -265,14 +270,11 @@ async fn register_workspace(
                         pr: wt.pr.clone(),
                         created_at: wt.created_at,
                         message_tx: None,
-                        // TODO: profile slug is not persisted in state.json yet,
-                        // so restored workers always use "default". A future PR
-                        // should add a `profile_slug` field to WorktreeState.
                         agent_card: build_agent_card(
                             &wt.id,
                             &git::repo_name(&wt.repo_path),
                             wt.agent_kind.label(),
-                            &crate::core::profile::load_profile(&canonical, "default"),
+                            &default_profile,
                         ),
                     },
                 );
@@ -380,6 +382,7 @@ async fn run_daemon(
                         .unwrap_or_default();
                 let mut workers = HashMap::new();
                 if let Ok(Some(existing_state)) = state::load_state(&canonical) {
+                    let default_profile = crate::core::profile::load_profile(&canonical, "default");
                     for wt in &existing_state.worktrees {
                         if wt.phase.is_active() {
                             workers.insert(
@@ -397,12 +400,11 @@ async fn run_daemon(
                                     pr: wt.pr.clone(),
                                     created_at: wt.created_at,
                                     message_tx: None,
-                                    // TODO: see register_workspace — profile slug not persisted yet.
                                     agent_card: build_agent_card(
                                         &wt.id,
                                         &git::repo_name(&wt.repo_path),
                                         wt.agent_kind.label(),
-                                        &crate::core::profile::load_profile(&canonical, "default"),
+                                        &default_profile,
                                     ),
                                 },
                             );

@@ -87,11 +87,24 @@ fn url_encode_path_segment(s: &str) -> String {
 }
 
 fn make_skill(name: &str, body: &str) -> AgentSkill {
-    let id = name
+    let raw = name
         .to_lowercase()
-        .replace(|c: char| !c.is_alphanumeric(), "-")
-        .trim_matches('-')
-        .to_string();
+        .replace(|c: char| !c.is_alphanumeric(), "-");
+    // Collapse repeated dashes and trim leading/trailing dashes.
+    let mut id = String::new();
+    for ch in raw.chars() {
+        if ch == '-' && id.ends_with('-') {
+            continue;
+        }
+        id.push(ch);
+    }
+    let id = id.trim_matches('-').to_string();
+    // Fall back to a stable id if the heading had no alphanumeric chars.
+    let id = if id.is_empty() {
+        format!("skill-{:x}", name.len())
+    } else {
+        id
+    };
 
     AgentSkill {
         id,

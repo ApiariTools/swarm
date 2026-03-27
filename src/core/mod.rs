@@ -1,6 +1,3 @@
-// Used via lib.rs re-export; not called from the binary crate directly.
-#[allow(dead_code)]
-pub mod a2a_state;
 pub mod agent;
 pub mod agent_card;
 pub mod git;
