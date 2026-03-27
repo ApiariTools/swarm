@@ -265,6 +265,9 @@ async fn register_workspace(
                         pr: wt.pr.clone(),
                         created_at: wt.created_at,
                         message_tx: None,
+                        // TODO: profile slug is not persisted in state.json yet,
+                        // so restored workers always use "default". A future PR
+                        // should add a `profile_slug` field to WorktreeState.
                         agent_card: build_agent_card(
                             &wt.id,
                             &git::repo_name(&wt.repo_path),
@@ -394,6 +397,7 @@ async fn run_daemon(
                                     pr: wt.pr.clone(),
                                     created_at: wt.created_at,
                                     message_tx: None,
+                                    // TODO: see register_workspace — profile slug not persisted yet.
                                     agent_card: build_agent_card(
                                         &wt.id,
                                         &git::repo_name(&wt.repo_path),
