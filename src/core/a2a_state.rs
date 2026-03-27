@@ -9,6 +9,7 @@ use super::state::WorkerPhase;
 /// - `Waiting` (or agent_session_status == "waiting") → `InputRequired`
 /// - `Completed` → `Completed`
 /// - `Failed` → `Failed`
+#[allow(dead_code)]
 pub fn worktree_to_task_state(
     phase: &WorkerPhase,
     agent_session_status: Option<&str>,

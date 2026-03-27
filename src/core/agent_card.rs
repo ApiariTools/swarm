@@ -6,6 +6,7 @@ use a2a_types::{AgentCapabilities, AgentCard, AgentSkill};
 /// `repo`      — repository name the worker is operating on
 /// `agent`     — agent type string ("claude", "codex", "gemini")
 /// `profile`   — raw markdown profile content (used to derive skills)
+#[allow(dead_code)]
 pub fn build_agent_card(worker_id: &str, repo: &str, agent: &str, profile: &str) -> AgentCard {
     let skills = parse_skills_from_profile(profile);
 
@@ -41,13 +42,12 @@ fn parse_skills_from_profile(profile: &str) -> Vec<AgentSkill> {
                 current_body.clear();
             }
             current_heading = Some(heading.trim().to_string());
-        } else if current_heading.is_some() {
-            if !current_body.is_empty() || !line.trim().is_empty() {
-                if !current_body.is_empty() {
-                    current_body.push('\n');
-                }
-                current_body.push_str(line);
+        } else if current_heading.is_some() && (!current_body.is_empty() || !line.trim().is_empty())
+        {
+            if !current_body.is_empty() {
+                current_body.push('\n');
             }
+            current_body.push_str(line);
         }
     }
 
