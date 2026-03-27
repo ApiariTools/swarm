@@ -847,6 +847,23 @@ fn draw_conversation_entries(
                     )));
                 }
             }
+            ConversationEntry::Question { text, timestamp } => {
+                let in_same_turn = is_continuation_of_assistant_turn(&conv.entries, i);
+                if !in_same_turn {
+                    lines.push(Line::from(""));
+                    let ts_span = dedup_timestamp(timestamp, &mut last_shown_ts);
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            "  \u{2753} Claude:",
+                            Style::default()
+                                .fg(theme::HONEY)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        ts_span,
+                    ]));
+                }
+                lines.extend(markdown::render_markdown(text));
+            }
             ConversationEntry::Status { text } => {
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled(
