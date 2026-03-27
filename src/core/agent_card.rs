@@ -1,4 +1,5 @@
 use a2a_types::{AgentCapabilities, AgentCard, AgentSkill};
+use std::fmt::Write;
 
 /// Build an A2A AgentCard for a swarm worker.
 ///
@@ -34,7 +35,7 @@ pub fn build_agent_card(worker_id: &str, repo: &str, agent: &str, profile: &str)
 /// Parse markdown profile content into A2A AgentSkill entries.
 ///
 /// Extracts `## Heading` sections and uses the heading as the skill name and the
-/// body text (up to the next heading) as the description.
+/// body text (up to the next heading) as the description. Empty headings are skipped.
 fn parse_skills_from_profile(profile: &str) -> Vec<AgentSkill> {
     let mut skills = Vec::new();
     let mut current_heading: Option<String> = None;
@@ -47,7 +48,10 @@ fn parse_skills_from_profile(profile: &str) -> Vec<AgentSkill> {
                 skills.push(make_skill(&name, &current_body));
                 current_body.clear();
             }
-            current_heading = Some(heading.trim().to_string());
+            let trimmed = heading.trim();
+            if !trimmed.is_empty() {
+                current_heading = Some(trimmed.to_string());
+            }
         } else if current_heading.is_some() && (!current_body.is_empty() || !line.trim().is_empty())
         {
             if !current_body.is_empty() {
@@ -65,17 +69,17 @@ fn parse_skills_from_profile(profile: &str) -> Vec<AgentSkill> {
     skills
 }
 
-/// Percent-encode a string for use as a URL path segment (RFC 3986).
+/// Percent-encode a string for use as a URL path segment (RFC 3986 unreserved characters).
 fn url_encode_path_segment(s: &str) -> String {
     let mut encoded = String::with_capacity(s.len());
     for b in s.bytes() {
         match b {
-            // unreserved chars + sub-delims safe in path segments
+            // RFC 3986 unreserved characters
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
                 encoded.push(b as char);
             }
             _ => {
-                encoded.push_str(&format!("%{:02X}", b));
+                let _ = write!(encoded, "%{:02X}", b);
             }
         }
     }
@@ -162,5 +166,12 @@ mod tests {
     fn empty_profile_produces_no_skills() {
         let card = build_agent_card("w-1", "repo", "claude", "# Just a title\nNo sections.");
         assert!(card.skills.is_empty());
+    }
+
+    #[test]
+    fn empty_heading_is_skipped() {
+        let card = build_agent_card("w-1", "repo", "claude", "##  \n## Real\nContent.");
+        assert_eq!(card.skills.len(), 1);
+        assert_eq!(card.skills[0].name, "Real");
     }
 }
