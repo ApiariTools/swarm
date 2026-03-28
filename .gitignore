@@ -22,3 +22,5 @@ rust-toolchain
 .idea/
 .vscode/
 *.swp
+
+cargo/config.toml

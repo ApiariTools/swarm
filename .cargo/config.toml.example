@@ -1,0 +1,12 @@
+# Copy this file to .cargo/config.toml (gitignored) to use local crate checkouts
+# instead of crates.io when building locally.
+#
+# Assumes sibling checkouts at the same level as the swarm repo:
+#   ../common   ../tui   ../claude-sdk   ../codex-sdk   ../gemini-sdk
+
+[patch.crates-io]
+apiari-common = { path = "../common" }
+apiari-tui = { path = "../tui" }
+apiari-claude-sdk = { path = "../claude-sdk" }
+apiari-codex-sdk = { path = "../codex-sdk" }
+apiari-gemini-sdk = { path = "../gemini-sdk" }
