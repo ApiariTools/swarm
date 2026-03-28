@@ -590,15 +590,14 @@ async fn run_daemon(
                                             worker.review_verdict = Some(verdict);
                                             state_dirty = true;
                                         }
-                                    } else if worker.ready_branch.is_none() {
-                                        if let Some(branch) =
+                                    } else if worker.ready_branch.is_none()
+                                        && let Some(branch) =
                                             crate::core::state::parse_branch_ready(
                                                 &worker.accumulated_text,
                                             )
-                                        {
-                                            worker.ready_branch = Some(branch);
-                                            state_dirty = true;
-                                        }
+                                    {
+                                        worker.ready_branch = Some(branch);
+                                        state_dirty = true;
                                     }
                                     break;
                                 }
