@@ -73,7 +73,7 @@ jobs:
           ratatui = { version = "0.29", features = ["unstable-rendered-line-info"] }
           crossterm = { version = "0.28", features = ["event-stream"] }
           apiari-common = "0.1.0"
-          apiari-tui = "0.1.0"
+          apiari-tui = "0.2.0"
           apiari-claude-sdk = { version = "0.1.0", path = "claude-sdk" }
           apiari-codex-sdk = { version = "0.1.0", path = "codex-sdk" }
           apiari-gemini-sdk = { version = "0.1.0", path = "gemini-sdk" }
@@ -149,7 +149,7 @@ jobs:
           ratatui = { version = "0.29", features = ["unstable-rendered-line-info"] }
           crossterm = { version = "0.28", features = ["event-stream"] }
           apiari-common = "0.1.0"
-          apiari-tui = "0.1.0"
+          apiari-tui = "0.2.0"
           apiari-claude-sdk = { version = "0.1.0", path = "claude-sdk" }
           apiari-codex-sdk = { version = "0.1.0", path = "codex-sdk" }
           apiari-gemini-sdk = { version = "0.1.0", path = "gemini-sdk" }
