@@ -22,7 +22,7 @@ apiari-common.workspace = true
 apiari-claude-sdk.workspace = true
 apiari-codex-sdk.workspace = true
 apiari-gemini-sdk.workspace = true
-apiari-tui = { workspace = true, optional = true }
+apiari-tui = { version = "0.2", optional = true }
 color-eyre.workspace = true
 tokio.workspace = true
 serde.workspace = true
