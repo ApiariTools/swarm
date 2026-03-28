@@ -1,5 +1,8 @@
 # Swarm
 
+## Git Hooks
+Run `git config core.hooksPath .githooks` to activate pre-commit checks (fmt + clippy).
+
 ## Rules
 1. You are working in a git worktree on a `swarm/*` branch. Never commit to main.
 2. Only modify files within this repository.
