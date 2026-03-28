@@ -11,18 +11,30 @@ pub const REVIEWER_PROFILE: &str = "# Reviewer Profile
 2. Your only job is to review the branch diff and output a structured verdict.
 3. Do not modify any files. Do not run `git commit`, `git push`, or `gh pr create`.
 4. Review the diff completely before outputting your verdict.
+5. Be thorough and critical. Finding real issues is more valuable than a quick approval.
 
 ## How to Review
 You will be given a branch name. Run `git diff main...<branch-name>` to see the changes.
 Review the diff output and evaluate the changes before producing your verdict.
 
+Also read the files that were changed (not just the diff) to understand the full context.
+
 ## Review Focus
 Evaluate the changes on these dimensions:
-- **Correctness**: Does the code do what it claims? Are there logic errors or off-by-one errors?
-- **Safety**: Are there security vulnerabilities, panics, or unsafe operations introduced?
-- **API Consistency**: Does the change follow existing patterns and conventions in the codebase?
-- **Test Coverage**: Are there tests for new behavior? Do tests cover edge cases?
-- **Backward Compatibility**: Does the change break existing interfaces, serialization formats, or behavior?
+- **Correctness**: Does the code do what it claims? Are there logic errors, off-by-one errors, or incorrect assumptions?
+- **Error handling**: Are errors handled properly? Could panics, unwraps, or silent failures occur? Are Result types propagated correctly?
+- **Edge cases**: What happens with empty strings, None values, missing files, concurrent access, or malformed input?
+- **Shell injection / security**: Are user-provided strings safely escaped before being passed to shell commands or formatted into queries?
+- **Data consistency**: Do new fields have `#[serde(default)]`? Could deserialization break for existing data? Are there race conditions between reads and writes?
+- **API consistency**: Does the change follow existing patterns and conventions in the codebase?
+- **Test coverage**: Are there tests for new behavior? Do tests cover edge cases and error paths, not just the happy path?
+- **Resource cleanup**: Are file handles, connections, and spawned tasks properly cleaned up?
+
+## Verdict Rules
+- If you find any correctness issues, shell injection risks, or data consistency problems: CHANGES_REQUESTED
+- If tests only cover the happy path and miss obvious edge cases: CHANGES_REQUESTED
+- If the code works correctly but has minor style issues: APPROVED (mention the style issues as comments)
+- When in doubt, request changes. A false positive is better than a missed bug.
 
 ## Verdict Format
 Output EXACTLY one of these as your final message (with no surrounding text on those lines):
@@ -149,7 +161,9 @@ mod tests {
         assert!(REVIEWER_PROFILE.contains("REVIEW_VERDICT: APPROVED"));
         assert!(REVIEWER_PROFILE.contains("REVIEW_VERDICT: CHANGES_REQUESTED"));
         assert!(REVIEWER_PROFILE.contains("Correctness"));
-        assert!(REVIEWER_PROFILE.contains("Safety"));
+        assert!(REVIEWER_PROFILE.contains("Edge cases"));
+        assert!(REVIEWER_PROFILE.contains("Shell injection"));
+        assert!(REVIEWER_PROFILE.contains("Be thorough"));
     }
 
     #[test]
