@@ -4,6 +4,57 @@ use color_eyre::Result;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+/// Parsed review verdict from a reviewer worker's text output.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReviewVerdict {
+    pub approved: bool,
+    #[serde(default)]
+    pub comments: Vec<String>,
+}
+
+/// Parse a review verdict from the reviewer worker's accumulated text output.
+///
+/// Scans for `REVIEW_VERDICT: APPROVED` or `REVIEW_VERDICT: CHANGES_REQUESTED`
+/// followed by comment lines starting with `- `.
+pub fn parse_review_verdict(output: &str) -> Option<ReviewVerdict> {
+    let mut found_changes_requested = false;
+    let mut collecting_comments = false;
+    let mut comments = Vec::new();
+
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if trimmed == "REVIEW_VERDICT: APPROVED" {
+            return Some(ReviewVerdict {
+                approved: true,
+                comments: vec![],
+            });
+        }
+        if trimmed == "REVIEW_VERDICT: CHANGES_REQUESTED" {
+            found_changes_requested = true;
+            collecting_comments = true;
+            continue;
+        }
+        if collecting_comments {
+            if let Some(comment) = trimmed.strip_prefix("- ") {
+                comments.push(comment.to_string());
+            } else if !trimmed.is_empty() {
+                // Non-empty, non-comment line stops comment collection
+                collecting_comments = false;
+            }
+            // Empty lines don't stop comment collection
+        }
+    }
+
+    if found_changes_requested {
+        Some(ReviewVerdict {
+            approved: false,
+            comments,
+        })
+    } else {
+        None
+    }
+}
+
 /// PR info fetched from `gh`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PrInfo {
@@ -114,6 +165,15 @@ pub struct WorktreeState {
     /// Number of auto-restarts (observability).
     #[serde(default)]
     pub restart_count: Option<u32>,
+    /// Worker role: "worker" (default) or "reviewer".
+    #[serde(default)]
+    pub role: Option<String>,
+    /// PR number being reviewed (when role = "reviewer").
+    #[serde(default)]
+    pub review_pr: Option<u64>,
+    /// Parsed review verdict after the reviewer worker completes.
+    #[serde(default)]
+    pub review_verdict: Option<ReviewVerdict>,
 }
 
 fn default_status() -> String {
@@ -181,6 +241,9 @@ mod tests {
             agent_pid: None,
             session_id: None,
             restart_count: None,
+            role: None,
+            review_pr: None,
+            review_verdict: None,
         }
     }
 
@@ -310,6 +373,129 @@ mod tests {
         }"#;
         let restored: WorktreeState = serde_json::from_str(json).expect("deserialize");
         assert_eq!(restored.phase, WorkerPhase::Running);
+    }
+
+    // ── ReviewVerdict tests ────────────────────────────────
+
+    #[test]
+    fn parse_verdict_approved() {
+        let output = "The code looks great!\nREVIEW_VERDICT: APPROVED";
+        let v = parse_review_verdict(output).unwrap();
+        assert!(v.approved);
+        assert!(v.comments.is_empty());
+    }
+
+    #[test]
+    fn parse_verdict_changes_requested() {
+        let output = "Found some issues.\nREVIEW_VERDICT: CHANGES_REQUESTED\n- [src/foo.rs:42] Missing null check\n- [src/bar.rs:10] Unsafe cast";
+        let v = parse_review_verdict(output).unwrap();
+        assert!(!v.approved);
+        assert_eq!(v.comments.len(), 2);
+        assert!(v.comments[0].contains("Missing null check"));
+        assert!(v.comments[1].contains("Unsafe cast"));
+    }
+
+    #[test]
+    fn parse_verdict_no_verdict() {
+        let output = "I reviewed the code but forgot to output a verdict";
+        assert!(parse_review_verdict(output).is_none());
+    }
+
+    #[test]
+    fn parse_verdict_malformed_verdict_type() {
+        let output = "REVIEW_VERDICT: MAYBE";
+        assert!(parse_review_verdict(output).is_none());
+    }
+
+    #[test]
+    fn parse_verdict_empty_output() {
+        assert!(parse_review_verdict("").is_none());
+    }
+
+    #[test]
+    fn parse_verdict_changes_requested_no_comments() {
+        let output = "REVIEW_VERDICT: CHANGES_REQUESTED";
+        let v = parse_review_verdict(output).unwrap();
+        assert!(!v.approved);
+        assert!(v.comments.is_empty());
+    }
+
+    #[test]
+    fn parse_verdict_approved_ignores_trailing_text() {
+        let output = "REVIEW_VERDICT: APPROVED\nSome trailing text";
+        let v = parse_review_verdict(output).unwrap();
+        assert!(v.approved);
+    }
+
+    #[test]
+    fn parse_verdict_stops_at_non_comment_line() {
+        let output = "REVIEW_VERDICT: CHANGES_REQUESTED\n- [a:1] issue one\n\nSome text\n- [b:2] not collected";
+        let v = parse_review_verdict(output).unwrap();
+        assert!(!v.approved);
+        // Empty line doesn't stop collection, but "Some text" does
+        assert_eq!(v.comments.len(), 1);
+        assert!(v.comments[0].contains("issue one"));
+    }
+
+    #[test]
+    fn review_verdict_serde_round_trip() {
+        let v = ReviewVerdict {
+            approved: false,
+            comments: vec!["[file:1] issue 1".into(), "[file:2] issue 2".into()],
+        };
+        let json = serde_json::to_string(&v).unwrap();
+        let restored: ReviewVerdict = serde_json::from_str(&json).unwrap();
+        assert_eq!(v, restored);
+    }
+
+    #[test]
+    fn review_verdict_approved_serde() {
+        let v = ReviewVerdict {
+            approved: true,
+            comments: vec![],
+        };
+        let json = serde_json::to_string(&v).unwrap();
+        assert!(json.contains("\"approved\":true"));
+        let restored: ReviewVerdict = serde_json::from_str(&json).unwrap();
+        assert_eq!(v, restored);
+    }
+
+    #[test]
+    fn worktree_state_new_fields_default_to_none() {
+        let json = r#"{
+            "id": "test-1",
+            "branch": "swarm/test-1",
+            "prompt": "fix the bug",
+            "agent_kind": "claude",
+            "repo_path": "/tmp/repo",
+            "worktree_path": "/tmp/repo/.swarm/wt/test-1",
+            "created_at": "2025-01-01T00:00:00-05:00",
+            "agent": {"pane_id": "%1"},
+            "terminals": [],
+            "summary": null,
+            "status": "running"
+        }"#;
+        let ws: WorktreeState = serde_json::from_str(json).unwrap();
+        assert!(ws.role.is_none());
+        assert!(ws.review_pr.is_none());
+        assert!(ws.review_verdict.is_none());
+    }
+
+    #[test]
+    fn worktree_state_reviewer_round_trips() {
+        let verdict = ReviewVerdict {
+            approved: false,
+            comments: vec!["[foo.rs:1] bad thing".into()],
+        };
+        let mut ws = make_worktree_state(None);
+        ws.role = Some("reviewer".to_string());
+        ws.review_pr = Some(42);
+        ws.review_verdict = Some(verdict.clone());
+        let json = serde_json::to_string(&ws).unwrap();
+        let restored: WorktreeState = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.role.as_deref(), Some("reviewer"));
+        assert_eq!(restored.review_pr, Some(42));
+        assert_eq!(restored.review_verdict, Some(verdict));
     }
 
     #[test]

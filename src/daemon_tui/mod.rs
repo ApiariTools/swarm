@@ -436,6 +436,9 @@ async fn handle_action(app: &mut DaemonTuiApp, client: &mut DaemonClient, action
                 workspace: Some(app.work_dir.clone()),
                 profile: None,
                 task_dir: None,
+                role: None,
+                review_pr: None,
+                base_branch: None,
             };
             fire_and_forget(client, app, req).await;
             fire_and_forget(
@@ -1263,6 +1266,8 @@ mod tests {
             restart_count: 0,
             created_at: None,
             agent_card: None,
+            role: None,
+            review_verdict: None,
         }
     }
 

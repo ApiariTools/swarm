@@ -49,6 +49,15 @@ enum Commands {
         /// Path to JSON file with .task/ artifacts to seed.
         #[arg(long, value_name = "PATH")]
         task_dir: Option<String>,
+        /// Worker role: "worker" (default) writes code and opens PRs; "reviewer" reviews a PR diff.
+        #[arg(long, default_value = "worker")]
+        role: String,
+        /// PR number to review (required when --role reviewer).
+        #[arg(long)]
+        pr: Option<u64>,
+        /// Base branch for diff (used with --role reviewer, default: "main").
+        #[arg(long, default_value = "main")]
+        base_branch: String,
     },
     /// Send a message to a worktree's agent
     Send {
@@ -153,6 +162,9 @@ async fn main() -> Result<()> {
             modifiers,
             profile,
             task_dir,
+            role,
+            pr,
+            base_branch,
         }) => {
             cmd_create(
                 work_dir,
@@ -163,6 +175,9 @@ async fn main() -> Result<()> {
                 modifiers,
                 profile,
                 task_dir,
+                role,
+                pr,
+                base_branch,
             )
             .await
         }
@@ -464,6 +479,9 @@ async fn cmd_create(
     modifiers: Vec<String>,
     profile: String,
     task_dir_path: Option<String>,
+    role: String,
+    review_pr: Option<u64>,
+    base_branch: String,
 ) -> Result<()> {
     // Check prerequisites before doing any work
     if let Err(msg) = core::prerequisites::check_prerequisites() {
@@ -539,6 +557,9 @@ async fn cmd_create(
         workspace: Some(work_dir.clone()),
         profile: Some(profile),
         task_dir,
+        role: Some(role),
+        review_pr,
+        base_branch: Some(base_branch),
     };
     match daemon::ipc_client::send_daemon_request(&work_dir, &req) {
         Ok(daemon::protocol::DaemonResponse::Ok { data }) => {

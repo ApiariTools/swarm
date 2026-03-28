@@ -9,6 +9,7 @@ use std::path::PathBuf;
 /// Request sent to the daemon over the Unix socket.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)]
 pub enum DaemonRequest {
     ListWorkers {
         /// Filter by workspace (None = all workspaces).
@@ -32,6 +33,15 @@ pub enum DaemonRequest {
         /// Artifacts to seed in the worktree's `.task/` directory.
         #[serde(default)]
         task_dir: Option<TaskDirPayload>,
+        /// Worker role: "worker" (default) or "reviewer".
+        #[serde(default)]
+        role: Option<String>,
+        /// PR number to review (when role = "reviewer").
+        #[serde(default)]
+        review_pr: Option<u64>,
+        /// Base branch for diff (when role = "reviewer", default: "main").
+        #[serde(default)]
+        base_branch: Option<String>,
     },
     SendMessage {
         worktree_id: String,
@@ -149,6 +159,12 @@ pub struct WorkerInfo {
     /// A2A Agent Card describing this worker's capabilities.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_card: Option<AgentCard>,
+    /// Worker role: "worker" or "reviewer".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    /// Parsed review verdict (populated after a reviewer worker completes).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_verdict: Option<crate::core::state::ReviewVerdict>,
 }
 
 /// Wire-format agent events streamed to subscribers.
@@ -204,6 +220,9 @@ pub fn translate_inbox_message(msg: &InboxMessage) -> DaemonRequest {
             workspace: None,
             profile: None,
             task_dir: None,
+            role: None,
+            review_pr: None,
+            base_branch: None,
         },
         InboxMessage::Send {
             worktree, message, ..
@@ -234,6 +253,9 @@ mod tests {
             workspace: None,
             profile: Some("strict".into()),
             task_dir: None,
+            role: None,
+            review_pr: None,
+            base_branch: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("\"action\":\"create_worker\""));
@@ -260,13 +282,110 @@ mod tests {
         let req: DaemonRequest = serde_json::from_str(json).unwrap();
         match req {
             DaemonRequest::CreateWorker {
-                profile, task_dir, ..
+                profile,
+                task_dir,
+                role,
+                review_pr,
+                base_branch,
+                ..
             } => {
                 assert!(profile.is_none());
                 assert!(task_dir.is_none());
+                assert!(role.is_none());
+                assert!(review_pr.is_none());
+                assert!(base_branch.is_none());
             }
             _ => panic!("expected CreateWorker"),
         }
+    }
+
+    #[test]
+    fn create_worker_reviewer_role_round_trips() {
+        let req = DaemonRequest::CreateWorker {
+            prompt: "review pr".into(),
+            agent: "claude".into(),
+            repo: None,
+            start_point: None,
+            workspace: None,
+            profile: None,
+            task_dir: None,
+            role: Some("reviewer".into()),
+            review_pr: Some(42),
+            base_branch: Some("main".into()),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let restored: DaemonRequest = serde_json::from_str(&json).unwrap();
+        match restored {
+            DaemonRequest::CreateWorker {
+                role,
+                review_pr,
+                base_branch,
+                ..
+            } => {
+                assert_eq!(role.as_deref(), Some("reviewer"));
+                assert_eq!(review_pr, Some(42));
+                assert_eq!(base_branch.as_deref(), Some("main"));
+            }
+            _ => panic!("expected CreateWorker"),
+        }
+    }
+
+    #[test]
+    fn worker_info_review_verdict_round_trips() {
+        use crate::core::state::ReviewVerdict;
+        let info = WorkerInfo {
+            id: "rev-1".into(),
+            branch: "swarm/review-pr-42".into(),
+            prompt: "review pr 42".into(),
+            agent: "claude".into(),
+            phase: WorkerPhase::Completed,
+            session_id: None,
+            pr_url: None,
+            pr_number: None,
+            pr_title: None,
+            pr_state: None,
+            restart_count: 0,
+            created_at: None,
+            agent_card: None,
+            role: Some("reviewer".into()),
+            review_verdict: Some(ReviewVerdict {
+                approved: false,
+                comments: vec!["[foo.rs:1] bad".into()],
+            }),
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(json.contains("\"role\":\"reviewer\""));
+        assert!(json.contains("\"approved\":false"));
+        let restored: WorkerInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.role.as_deref(), Some("reviewer"));
+        let verdict = restored.review_verdict.unwrap();
+        assert!(!verdict.approved);
+        assert_eq!(verdict.comments[0], "[foo.rs:1] bad");
+    }
+
+    #[test]
+    fn worker_info_role_absent_when_none() {
+        let info = WorkerInfo {
+            id: "w-1".into(),
+            branch: "swarm/fix-bug".into(),
+            prompt: "fix bug".into(),
+            agent: "claude".into(),
+            phase: WorkerPhase::Running,
+            session_id: None,
+            pr_url: None,
+            pr_number: None,
+            pr_title: None,
+            pr_state: None,
+            restart_count: 0,
+            created_at: None,
+            agent_card: None,
+            role: None,
+            review_verdict: None,
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        // role and review_verdict should be absent (skip_serializing_if = "Option::is_none")
+        assert!(!json.contains("\"role\""));
+        assert!(!json.contains("\"review_verdict\""));
     }
 
     #[test]
@@ -284,6 +403,9 @@ mod tests {
             workspace: None,
             profile: None,
             task_dir: Some(payload),
+            role: None,
+            review_pr: None,
+            base_branch: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         let restored: DaemonRequest = serde_json::from_str(&json).unwrap();
@@ -425,6 +547,8 @@ mod tests {
                 restart_count: 0,
                 created_at: None,
                 agent_card: None,
+                role: None,
+                review_verdict: None,
             }],
         };
         let json = serde_json::to_string(&resp).unwrap();
