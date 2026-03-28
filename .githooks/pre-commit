@@ -1,0 +1,14 @@
+#!/bin/sh
+set -e
+
+# Run cargo fmt check
+if ! cargo fmt --check 2>/dev/null; then
+    echo "❌ cargo fmt failed. Run 'cargo fmt' to fix."
+    exit 1
+fi
+
+# Run clippy
+if ! cargo clippy -- -D warnings 2>/dev/null; then
+    echo "❌ clippy has warnings. Fix them before committing."
+    exit 1
+fi
