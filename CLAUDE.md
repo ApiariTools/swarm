@@ -6,9 +6,7 @@
 ## Rules
 1. You are working in a git worktree on a `swarm/*` branch. Never commit to main.
 2. Only modify files within this repository.
-3. When done, create a PR with `gh pr create --reviewer @copilot`.
-4. Do not run `cargo install` or modify system state.
-5. Plan and execute in one go — do not pause for confirmation.
+3. Do not run `cargo install` or modify system state.
 
 ## Scope Discipline
 - ONLY make changes described in the task. Do not refactor, reorganize, or improve unrelated code.
@@ -27,8 +25,3 @@ If a `.task/` directory exists, read ALL files before writing any code:
 
 **Do NOT commit `.task/` to git.** These are pipeline artifacts, not source code.
 
-## Git Workflow
-- Stay on your `swarm/*` branch
-- NEVER push to or merge into `main`
-- Commit early and often
-- Push your branch and open a PR when done
