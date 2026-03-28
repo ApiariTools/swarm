@@ -3,6 +3,39 @@ use std::path::Path;
 /// Embedded default profile (shipped with the binary).
 pub const DEFAULT_PROFILE: &str = include_str!("../../profiles/default.md");
 
+/// Embedded reviewer profile for read-only PR review workers.
+pub const REVIEWER_PROFILE: &str = "# Reviewer Profile
+
+## Rules
+1. You are a READ-ONLY code reviewer. Do NOT make any code changes, commits, or pull requests.
+2. Your only job is to review the PR diff and output a structured verdict.
+3. Do not modify any files. Do not run `git commit`, `git push`, or `gh pr create`.
+4. Review the diff completely before outputting your verdict.
+
+## Review Focus
+Evaluate the changes on these dimensions:
+- **Correctness**: Does the code do what it claims? Are there logic errors or off-by-one errors?
+- **Safety**: Are there security vulnerabilities, panics, or unsafe operations introduced?
+- **API Consistency**: Does the change follow existing patterns and conventions in the codebase?
+- **Test Coverage**: Are there tests for new behavior? Do tests cover edge cases?
+- **Backward Compatibility**: Does the change break existing interfaces, serialization formats, or behavior?
+
+## Verdict Format
+Output EXACTLY one of these as your final message (with no surrounding text on those lines):
+
+If the PR looks good:
+```
+REVIEW_VERDICT: APPROVED
+```
+
+If changes are needed:
+```
+REVIEW_VERDICT: CHANGES_REQUESTED
+- [file:line] description of issue
+- [file:line] description of issue
+```
+";
+
 /// Load profile by slug from `.swarm/profiles/`. Falls back to embedded default.
 pub fn load_profile(work_dir: &Path, slug: &str) -> String {
     let profiles_dir = work_dir.join(".swarm").join("profiles");
@@ -103,6 +136,16 @@ mod tests {
 
         let slugs = list_profiles(tmp.path());
         assert_eq!(slugs, vec!["default", "relaxed", "strict"]);
+    }
+
+    #[test]
+    fn reviewer_profile_contains_key_instructions() {
+        assert!(REVIEWER_PROFILE.contains("READ-ONLY"));
+        assert!(REVIEWER_PROFILE.contains("Do NOT make any code changes"));
+        assert!(REVIEWER_PROFILE.contains("REVIEW_VERDICT: APPROVED"));
+        assert!(REVIEWER_PROFILE.contains("REVIEW_VERDICT: CHANGES_REQUESTED"));
+        assert!(REVIEWER_PROFILE.contains("Correctness"));
+        assert!(REVIEWER_PROFILE.contains("Safety"));
     }
 
     #[test]

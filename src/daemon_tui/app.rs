@@ -878,6 +878,8 @@ mod tests {
             restart_count: 0,
             created_at: None,
             agent_card: None,
+            role: None,
+            review_verdict: None,
         }]);
         assert_eq!(app.selected, 0);
     }
@@ -900,6 +902,8 @@ mod tests {
                 restart_count: 0,
                 created_at: None,
                 agent_card: None,
+                role: None,
+                review_verdict: None,
             })
             .collect();
         app.update_worker_list(workers);
@@ -1116,6 +1120,8 @@ mod tests {
             restart_count: 0,
             created_at: None,
             agent_card: None,
+            role: None,
+            review_verdict: None,
         };
         let detail = PrDetailInfo::from_worker(&w).unwrap();
         assert_eq!(detail.number, 42);
@@ -1140,6 +1146,8 @@ mod tests {
             restart_count: 0,
             created_at: None,
             agent_card: None,
+            role: None,
+            review_verdict: None,
         };
         assert!(PrDetailInfo::from_worker(&w).is_none());
     }
@@ -1160,6 +1168,8 @@ mod tests {
             restart_count: 0,
             created_at: None,
             agent_card: None,
+            role: None,
+            review_verdict: None,
         };
         let detail = PrDetailInfo::from_worker(&w).unwrap();
         assert_eq!(detail.number, 99);
@@ -1184,6 +1194,8 @@ mod tests {
             restart_count: 0,
             created_at: None,
             agent_card: None,
+            role: None,
+            review_verdict: None,
         }]);
         assert_eq!(app.workers[0].phase, WorkerPhase::Running);
 
@@ -1330,6 +1342,8 @@ mod tests {
                         format!("User({})", &text[..text.len().min(20)]),
                     ConversationEntry::Status { text } =>
                         format!("Status({})", &text[..text.len().min(20)]),
+                    ConversationEntry::Question { text, .. } =>
+                        format!("Question({})", &text[..text.len().min(20)]),
                 })
                 .collect::<Vec<_>>()
         );

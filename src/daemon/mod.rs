@@ -74,6 +74,15 @@ struct ManagedWorker {
     message_tx: Option<mpsc::UnboundedSender<String>>,
     /// Cached A2A Agent Card, built at creation time.
     agent_card: a2a_types::AgentCard,
+    /// Worker role: "worker" or "reviewer".
+    role: Option<String>,
+    /// PR number being reviewed (when role = "reviewer").
+    review_pr: Option<u64>,
+    /// Accumulated text output from the agent (used to parse review verdict).
+    /// Not persisted to state.json — reconstructed from event log on restart.
+    accumulated_text: String,
+    /// Parsed review verdict (populated when reviewer worker produces output).
+    review_verdict: Option<crate::core::state::ReviewVerdict>,
 }
 
 impl ManagedWorker {
@@ -92,6 +101,8 @@ impl ManagedWorker {
             restart_count: self.restart_count,
             created_at: Some(self.created_at),
             agent_card: Some(self.agent_card.clone()),
+            role: self.role.clone(),
+            review_verdict: self.review_verdict.clone(),
         }
     }
 
@@ -127,6 +138,9 @@ impl ManagedWorker {
             agent_pid: None,
             session_id: self.session_id.clone(),
             restart_count: Some(self.restart_count),
+            role: self.role.clone(),
+            review_pr: self.review_pr,
+            review_verdict: self.review_verdict.clone(),
         }
     }
 }
@@ -255,6 +269,11 @@ async fn register_workspace(
         let default_profile = crate::core::profile::load_profile(&canonical, "default");
         for wt in &existing_state.worktrees {
             if wt.phase.is_active() {
+                let profile_for_card = if wt.role.as_deref() == Some("reviewer") {
+                    crate::core::profile::REVIEWER_PROFILE.to_string()
+                } else {
+                    default_profile.clone()
+                };
                 workers.insert(
                     wt.id.clone(),
                     ManagedWorker {
@@ -274,8 +293,12 @@ async fn register_workspace(
                             &wt.id,
                             &git::repo_name(&wt.repo_path),
                             wt.agent_kind.label(),
-                            &default_profile,
+                            &profile_for_card,
                         ),
+                        role: wt.role.clone(),
+                        review_pr: wt.review_pr,
+                        accumulated_text: String::new(),
+                        review_verdict: wt.review_verdict.clone(),
                     },
                 );
             }
@@ -385,6 +408,11 @@ async fn run_daemon(
                     let default_profile = crate::core::profile::load_profile(&canonical, "default");
                     for wt in &existing_state.worktrees {
                         if wt.phase.is_active() {
+                            let profile_for_card = if wt.role.as_deref() == Some("reviewer") {
+                                crate::core::profile::REVIEWER_PROFILE.to_string()
+                            } else {
+                                default_profile.clone()
+                            };
                             workers.insert(
                                 wt.id.clone(),
                                 ManagedWorker {
@@ -404,8 +432,12 @@ async fn run_daemon(
                                         &wt.id,
                                         &git::repo_name(&wt.repo_path),
                                         wt.agent_kind.label(),
-                                        &default_profile,
+                                        &profile_for_card,
                                     ),
+                                    role: wt.role.clone(),
+                                    review_pr: wt.review_pr,
+                                    accumulated_text: String::new(),
+                                    review_verdict: wt.review_verdict.clone(),
                                 },
                             );
                         }
@@ -536,8 +568,27 @@ async fn run_daemon(
                             }
                         }
                     }
-                    SupervisorEvent::AgentEvent { .. } => {
-                        // Events are already broadcast via the event_tx channel
+                    SupervisorEvent::AgentEvent { worktree_id, event } => {
+                        // Accumulate text output for reviewer workers so we can
+                        // parse the review verdict when the agent finishes.
+                        if let protocol::AgentEventWire::TextDelta { ref text } = event {
+                            for ws in workspaces.values_mut() {
+                                if let Some(worker) = ws.workers.get_mut(&worktree_id) {
+                                    if worker.role.as_deref() == Some("reviewer") {
+                                        worker.accumulated_text.push_str(text);
+                                        if let Some(verdict) =
+                                            crate::core::state::parse_review_verdict(
+                                                &worker.accumulated_text,
+                                            )
+                                        {
+                                            worker.review_verdict = Some(verdict);
+                                            state_dirty = true;
+                                        }
+                                    }
+                                    break;
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -800,6 +851,105 @@ fn spawn_worker_agent(
     msg_tx
 }
 
+// ── Reviewer worktree setup ──────────────────────────────
+
+/// Fetch the PR branch and check it out inside the reviewer's worktree.
+///
+/// After `git worktree add` creates the worktree on a temp branch, we switch
+/// to the actual PR branch so the agent can review the real diff.
+/// Errors are logged but not fatal — the reviewer can still run on the temp branch.
+fn setup_reviewer_worktree(repo_path: &Path, worktree_path: &Path, pr_number: u64) {
+    // Get the PR's head branch name via gh.
+    let gh_output = std::process::Command::new("gh")
+        .args([
+            "pr",
+            "view",
+            &pr_number.to_string(),
+            "--json",
+            "headRefName",
+            "-q",
+            ".headRefName",
+        ])
+        .current_dir(repo_path)
+        .output();
+
+    let pr_branch = match gh_output {
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).trim().to_string(),
+        Ok(out) => {
+            tracing::warn!(
+                pr = pr_number,
+                stderr = %String::from_utf8_lossy(&out.stderr),
+                "gh pr view failed — reviewer will run on temp branch"
+            );
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(
+                pr = pr_number,
+                error = %e,
+                "Failed to run gh pr view — reviewer will run on temp branch"
+            );
+            return;
+        }
+    };
+
+    if pr_branch.is_empty() {
+        tracing::warn!(
+            pr = pr_number,
+            "Got empty branch name from gh pr view — reviewer will run on temp branch"
+        );
+        return;
+    }
+
+    tracing::info!(pr = pr_number, branch = %pr_branch, "Setting up reviewer worktree for PR branch");
+
+    // Fetch the specific branch from origin.
+    let fetch_status = std::process::Command::new("git")
+        .args(["fetch", "origin", &pr_branch])
+        .current_dir(repo_path)
+        .status();
+
+    if let Err(e) = fetch_status {
+        tracing::warn!(pr = pr_number, error = %e, "git fetch failed for PR branch");
+    }
+
+    // Checkout the PR branch inside the worktree, force-resetting if it exists locally.
+    let checkout_status = std::process::Command::new("git")
+        .args([
+            "checkout",
+            "-B",
+            &pr_branch,
+            &format!("origin/{}", pr_branch),
+        ])
+        .current_dir(worktree_path)
+        .status();
+
+    match checkout_status {
+        Ok(s) if s.success() => {
+            tracing::info!(
+                pr = pr_number,
+                branch = %pr_branch,
+                "Checked out PR branch in reviewer worktree"
+            );
+        }
+        Ok(s) => {
+            tracing::warn!(
+                pr = pr_number,
+                branch = %pr_branch,
+                exit_code = ?s.code(),
+                "git checkout of PR branch failed — reviewer will run on temp branch"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                pr = pr_number,
+                error = %e,
+                "Failed to run git checkout — reviewer will run on temp branch"
+            );
+        }
+    }
+}
+
 // ── Request handling ─────────────────────────────────────
 
 /// Handle a daemon request.
@@ -884,6 +1034,9 @@ async fn handle_request(
             workspace,
             profile,
             task_dir,
+            role,
+            review_pr,
+            base_branch,
         } => {
             // Check prerequisites (claude CLI required, gh optional)
             if let Err(msg) = crate::core::prerequisites::check_prerequisites() {
@@ -982,13 +1135,39 @@ async fn handle_request(
                 );
             }
 
+            let is_reviewer = role.as_deref() == Some("reviewer");
+
+            // For reviewer workers: fetch and checkout the PR branch in the worktree.
+            if is_reviewer && let Some(pr_num) = review_pr {
+                setup_reviewer_worktree(&repo_path, &worktree_path, pr_num);
+            }
+
             // Load profile and build an effective prompt (profile + user prompt) for
             // the agent. The raw `prompt` is kept for display/persistence in WorkerState;
             // only the agent spawn call receives the effective prompt.
-            let profile_slug = profile.as_deref().unwrap_or("default");
-            let profile_content = crate::core::profile::load_profile(&work_dir, profile_slug);
-            let effective_prompt =
-                crate::core::profile::build_effective_prompt(&profile_content, &prompt);
+            let profile_content = if is_reviewer {
+                crate::core::profile::REVIEWER_PROFILE.to_string()
+            } else {
+                let profile_slug = profile.as_deref().unwrap_or("default");
+                crate::core::profile::load_profile(&work_dir, profile_slug)
+            };
+
+            let effective_prompt = if is_reviewer {
+                let base = base_branch.as_deref().unwrap_or("main");
+                let reviewer_task = match review_pr {
+                    Some(n) => format!(
+                        "Review the diff for PR #{}. Run `git diff {}...HEAD` to see changes.",
+                        n, base
+                    ),
+                    None => format!(
+                        "Review the diff for this PR. Run `git diff {}...HEAD` to see changes.",
+                        base
+                    ),
+                };
+                crate::core::profile::build_effective_prompt(&profile_content, &reviewer_task)
+            } else {
+                crate::core::profile::build_effective_prompt(&profile_content, &prompt)
+            };
 
             // Seed .task/ directory if artifacts provided
             if let Some(ref payload) = task_dir {
@@ -1025,6 +1204,10 @@ async fn handle_request(
                     kind.label(),
                     &profile_content,
                 ),
+                role: role.clone(),
+                review_pr,
+                accumulated_text: String::new(),
+                review_verdict: None,
             };
 
             ws.workers.insert(worktree_id.clone(), worker);
@@ -1546,6 +1729,10 @@ mod tests {
             created_at: Local::now(),
             message_tx: None,
             agent_card: build_agent_card(id, "repo", "claude", "## Testing\nRun tests."),
+            role: None,
+            review_pr: None,
+            accumulated_text: String::new(),
+            review_verdict: None,
         }
     }
 
