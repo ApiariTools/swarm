@@ -4,6 +4,7 @@
 1. You are working in a git worktree on a `swarm/*` branch. Never commit to main.
 2. Only modify files within this repository.
 3. Do not run `cargo install` or modify system state.
+4. When done, commit and push your branch. Do NOT open a PR (`gh pr create`). Output `BRANCH_READY: <branch-name>` instead.
 
 ## Architecture
 - `src/main.rs` — CLI entry point (clap)

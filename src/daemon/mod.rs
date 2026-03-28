@@ -83,6 +83,8 @@ struct ManagedWorker {
     accumulated_text: String,
     /// Parsed review verdict (populated when reviewer worker produces output).
     review_verdict: Option<crate::core::state::ReviewVerdict>,
+    /// Branch name signalled ready by the worker (via `BRANCH_READY: <name>`).
+    ready_branch: Option<String>,
 }
 
 impl ManagedWorker {
@@ -141,6 +143,7 @@ impl ManagedWorker {
             role: self.role.clone(),
             review_pr: self.review_pr,
             review_verdict: self.review_verdict.clone(),
+            ready_branch: self.ready_branch.clone(),
         }
     }
 }
@@ -299,6 +302,7 @@ async fn register_workspace(
                         review_pr: wt.review_pr,
                         accumulated_text: String::new(),
                         review_verdict: wt.review_verdict.clone(),
+                        ready_branch: wt.ready_branch.clone(),
                     },
                 );
             }
@@ -438,6 +442,7 @@ async fn run_daemon(
                                     review_pr: wt.review_pr,
                                     accumulated_text: String::new(),
                                     review_verdict: wt.review_verdict.clone(),
+                                    ready_branch: wt.ready_branch.clone(),
                                 },
                             );
                         }
@@ -571,17 +576,27 @@ async fn run_daemon(
                     SupervisorEvent::AgentEvent { worktree_id, event } => {
                         // Accumulate text output for reviewer workers so we can
                         // parse the review verdict when the agent finishes.
+                        // Also scan all workers for BRANCH_READY signals.
                         if let protocol::AgentEventWire::TextDelta { ref text } = event {
                             for ws in workspaces.values_mut() {
                                 if let Some(worker) = ws.workers.get_mut(&worktree_id) {
+                                    worker.accumulated_text.push_str(text);
                                     if worker.role.as_deref() == Some("reviewer") {
-                                        worker.accumulated_text.push_str(text);
                                         if let Some(verdict) =
                                             crate::core::state::parse_review_verdict(
                                                 &worker.accumulated_text,
                                             )
                                         {
                                             worker.review_verdict = Some(verdict);
+                                            state_dirty = true;
+                                        }
+                                    } else if worker.ready_branch.is_none() {
+                                        if let Some(branch) =
+                                            crate::core::state::parse_branch_ready(
+                                                &worker.accumulated_text,
+                                            )
+                                        {
+                                            worker.ready_branch = Some(branch);
                                             state_dirty = true;
                                         }
                                     }
@@ -1208,6 +1223,7 @@ async fn handle_request(
                 review_pr,
                 accumulated_text: String::new(),
                 review_verdict: None,
+                ready_branch: None,
             };
 
             ws.workers.insert(worktree_id.clone(), worker);
@@ -1733,6 +1749,7 @@ mod tests {
             review_pr: None,
             accumulated_text: String::new(),
             review_verdict: None,
+            ready_branch: None,
         }
     }
 

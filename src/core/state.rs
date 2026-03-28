@@ -55,6 +55,22 @@ pub fn parse_review_verdict(output: &str) -> Option<ReviewVerdict> {
     }
 }
 
+/// Parse a `BRANCH_READY: <branch-name>` line from worker text output.
+///
+/// Returns the branch name if found, otherwise `None`.
+pub fn parse_branch_ready(output: &str) -> Option<String> {
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if let Some(branch) = trimmed.strip_prefix("BRANCH_READY:") {
+            let branch = branch.trim();
+            if !branch.is_empty() {
+                return Some(branch.to_string());
+            }
+        }
+    }
+    None
+}
+
 /// PR info fetched from `gh`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PrInfo {
@@ -174,6 +190,9 @@ pub struct WorktreeState {
     /// Parsed review verdict after the reviewer worker completes.
     #[serde(default)]
     pub review_verdict: Option<ReviewVerdict>,
+    /// Branch name signalled ready by the worker (via `BRANCH_READY: <name>`).
+    #[serde(default)]
+    pub ready_branch: Option<String>,
 }
 
 fn default_status() -> String {
@@ -244,6 +263,7 @@ mod tests {
             role: None,
             review_pr: None,
             review_verdict: None,
+            ready_branch: None,
         }
     }
 
@@ -378,6 +398,36 @@ mod tests {
     // ── ReviewVerdict tests ────────────────────────────────
 
     #[test]
+    fn parse_branch_ready_basic() {
+        let output = "All done!\nBRANCH_READY: swarm/my-feature-abc1";
+        assert_eq!(
+            parse_branch_ready(output),
+            Some("swarm/my-feature-abc1".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_branch_ready_not_present() {
+        let output = "Work complete.";
+        assert!(parse_branch_ready(output).is_none());
+    }
+
+    #[test]
+    fn parse_branch_ready_empty_branch() {
+        let output = "BRANCH_READY: ";
+        assert!(parse_branch_ready(output).is_none());
+    }
+
+    #[test]
+    fn parse_branch_ready_trims_whitespace() {
+        let output = "  BRANCH_READY:   swarm/foo-bar  ";
+        assert_eq!(
+            parse_branch_ready(output),
+            Some("swarm/foo-bar".to_string())
+        );
+    }
+
+    #[test]
     fn parse_verdict_approved() {
         let output = "The code looks great!\nREVIEW_VERDICT: APPROVED";
         let v = parse_review_verdict(output).unwrap();
@@ -479,6 +529,7 @@ mod tests {
         assert!(ws.role.is_none());
         assert!(ws.review_pr.is_none());
         assert!(ws.review_verdict.is_none());
+        assert!(ws.ready_branch.is_none());
     }
 
     #[test]
