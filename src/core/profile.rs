@@ -3,14 +3,18 @@ use std::path::Path;
 /// Embedded default profile (shipped with the binary).
 pub const DEFAULT_PROFILE: &str = include_str!("../../profiles/default.md");
 
-/// Embedded reviewer profile for read-only PR review workers.
+/// Embedded reviewer profile for read-only branch review workers.
 pub const REVIEWER_PROFILE: &str = "# Reviewer Profile
 
 ## Rules
 1. You are a READ-ONLY code reviewer. Do NOT make any code changes, commits, or pull requests.
-2. Your only job is to review the PR diff and output a structured verdict.
+2. Your only job is to review the branch diff and output a structured verdict.
 3. Do not modify any files. Do not run `git commit`, `git push`, or `gh pr create`.
 4. Review the diff completely before outputting your verdict.
+
+## How to Review
+You will be given a branch name. Run `git diff main...<branch-name>` to see the changes.
+Review the diff output and evaluate the changes before producing your verdict.
 
 ## Review Focus
 Evaluate the changes on these dimensions:
@@ -23,7 +27,7 @@ Evaluate the changes on these dimensions:
 ## Verdict Format
 Output EXACTLY one of these as your final message (with no surrounding text on those lines):
 
-If the PR looks good:
+If the branch looks good:
 ```
 REVIEW_VERDICT: APPROVED
 ```
