@@ -9,9 +9,11 @@
 - `src/main.rs` — CLI entry point (clap)
 - `src/daemon/` — daemon event loop, worker lifecycle, protocol
 - `src/daemon_tui/` — TUI (worker list, conversation panel)
+- `src/agent_tui/` — agent-facing TUI (agent interaction, workflows)
+- `src/tui/` — shared TUI components (onboarding, theming, common widgets)
 - `src/core/` — git operations, state management, profiles, shell utils
 - `src/core/state.rs` — WorktreeState, WorkerPhase, ReviewVerdict
 - `src/core/profile.rs` — worker profiles (default, reviewer)
 
-## Pre-Commit Checks
+## Pre-Commit Check
 **Run `cargo fmt -p apiari-swarm` before every commit.** CI runs `cargo fmt -p apiari-swarm --check` and will reject unformatted code. Do not skip this step.
