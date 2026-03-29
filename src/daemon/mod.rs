@@ -1,3 +1,4 @@
+pub mod a2a_server;
 pub mod agent_supervisor;
 pub mod ipc_client;
 pub mod managed_agent;
@@ -373,6 +374,14 @@ async fn run_daemon(
     let (mut request_rx, _socket_handle) =
         socket_server::start(event_tx.clone(), tcp_bind, auth_token)?;
 
+    // HTTP request channel — A2A HTTP handlers route requests here, and the
+    // daemon select! loop processes them alongside Unix socket requests.
+    let (http_req_tx, mut http_req_rx) =
+        mpsc::unbounded_channel::<(DaemonRequest, mpsc::UnboundedSender<DaemonResponse>)>();
+
+    // Start the A2A HTTP server (port 0 = OS-assigned).
+    let (_a2a_handle, a2a_port) = a2a_server::start(0, http_req_tx, event_tx.clone()).await?;
+
     // Multi-workspace state
     let mut workspaces: HashMap<PathBuf, WorkspaceState> = HashMap::new();
 
@@ -539,6 +548,21 @@ async fn run_daemon(
                     &supervisor_tx,
                     &mut state_dirty,
                     &mut triggered_pr_poll_ids,
+                    a2a_port,
+                ).await;
+            }
+
+            // HTTP requests from the A2A HTTP server
+            Some((request, resp_tx)) = http_req_rx.recv() => {
+                handle_request(
+                    request,
+                    &resp_tx,
+                    &mut workspaces,
+                    &event_tx,
+                    &supervisor_tx,
+                    &mut state_dirty,
+                    &mut triggered_pr_poll_ids,
+                    a2a_port,
                 ).await;
             }
 
@@ -726,6 +750,7 @@ async fn run_daemon(
                             &supervisor_tx,
                             &mut state_dirty,
                             &mut triggered_pr_poll_ids,
+                            a2a_port,
                         ).await;
                     }
                 }
@@ -1048,6 +1073,7 @@ fn setup_reviewer_worktree(repo_path: &Path, worktree_path: &Path, pr_number: u6
 // ── Request handling ─────────────────────────────────────
 
 /// Handle a daemon request.
+#[allow(clippy::too_many_arguments)]
 async fn handle_request(
     request: DaemonRequest,
     resp_tx: &mpsc::UnboundedSender<DaemonResponse>,
@@ -1056,6 +1082,7 @@ async fn handle_request(
     supervisor_tx: &mpsc::UnboundedSender<SupervisorEvent>,
     state_dirty: &mut bool,
     triggered_pr_poll_ids: &mut Vec<String>,
+    a2a_port: u16,
 ) {
     match request {
         DaemonRequest::Ping => {
@@ -1293,12 +1320,16 @@ async fn handle_request(
                 pr: None,
                 created_at: Local::now(),
                 message_tx: None,
-                agent_card: build_agent_card(
-                    &worktree_id,
-                    &repo_name,
-                    kind.label(),
-                    &profile_content,
-                ),
+                agent_card: {
+                    let mut card =
+                        build_agent_card(&worktree_id, &repo_name, kind.label(), &profile_content);
+                    if a2a_port != 0 {
+                        let encoded_id =
+                            crate::core::agent_card::url_encode_worker_id(&worktree_id);
+                        card.url = format!("http://localhost:{a2a_port}/a2a/workers/{encoded_id}");
+                    }
+                    card
+                },
                 role: role.clone(),
                 review_pr,
                 accumulated_text: String::new(),
@@ -1895,6 +1926,7 @@ mod tests {
             &supervisor_tx,
             &mut state_dirty,
             &mut triggered,
+            0,
         )
         .await;
 
@@ -1916,6 +1948,7 @@ mod tests {
             &supervisor_tx,
             &mut state_dirty,
             &mut triggered,
+            0,
         )
         .await;
 
@@ -1950,6 +1983,7 @@ mod tests {
             &supervisor_tx,
             &mut state_dirty,
             &mut triggered,
+            0,
         )
         .await;
 
@@ -1970,6 +2004,7 @@ mod tests {
             &supervisor_tx,
             &mut state_dirty,
             &mut triggered,
+            0,
         )
         .await;
 
@@ -1997,6 +2032,7 @@ mod tests {
             &supervisor_tx,
             &mut state_dirty,
             &mut triggered,
+            0,
         )
         .await;
 
@@ -2025,6 +2061,7 @@ mod tests {
             &supervisor_tx,
             &mut state_dirty,
             &mut triggered,
+            0,
         )
         .await;
 
@@ -2055,6 +2092,7 @@ mod tests {
             &supervisor_tx,
             &mut state_dirty,
             &mut triggered,
+            0,
         )
         .await;
 
@@ -2086,6 +2124,7 @@ mod tests {
             &supervisor_tx,
             &mut state_dirty,
             &mut triggered,
+            0,
         )
         .await;
 
@@ -2125,6 +2164,7 @@ mod tests {
             &supervisor_tx,
             &mut state_dirty,
             &mut triggered,
+            0,
         )
         .await;
 
@@ -2154,6 +2194,7 @@ mod tests {
             &supervisor_tx,
             &mut state_dirty,
             &mut triggered,
+            0,
         )
         .await;
 

@@ -8,14 +8,14 @@ use std::fmt::Write;
 /// `agent`     — agent type string ("claude", "codex", "gemini")
 /// `profile`   — raw markdown profile content (used to derive skills)
 ///
-/// The URL is a placeholder — real A2A endpoints will be wired in a later phase.
-/// Callers that need a routable URL should override the `url` field.
+/// The URL defaults to `http://localhost:0/a2a/workers/<id>` (port 0 = not yet
+/// allocated). The daemon overrides `card.url` with the real A2A HTTP port
+/// after the server binds (see `handle_request` / `CreateWorker`).
 pub fn build_agent_card(worker_id: &str, repo: &str, agent: &str, profile: &str) -> AgentCard {
     let skills = parse_skills_from_profile(profile);
 
-    // Placeholder URL — swarm workers don't yet expose A2A HTTP endpoints.
-    // Port 0 signals "not allocated"; callers should replace this once
-    // transport is wired up.
+    // Default URL uses port 0 as a placeholder. The daemon overrides this
+    // with the real A2A HTTP port (see `handle_request` / `CreateWorker`).
     let encoded_id = url_encode_path_segment(worker_id);
     AgentCard::new(
         worker_id,
@@ -67,6 +67,11 @@ fn parse_skills_from_profile(profile: &str) -> Vec<AgentSkill> {
     }
 
     skills
+}
+
+/// Percent-encode a worker ID for use as a URL path segment (RFC 3986 unreserved characters).
+pub fn url_encode_worker_id(s: &str) -> String {
+    url_encode_path_segment(s)
 }
 
 /// Percent-encode a string for use as a URL path segment (RFC 3986 unreserved characters).
