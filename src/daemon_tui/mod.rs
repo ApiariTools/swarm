@@ -1232,6 +1232,9 @@ fn handle_daemon_response(app: &mut DaemonTuiApp, resp: DaemonResponse) {
         DaemonResponse::Workspaces { .. } => {
             // Not used by the TUI directly
         }
+        DaemonResponse::A2aTaskUpdate { .. } => {
+            // A2A task updates are not consumed by the daemon TUI
+        }
     }
 }
 

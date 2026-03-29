@@ -1,7 +1,7 @@
 use crate::core::ipc::InboxMessage;
 use crate::core::state::WorkerPhase;
 use a2a_types::AgentCard;
-use chrono::{DateTime, Local};
+use chrono::{DateTime, Local, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::PathBuf;
@@ -124,6 +124,55 @@ pub enum DaemonResponse {
     StateChanged {
         worktree_id: String,
         phase: WorkerPhase,
+    },
+    /// A2A task status update event emitted on meaningful worker phase transitions.
+    A2aTaskUpdate {
+        worktree_id: String,
+        task_state: a2a_types::TaskState,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<A2aTaskMessage>,
+        timestamp: DateTime<Utc>,
+    },
+}
+
+/// Structured message attached to an A2A task update.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct A2aTaskMessage {
+    pub role: String,
+    pub parts: Vec<A2aMessagePart>,
+}
+
+impl A2aTaskMessage {
+    /// Create a message with a single text part (role = "agent").
+    pub fn text(text: impl Into<String>) -> Self {
+        Self {
+            role: "agent".to_string(),
+            parts: vec![A2aMessagePart::Text { text: text.into() }],
+        }
+    }
+
+    /// Create a message with a single data part (role = "agent").
+    pub fn data(mime_type: &str, data: serde_json::Value) -> Self {
+        Self {
+            role: "agent".to_string(),
+            parts: vec![A2aMessagePart::Data {
+                mime_type: mime_type.to_string(),
+                data,
+            }],
+        }
+    }
+}
+
+/// A single part of an A2A task message.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum A2aMessagePart {
+    Text {
+        text: String,
+    },
+    Data {
+        mime_type: String,
+        data: serde_json::Value,
     },
 }
 
@@ -706,6 +755,112 @@ mod tests {
                 assert!(workspace.is_none()); // defaults to None
             }
             _ => panic!("expected CreateWorker"),
+        }
+    }
+
+    #[test]
+    fn a2a_task_update_round_trips() {
+        let resp = DaemonResponse::A2aTaskUpdate {
+            worktree_id: "worker-1".to_string(),
+            task_state: a2a_types::TaskState::Working,
+            message: Some(A2aTaskMessage::text("Task started")),
+            timestamp: chrono::Utc::now(),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("\"kind\":\"a2a_task_update\""));
+        assert!(json.contains("\"worktree_id\":\"worker-1\""));
+        let restored: DaemonResponse = serde_json::from_str(&json).unwrap();
+        match restored {
+            DaemonResponse::A2aTaskUpdate {
+                worktree_id,
+                task_state,
+                message,
+                ..
+            } => {
+                assert_eq!(worktree_id, "worker-1");
+                assert_eq!(task_state, a2a_types::TaskState::Working);
+                let msg = message.unwrap();
+                assert_eq!(msg.role, "agent");
+                assert_eq!(msg.parts.len(), 1);
+                match &msg.parts[0] {
+                    A2aMessagePart::Text { text } => assert_eq!(text, "Task started"),
+                    _ => panic!("expected Text part"),
+                }
+            }
+            _ => panic!("expected A2aTaskUpdate"),
+        }
+    }
+
+    #[test]
+    fn a2a_task_message_text_helper() {
+        let msg = A2aTaskMessage::text("hello");
+        assert_eq!(msg.role, "agent");
+        assert_eq!(msg.parts.len(), 1);
+        let json = serde_json::to_string(&msg.parts[0]).unwrap();
+        assert!(json.contains("\"type\":\"text\""));
+        assert!(json.contains("\"text\":\"hello\""));
+    }
+
+    #[test]
+    fn a2a_task_message_data_helper() {
+        let data = serde_json::json!({"branch": "swarm/fix-bug"});
+        let msg = A2aTaskMessage::data("application/json", data.clone());
+        assert_eq!(msg.role, "agent");
+        assert_eq!(msg.parts.len(), 1);
+        let json = serde_json::to_string(&msg.parts[0]).unwrap();
+        assert!(json.contains("\"type\":\"data\""));
+        assert!(json.contains("\"mime_type\":\"application/json\""));
+        assert!(json.contains("swarm/fix-bug"));
+    }
+
+    #[test]
+    fn a2a_message_part_text_serializes_with_type_tag() {
+        let part = A2aMessagePart::Text {
+            text: "some output".to_string(),
+        };
+        let json = serde_json::to_string(&part).unwrap();
+        assert!(json.contains("\"type\":\"text\""));
+        assert!(json.contains("\"text\":\"some output\""));
+        let restored: A2aMessagePart = serde_json::from_str(&json).unwrap();
+        match restored {
+            A2aMessagePart::Text { text } => assert_eq!(text, "some output"),
+            _ => panic!("expected Text"),
+        }
+    }
+
+    #[test]
+    fn a2a_message_part_data_serializes_with_type_tag() {
+        let part = A2aMessagePart::Data {
+            mime_type: "application/json".to_string(),
+            data: serde_json::json!({"key": "value"}),
+        };
+        let json = serde_json::to_string(&part).unwrap();
+        assert!(json.contains("\"type\":\"data\""));
+        assert!(json.contains("\"mime_type\":\"application/json\""));
+        let restored: A2aMessagePart = serde_json::from_str(&json).unwrap();
+        match restored {
+            A2aMessagePart::Data { mime_type, data } => {
+                assert_eq!(mime_type, "application/json");
+                assert_eq!(data["key"], "value");
+            }
+            _ => panic!("expected Data"),
+        }
+    }
+
+    #[test]
+    fn a2a_task_update_no_message_omits_field() {
+        let resp = DaemonResponse::A2aTaskUpdate {
+            worktree_id: "w-1".to_string(),
+            task_state: a2a_types::TaskState::Completed,
+            message: None,
+            timestamp: chrono::Utc::now(),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(!json.contains("\"message\""));
+        let restored: DaemonResponse = serde_json::from_str(&json).unwrap();
+        match restored {
+            DaemonResponse::A2aTaskUpdate { message, .. } => assert!(message.is_none()),
+            _ => panic!("expected A2aTaskUpdate"),
         }
     }
 }

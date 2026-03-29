@@ -12,7 +12,7 @@ use crate::core::{git, ipc, state};
 use agent_supervisor::SupervisorEvent;
 use chrono::Local;
 use color_eyre::Result;
-use protocol::{DaemonRequest, DaemonResponse, WorkerInfo, WorkspaceInfo};
+use protocol::{A2aTaskMessage, DaemonRequest, DaemonResponse, WorkerInfo, WorkspaceInfo};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tokio::sync::{broadcast, mpsc};
@@ -559,16 +559,52 @@ async fn run_daemon(
                                 // Emit phase change event to file
                                 let _ = ipc::emit_event(&ws.path, &ipc::SwarmEvent::PhaseChanged {
                                     worktree: worktree_id.clone(),
-                                    from: old_phase,
+                                    from: old_phase.clone(),
                                     to: phase.clone(),
                                     timestamp: Local::now(),
                                 });
 
-                                // Broadcast to socket subscribers
+                                // Broadcast StateChanged (backward compat)
                                 let _ = event_tx.send(DaemonResponse::StateChanged {
                                     worktree_id: worktree_id.clone(),
-                                    phase,
+                                    phase: phase.clone(),
                                 });
+
+                                // Emit A2aTaskUpdate on meaningful transitions
+                                let a2a_update = match &phase {
+                                    WorkerPhase::Running
+                                        if matches!(
+                                            old_phase,
+                                            WorkerPhase::Starting | WorkerPhase::Creating
+                                        ) =>
+                                    {
+                                        Some((
+                                            a2a_types::TaskState::Working,
+                                            Some(A2aTaskMessage::text("Task started")),
+                                        ))
+                                    }
+                                    WorkerPhase::Waiting => Some((
+                                        a2a_types::TaskState::InputRequired,
+                                        Some(A2aTaskMessage::text("Waiting for input")),
+                                    )),
+                                    WorkerPhase::Completed => Some((
+                                        a2a_types::TaskState::Completed,
+                                        Some(A2aTaskMessage::text("Task completed")),
+                                    )),
+                                    WorkerPhase::Failed => Some((
+                                        a2a_types::TaskState::Failed,
+                                        Some(A2aTaskMessage::text("Task failed")),
+                                    )),
+                                    _ => None,
+                                };
+                                if let Some((task_state, message)) = a2a_update {
+                                    let _ = event_tx.send(DaemonResponse::A2aTaskUpdate {
+                                        worktree_id: worktree_id.clone(),
+                                        task_state,
+                                        message,
+                                        timestamp: chrono::Utc::now(),
+                                    });
+                                }
                                 break;
                             }
                         }
@@ -582,11 +618,44 @@ async fn run_daemon(
                                 if let Some(worker) = ws.workers.get_mut(&worktree_id) {
                                     worker.accumulated_text.push_str(text);
                                     if worker.role.as_deref() == Some("reviewer") {
+                                        let had_verdict = worker.review_verdict.is_some();
                                         if let Some(verdict) =
                                             crate::core::state::parse_review_verdict(
                                                 &worker.accumulated_text,
                                             )
                                         {
+                                            // Emit A2aTaskUpdate on first parse
+                                            if !had_verdict {
+                                                let (task_state, approved) =
+                                                    if verdict.approved {
+                                                        (a2a_types::TaskState::Completed, true)
+                                                    } else {
+                                                        (
+                                                            a2a_types::TaskState::InputRequired,
+                                                            false,
+                                                        )
+                                                    };
+                                                let comments: Vec<serde_json::Value> = verdict
+                                                    .comments
+                                                    .iter()
+                                                    .map(|c| serde_json::Value::String(c.clone()))
+                                                    .collect();
+                                                let _ = event_tx.send(
+                                                    DaemonResponse::A2aTaskUpdate {
+                                                        worktree_id: worktree_id.clone(),
+                                                        task_state,
+                                                        message: Some(A2aTaskMessage::data(
+                                                            "application/json",
+                                                            serde_json::json!({
+                                                                "type": "review_verdict",
+                                                                "approved": approved,
+                                                                "comments": comments,
+                                                            }),
+                                                        )),
+                                                        timestamp: chrono::Utc::now(),
+                                                    },
+                                                );
+                                            }
                                             worker.review_verdict = Some(verdict);
                                             state_dirty = true;
                                         }
@@ -596,6 +665,18 @@ async fn run_daemon(
                                                 &worker.accumulated_text,
                                             )
                                     {
+                                        let _ = event_tx.send(DaemonResponse::A2aTaskUpdate {
+                                            worktree_id: worktree_id.clone(),
+                                            task_state: a2a_types::TaskState::Working,
+                                            message: Some(A2aTaskMessage::data(
+                                                "application/json",
+                                                serde_json::json!({
+                                                    "type": "branch_ready",
+                                                    "branch": branch.clone(),
+                                                }),
+                                            )),
+                                            timestamp: chrono::Utc::now(),
+                                        });
                                         worker.ready_branch = Some(branch);
                                         state_dirty = true;
                                     }
@@ -1680,6 +1761,19 @@ fn apply_pr_poll_results(
                         timestamp: Local::now(),
                     },
                 );
+                let _ = event_tx.send(DaemonResponse::A2aTaskUpdate {
+                    worktree_id: worker.id.clone(),
+                    task_state: a2a_types::TaskState::Working,
+                    message: Some(A2aTaskMessage::data(
+                        "application/json",
+                        serde_json::json!({
+                            "type": "pr_opened",
+                            "pr_url": result.pr.url.clone(),
+                            "pr_number": result.pr.number,
+                        }),
+                    )),
+                    timestamp: chrono::Utc::now(),
+                });
             }
 
             let is_merged = result.pr.state == "MERGED";
@@ -1710,6 +1804,12 @@ fn apply_pr_poll_results(
                 let _ = event_tx.send(DaemonResponse::StateChanged {
                     worktree_id: worker.id.clone(),
                     phase: WorkerPhase::Completed,
+                });
+                let _ = event_tx.send(DaemonResponse::A2aTaskUpdate {
+                    worktree_id: worker.id.clone(),
+                    task_state: a2a_types::TaskState::Completed,
+                    message: Some(A2aTaskMessage::text("Task completed")),
+                    timestamp: chrono::Utc::now(),
                 });
                 to_remove.push((result.workspace_path.clone(), worker.id.clone()));
             }
