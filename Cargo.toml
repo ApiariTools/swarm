@@ -39,7 +39,9 @@ crossterm = { workspace = true, optional = true }
 pulldown-cmark = "0.13"
 a2a-types = "0.1"
 async-trait = "0.1"
+axum = "0.8"
 futures = "0.3"
+tokio-stream = { version = "0.1", features = ["sync"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 tracing-appender = "0.2"
 
