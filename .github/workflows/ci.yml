@@ -59,10 +59,10 @@ jobs:
           thiserror = "2"
           tracing = "0.1"
           libc = "0.2"
-          ratatui = { version = "0.29", features = ["unstable-rendered-line-info"] }
-          crossterm = { version = "0.28", features = ["event-stream"] }
+          ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
+          crossterm = { version = "0.29", features = ["event-stream"] }
           apiari-common = "0.1.0"
-          apiari-tui = "0.2.0"
+          apiari-tui = "0.3.0"
           apiari-claude-sdk = { path = "claude-sdk" }
           apiari-codex-sdk = { path = "codex-sdk" }
           apiari-gemini-sdk = { path = "gemini-sdk" }
