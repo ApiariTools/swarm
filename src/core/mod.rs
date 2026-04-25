@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod agent_card;
+pub mod config;
 pub mod git;
 pub mod ipc;
 pub mod log;

@@ -56,6 +56,8 @@ struct WorkspaceState {
     repos: Vec<PathBuf>,
     workers: HashMap<String, ManagedWorker>,
     inbox_offset: u64,
+    /// Whether to auto-close workers when their PR is merged.
+    close_on_pr_merge: bool,
 }
 
 /// State for a managed worker within the daemon.
@@ -313,6 +315,7 @@ async fn register_workspace(
     let worker_count = workers.len();
     // Seek to end of inbox so we don't replay old messages on restart
     let inbox_pos = inbox_file_size(&canonical);
+    let config = crate::core::config::load_config(&canonical);
     workspaces.insert(
         canonical.clone(),
         WorkspaceState {
@@ -320,6 +323,7 @@ async fn register_workspace(
             repos,
             workers,
             inbox_offset: inbox_pos,
+            close_on_pr_merge: config.close_on_pr_merge,
         },
     );
 
@@ -460,11 +464,13 @@ async fn run_daemon(
                 let worker_count = workers.len();
                 let repo_count = repos.len();
                 let inbox_pos = inbox_file_size(&canonical);
+                let config = crate::core::config::load_config(&canonical);
                 let ws = WorkspaceState {
                     path: canonical.clone(),
                     repos,
                     workers,
                     inbox_offset: inbox_pos,
+                    close_on_pr_merge: config.close_on_pr_merge,
                 };
                 tracing::info!(
                     path = %canonical.display(),
@@ -1811,8 +1817,8 @@ fn apply_pr_poll_results(
             worker.pr = Some(result.pr);
             *state_dirty = true;
 
-            // Auto-close workers whose PR has been merged
-            if is_merged {
+            // Auto-close workers whose PR has been merged (if enabled for this workspace)
+            if is_merged && ws.close_on_pr_merge {
                 tracing::info!(
                     worker_id = %worker.id,
                     pr_number = worker.pr.as_ref().unwrap().number,
@@ -1909,6 +1915,7 @@ mod tests {
             repos: vec![],
             workers: ws_workers,
             inbox_offset: 0,
+            close_on_pr_merge: true,
         }
     }
 
@@ -2322,6 +2329,42 @@ mod tests {
             }
             other => panic!("expected StateChanged, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn apply_pr_poll_results_skips_close_when_disabled() {
+        let mut workspaces = HashMap::new();
+        let ws_path = PathBuf::from("/tmp/ws");
+        let mut ws = test_workspace("/tmp/ws", vec!["w-1"]);
+        ws.close_on_pr_merge = false;
+        workspaces.insert(ws_path.clone(), ws);
+
+        let results = vec![PrPollResult {
+            worker_id: "w-1".to_string(),
+            workspace_path: ws_path.clone(),
+            pr: PrInfo {
+                number: 42,
+                title: "merged pr".to_string(),
+                state: "MERGED".to_string(),
+                url: "https://github.com/test/repo/pull/42".to_string(),
+            },
+            is_new: false,
+        }];
+
+        let mut state_dirty = false;
+        let (event_tx, _event_rx) = broadcast::channel(16);
+        apply_pr_poll_results(results, &mut workspaces, &mut state_dirty, &event_tx);
+
+        // Worker should still exist — not auto-closed
+        let worker = workspaces
+            .get(&ws_path)
+            .unwrap()
+            .workers
+            .get("w-1")
+            .expect("worker should still exist");
+        assert_eq!(worker.pr.as_ref().unwrap().state, "MERGED");
+        assert_eq!(worker.phase, WorkerPhase::Running);
+        assert!(state_dirty);
     }
 
     #[test]
