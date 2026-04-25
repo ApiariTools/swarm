@@ -137,6 +137,14 @@ enum DaemonAction {
 #[tokio::main]
 async fn main() -> Result<()> {
     color_eyre::install()?;
+
+    // Strip CLAUDECODE-injected GH_TOKEN — it's often a sandbox token that
+    // overrides the user's real `gh auth login` credentials and causes 401s.
+    if std::env::var("CLAUDECODE").is_ok() {
+        unsafe { std::env::remove_var("GH_TOKEN"); }
+        unsafe { std::env::remove_var("GITHUB_TOKEN"); }
+    }
+
     let cli = Cli::parse();
 
     // Daemon subcommands initialize their own file logger inside run_daemon().

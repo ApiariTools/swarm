@@ -64,13 +64,13 @@ pub async fn start(
     let app = Router::new()
         .route("/.well-known/agent.json", get(agent_card_handler))
         .route("/a2a/workers", get(list_workers_handler))
-        .route("/a2a/workers/:worker_id", get(get_worker_handler))
+        .route("/a2a/workers/{worker_id}", get(get_worker_handler))
         .route(
-            "/a2a/workers/:worker_id/tasks/send",
+            "/a2a/workers/{worker_id}/tasks/send",
             post(send_message_handler),
         )
         .route(
-            "/a2a/workers/:worker_id/tasks/events",
+            "/a2a/workers/{worker_id}/tasks/events",
             get(worker_events_handler),
         )
         .route("/a2a/events", get(all_events_handler))
@@ -136,7 +136,7 @@ async fn list_workers_handler(
     }
 }
 
-// ── GET /a2a/workers/:worker_id ──────────────────────────
+// ── GET /a2a/workers/{worker_id} ──────────────────────────
 
 #[derive(serde::Serialize)]
 struct WorkerDetail {
@@ -180,7 +180,7 @@ fn phase_to_task_state(phase: &crate::core::state::WorkerPhase) -> a2a_types::Ta
     }
 }
 
-// ── POST /a2a/workers/:worker_id/tasks/send ──────────────
+// ── POST /a2a/workers/{worker_id}/tasks/send ──────────────
 
 /// Body for the send endpoint.
 /// Accepts `{"message": {"role": "user", "parts": [{"type": "text", "text": "..."}]}}`.
@@ -244,7 +244,7 @@ async fn send_message_handler(
     }
 }
 
-// ── GET /a2a/workers/:worker_id/tasks/events (SSE) ───────
+// ── GET /a2a/workers/{worker_id}/tasks/events (SSE) ───────
 
 async fn worker_events_handler(
     Path(worker_id): Path<String>,

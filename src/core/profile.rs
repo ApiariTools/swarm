@@ -38,6 +38,9 @@ REVIEW_VERDICT: CHANGES_REQUESTED
 - [file:line] description of issue
 - [file:line] description of issue
 ```
+
+## Output
+Write your full review (verdict + reasoning) to `.swarm/output.md` in the worktree root. This is read by the coordinator. Keep it concise.
 ";
 
 /// Load profile by slug from `.swarm/profiles/`. Falls back to embedded default.

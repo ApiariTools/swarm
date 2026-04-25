@@ -23,6 +23,14 @@ If a `.task/` directory exists, read ALL files before writing any code:
 
 **Do NOT commit `.task/` to git.** These are pipeline artifacts, not source code.
 
+## Output
+When you finish your task, write a summary of what you did and the outcome to `.swarm/output.md` in the worktree root. This file is read by the coordinator to understand your results. Keep it concise — a few paragraphs max. Include:
+- What you did (briefly)
+- The outcome/verdict
+- Any issues or follow-ups needed
+
+**Do NOT commit `.swarm/` to git.**
+
 ## Git Workflow
 - Stay on your `swarm/*` branch
 - NEVER push to or merge into `main`

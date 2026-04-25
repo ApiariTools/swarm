@@ -770,7 +770,7 @@ async fn run_daemon(
                     let jobs: Vec<PrPollJob> = workspaces.values()
                         .flat_map(|ws| {
                             ws.workers.values()
-                                .filter(|w| w.phase.is_active())
+                                .filter(|w| w.phase.is_active() || (w.phase == WorkerPhase::Waiting && w.pr.is_none()))
                                 .map(|w| PrPollJob {
                                     worker_id: w.id.clone(),
                                     branch: w.branch.clone(),
