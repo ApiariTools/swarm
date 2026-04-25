@@ -32,8 +32,18 @@ impl Default for SwarmConfig {
 pub fn load_config(workspace_path: &Path) -> SwarmConfig {
     let config_path = workspace_path.join(".swarm").join("config.toml");
     match std::fs::read_to_string(&config_path) {
-        Ok(content) => toml::from_str(&content).unwrap_or_default(),
-        Err(_) => SwarmConfig::default(),
+        Ok(content) => match toml::from_str(&content) {
+            Ok(config) => config,
+            Err(e) => {
+                tracing::warn!(path = %config_path.display(), error = %e, "Failed to parse config.toml, using defaults");
+                SwarmConfig::default()
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => SwarmConfig::default(),
+        Err(e) => {
+            tracing::warn!(path = %config_path.display(), error = %e, "Failed to read config.toml, using defaults");
+            SwarmConfig::default()
+        }
     }
 }
 
@@ -74,7 +84,8 @@ close_on_pr_merge = false
 
     #[test]
     fn load_config_missing_file_returns_default() {
-        let config = load_config(Path::new("/tmp/nonexistent-workspace-12345"));
+        let dir = tempfile::tempdir().unwrap();
+        let config = load_config(dir.path());
         assert!(config.close_on_pr_merge);
     }
 
