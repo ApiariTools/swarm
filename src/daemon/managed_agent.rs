@@ -498,7 +498,7 @@ fn translate_codex_event(event: &apiari_codex_sdk::Event) -> Option<AgentEventWi
                 .unwrap_or_else(|| "turn failed".into());
             Some(AgentEventWire::Error { message: msg })
         }
-        Event::Error { message } => Some(AgentEventWire::Error {
+        Event::Error { message, .. } => Some(AgentEventWire::Error {
             message: message.clone().unwrap_or_else(|| "unknown error".into()),
         }),
         _ => None,
@@ -719,7 +719,7 @@ fn translate_gemini_event(event: &apiari_gemini_sdk::Event) -> Option<AgentEvent
                 .unwrap_or_else(|| "turn failed".into());
             Some(AgentEventWire::Error { message: msg })
         }
-        Event::Error { message } => Some(AgentEventWire::Error {
+        Event::Error { message, .. } => Some(AgentEventWire::Error {
             message: message.clone().unwrap_or_else(|| "unknown error".into()),
         }),
         _ => None,
