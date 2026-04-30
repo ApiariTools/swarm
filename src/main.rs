@@ -685,9 +685,10 @@ async fn cmd_adopt(
                 names.join(", ")
             ));
         }
-        repos.into_iter().next().ok_or_else(|| {
-            color_eyre::eyre::eyre!("no git repos detected")
-        })?
+        repos
+            .into_iter()
+            .next()
+            .ok_or_else(|| color_eyre::eyre::eyre!("no git repos detected"))?
     };
 
     // Get owner/repo for gh commands
@@ -713,10 +714,8 @@ async fn cmd_adopt(
             stderr.trim()
         ));
     }
-    let pr_json: serde_json::Value =
-        serde_json::from_slice(&gh_output.stdout).map_err(|e| {
-            color_eyre::eyre::eyre!("failed to parse gh pr view output: {}", e)
-        })?;
+    let pr_json: serde_json::Value = serde_json::from_slice(&gh_output.stdout)
+        .map_err(|e| color_eyre::eyre::eyre!("failed to parse gh pr view output: {}", e))?;
     let head_ref = pr_json["headRefName"]
         .as_str()
         .ok_or_else(|| color_eyre::eyre::eyre!("missing headRefName in PR data"))?
