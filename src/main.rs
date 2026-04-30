@@ -799,18 +799,17 @@ async fn cmd_adopt(
     };
 
     // Update state with PR info
-    if let Some(wt_id) = wt_id {
-        if let Ok(Some(mut state)) = core::state::load_state(&work_dir) {
-            if let Some(wt) = state.worktrees.iter_mut().find(|w| w.id == wt_id) {
-                wt.pr = Some(core::state::PrInfo {
-                    number: pr_number,
-                    title: pr_title,
-                    state: "OPEN".to_string(),
-                    url: pr_url,
-                });
-                let _ = core::state::save_state(&work_dir, &state);
-            }
-        }
+    if let Some(wt_id) = wt_id
+        && let Ok(Some(mut state)) = core::state::load_state(&work_dir)
+        && let Some(wt) = state.worktrees.iter_mut().find(|w| w.id == wt_id)
+    {
+        wt.pr = Some(core::state::PrInfo {
+            number: pr_number,
+            title: pr_title,
+            state: "OPEN".to_string(),
+            url: pr_url,
+        });
+        let _ = core::state::save_state(&work_dir, &state);
     }
 
     Ok(())
