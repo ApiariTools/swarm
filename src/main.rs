@@ -109,6 +109,7 @@ enum Commands {
         #[arg(long)]
         pr: u64,
         /// Task prompt
+        #[arg(long)]
         prompt: Option<String>,
         /// Read prompt from file
         #[arg(long, value_name = "PATH")]
@@ -640,11 +641,25 @@ fn resolve_gh_nwo(repo_path: &std::path::Path) -> Result<String> {
         return Err(color_eyre::eyre::eyre!("git remote get-url origin failed"));
     }
     let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    // Parse SSH: "git@github.com:Owner/Repo.git"
+    parse_gh_nwo(&url)
+}
+
+/// Extract "owner/repo" from a GitHub remote URL.
+///
+/// Supported formats:
+/// - `git@github.com:Owner/Repo.git` (SCP-style SSH)
+/// - `ssh://git@github.com/Owner/Repo.git` (SSH URL)
+/// - `https://github.com/Owner/Repo.git` (HTTPS)
+fn parse_gh_nwo(url: &str) -> Result<String> {
+    // SCP-style SSH: "git@github.com:Owner/Repo.git"
     if let Some(rest) = url.strip_prefix("git@github.com:") {
         return Ok(rest.trim_end_matches(".git").to_string());
     }
-    // Parse HTTPS: "https://github.com/Owner/Repo.git"
+    // SSH URL: "ssh://git@github.com/Owner/Repo.git"
+    if let Some(rest) = url.strip_prefix("ssh://git@github.com/") {
+        return Ok(rest.trim_end_matches(".git").to_string());
+    }
+    // HTTPS: "https://github.com/Owner/Repo.git"
     if let Some(rest) = url.strip_prefix("https://github.com/") {
         return Ok(rest.trim_end_matches(".git").to_string());
     }
@@ -738,7 +753,9 @@ async fn cmd_adopt(
     }
 
     // Build prompt
-    let final_prompt = if let Ok(user_prompt) = resolve_prompt(prompt, prompt_file) {
+    let has_user_prompt = prompt.is_some() || prompt_file.is_some();
+    let final_prompt = if has_user_prompt {
+        let user_prompt = resolve_prompt(prompt, prompt_file)?;
         format!(
             "You are continuing work on PR #{}: {}\nPR URL: {}\n\n{}",
             pr_number, pr_title, pr_url, user_prompt
@@ -765,7 +782,7 @@ async fn cmd_adopt(
         prompt: final_prompt,
         agent,
         repo: repo.clone(),
-        start_point: Some(head_ref),
+        start_point: Some(format!("origin/{}", head_ref)),
         workspace: Some(work_dir.clone()),
         profile: Some(profile),
         task_dir: None,
@@ -799,17 +816,30 @@ async fn cmd_adopt(
     };
 
     // Update state with PR info
-    if let Some(wt_id) = wt_id
-        && let Ok(Some(mut state)) = core::state::load_state(&work_dir)
-        && let Some(wt) = state.worktrees.iter_mut().find(|w| w.id == wt_id)
-    {
-        wt.pr = Some(core::state::PrInfo {
-            number: pr_number,
-            title: pr_title,
-            state: "OPEN".to_string(),
-            url: pr_url,
-        });
-        let _ = core::state::save_state(&work_dir, &state);
+    if let Some(wt_id) = wt_id {
+        match core::state::load_state(&work_dir) {
+            Ok(Some(mut state)) => {
+                if let Some(wt) = state.worktrees.iter_mut().find(|w| w.id == wt_id) {
+                    wt.pr = Some(core::state::PrInfo {
+                        number: pr_number,
+                        title: pr_title,
+                        state: "OPEN".to_string(),
+                        url: pr_url,
+                    });
+                    if let Err(e) = core::state::save_state(&work_dir, &state) {
+                        tracing::warn!("failed to save PR info to state: {}", e);
+                    }
+                } else {
+                    tracing::warn!("worktree {} not found in state after creation", wt_id);
+                }
+            }
+            Ok(None) => {
+                tracing::warn!("no state file found after creating worktree {}", wt_id);
+            }
+            Err(e) => {
+                tracing::warn!("failed to load state for PR info update: {}", e);
+            }
+        }
     }
 
     Ok(())
@@ -875,5 +905,41 @@ mod tests {
 
         let result = resolve_prompt(None, Some(path)).unwrap();
         assert_eq!(result, "trimmed prompt");
+    }
+
+    #[test]
+    fn parse_gh_nwo_scp_ssh() {
+        let result = parse_gh_nwo("git@github.com:Owner/Repo.git").unwrap();
+        assert_eq!(result, "Owner/Repo");
+    }
+
+    #[test]
+    fn parse_gh_nwo_scp_ssh_no_dot_git() {
+        let result = parse_gh_nwo("git@github.com:Owner/Repo").unwrap();
+        assert_eq!(result, "Owner/Repo");
+    }
+
+    #[test]
+    fn parse_gh_nwo_https() {
+        let result = parse_gh_nwo("https://github.com/Owner/Repo.git").unwrap();
+        assert_eq!(result, "Owner/Repo");
+    }
+
+    #[test]
+    fn parse_gh_nwo_https_no_dot_git() {
+        let result = parse_gh_nwo("https://github.com/Owner/Repo").unwrap();
+        assert_eq!(result, "Owner/Repo");
+    }
+
+    #[test]
+    fn parse_gh_nwo_ssh_url() {
+        let result = parse_gh_nwo("ssh://git@github.com/Owner/Repo.git").unwrap();
+        assert_eq!(result, "Owner/Repo");
+    }
+
+    #[test]
+    fn parse_gh_nwo_unknown_host() {
+        let err = parse_gh_nwo("git@gitlab.com:Owner/Repo.git").unwrap_err();
+        assert!(err.to_string().contains("cannot parse"));
     }
 }
