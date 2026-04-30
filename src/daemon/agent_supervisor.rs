@@ -1,6 +1,6 @@
+use super::event_logger::EventLogger;
 use super::managed_agent::{self, ManagedAgent, SpawnOptions};
 use super::protocol::{AgentEventWire, DaemonResponse};
-use crate::agent_tui::events::EventLogger;
 use crate::core::agent::AgentKind;
 use crate::core::state::WorkerPhase;
 use std::path::Path;

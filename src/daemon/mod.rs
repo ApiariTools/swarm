@@ -1,6 +1,8 @@
 pub mod a2a_server;
 pub mod agent_supervisor;
+pub mod event_logger;
 pub mod ipc_client;
+pub mod lifecycle;
 pub mod managed_agent;
 pub mod protocol;
 pub mod socket_server;
@@ -31,7 +33,7 @@ fn write_pid() -> Result<()> {
 }
 
 /// Read the PID from the global PID file.
-pub(crate) fn read_global_pid() -> Option<u32> {
+pub fn read_global_pid() -> Option<u32> {
     std::fs::read_to_string(ipc::global_pid_path())
         .ok()
         .and_then(|s| s.trim().parse().ok())
@@ -43,7 +45,7 @@ fn remove_pid() {
 }
 
 /// Check whether a process is alive.
-pub(crate) fn is_process_alive(pid: u32) -> bool {
+pub fn is_process_alive(pid: u32) -> bool {
     // signal 0 just checks existence
     unsafe { libc::kill(pid as i32, 0) == 0 }
 }
