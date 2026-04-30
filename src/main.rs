@@ -103,6 +103,27 @@ enum Commands {
         #[command(subcommand)]
         action: DaemonAction,
     },
+    /// Adopt an existing GitHub PR into a swarm worker
+    Adopt {
+        /// GitHub PR number to adopt
+        #[arg(long)]
+        pr: u64,
+        /// Task prompt
+        #[arg(long)]
+        prompt: Option<String>,
+        /// Read prompt from file
+        #[arg(long, value_name = "PATH")]
+        prompt_file: Option<String>,
+        /// Agent type
+        #[arg(long, default_value = "claude-tui")]
+        agent: Option<String>,
+        /// Repo name
+        #[arg(long)]
+        repo: Option<String>,
+        /// Profile slug
+        #[arg(long, default_value = "default")]
+        profile: String,
+    },
     /// Debug: spawn claude via SDK and print events (no daemon)
     #[command(name = "debug-spawn")]
     DebugSpawn,
@@ -219,6 +240,25 @@ async fn main() -> Result<()> {
                 buf.trim().to_string()
             });
             daemon_tui::run_remote(addr, token).await
+        }
+        Some(Commands::Adopt {
+            pr,
+            prompt,
+            prompt_file,
+            agent,
+            repo,
+            profile,
+        }) => {
+            cmd_adopt(
+                work_dir,
+                pr,
+                prompt,
+                prompt_file,
+                agent.unwrap_or_else(|| "claude-tui".to_string()),
+                repo,
+                profile,
+            )
+            .await
         }
         Some(Commands::DebugSpawn) => cmd_debug_spawn(work_dir).await,
         Some(Commands::Daemon { action }) => match action {
@@ -590,6 +630,221 @@ async fn cmd_merge(work_dir: std::path::PathBuf, worktree: String) -> Result<()>
     Ok(())
 }
 
+/// Parse the git remote URL to get "owner/repo" for `gh` commands.
+fn resolve_gh_nwo(repo_path: &std::path::Path) -> Result<String> {
+    let output = std::process::Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| color_eyre::eyre::eyre!("failed to run git remote get-url: {}", e))?;
+    if !output.status.success() {
+        return Err(color_eyre::eyre::eyre!("git remote get-url origin failed"));
+    }
+    let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    parse_gh_nwo(&url)
+}
+
+/// Extract "owner/repo" from a GitHub remote URL.
+///
+/// Supported formats:
+/// - `git@github.com:Owner/Repo.git` (SCP-style SSH)
+/// - `ssh://git@github.com/Owner/Repo.git` (SSH URL)
+/// - `https://github.com/Owner/Repo.git` (HTTPS)
+fn parse_gh_nwo(url: &str) -> Result<String> {
+    // SCP-style SSH: "git@github.com:Owner/Repo.git"
+    if let Some(rest) = url.strip_prefix("git@github.com:") {
+        return Ok(rest.trim_end_matches(".git").to_string());
+    }
+    // SSH URL: "ssh://git@github.com/Owner/Repo.git"
+    if let Some(rest) = url.strip_prefix("ssh://git@github.com/") {
+        return Ok(rest.trim_end_matches(".git").to_string());
+    }
+    // HTTPS: "https://github.com/Owner/Repo.git"
+    if let Some(rest) = url.strip_prefix("https://github.com/") {
+        return Ok(rest.trim_end_matches(".git").to_string());
+    }
+    Err(color_eyre::eyre::eyre!(
+        "cannot parse GitHub owner/repo from remote URL: {}",
+        url
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn cmd_adopt(
+    work_dir: std::path::PathBuf,
+    pr_number: u64,
+    prompt: Option<String>,
+    prompt_file: Option<String>,
+    agent: String,
+    repo: Option<String>,
+    profile: String,
+) -> Result<()> {
+    if let Err(msg) = core::prerequisites::check_prerequisites() {
+        return Err(color_eyre::eyre::eyre!("{}", msg));
+    }
+
+    // Resolve repo path (same logic as cmd_create)
+    let repo_path = if let Some(ref name) = repo {
+        let repos = core::git::detect_repos(&work_dir)?;
+        repos
+            .iter()
+            .find(|r| core::git::repo_name(r) == *name)
+            .cloned()
+            .ok_or_else(|| color_eyre::eyre::eyre!("unknown repo '{}'", name))?
+    } else {
+        let repos = core::git::detect_repos(&work_dir)?;
+        if repos.len() > 1 {
+            let names: Vec<_> = repos.iter().map(|r| core::git::repo_name(r)).collect();
+            return Err(color_eyre::eyre::eyre!(
+                "multiple repos detected, --repo required: {}",
+                names.join(", ")
+            ));
+        }
+        repos
+            .into_iter()
+            .next()
+            .ok_or_else(|| color_eyre::eyre::eyre!("no git repos detected"))?
+    };
+
+    // Get owner/repo for gh commands
+    let nwo = resolve_gh_nwo(&repo_path)?;
+
+    // Fetch PR details via gh
+    let gh_output = std::process::Command::new("gh")
+        .args([
+            "pr",
+            "view",
+            &pr_number.to_string(),
+            "--repo",
+            &nwo,
+            "--json",
+            "headRefName,title,body,url",
+        ])
+        .output()
+        .map_err(|e| color_eyre::eyre::eyre!("failed to run gh pr view: {}", e))?;
+    if !gh_output.status.success() {
+        let stderr = String::from_utf8_lossy(&gh_output.stderr);
+        return Err(color_eyre::eyre::eyre!(
+            "gh pr view failed: {}",
+            stderr.trim()
+        ));
+    }
+    let pr_json: serde_json::Value = serde_json::from_slice(&gh_output.stdout)
+        .map_err(|e| color_eyre::eyre::eyre!("failed to parse gh pr view output: {}", e))?;
+    let head_ref = pr_json["headRefName"]
+        .as_str()
+        .ok_or_else(|| color_eyre::eyre::eyre!("missing headRefName in PR data"))?
+        .to_string();
+    let pr_title = pr_json["title"].as_str().unwrap_or("").to_string();
+    let pr_body = pr_json["body"].as_str().unwrap_or("").to_string();
+    let pr_url = pr_json["url"].as_str().unwrap_or("").to_string();
+
+    // Fetch the branch
+    let fetch_status = std::process::Command::new("git")
+        .args(["fetch", "origin", &head_ref])
+        .current_dir(&repo_path)
+        .status()
+        .map_err(|e| color_eyre::eyre::eyre!("failed to run git fetch: {}", e))?;
+    if !fetch_status.success() {
+        return Err(color_eyre::eyre::eyre!(
+            "git fetch origin {} failed",
+            head_ref
+        ));
+    }
+
+    // Build prompt
+    let has_user_prompt = prompt.is_some() || prompt_file.is_some();
+    let final_prompt = if has_user_prompt {
+        let user_prompt = resolve_prompt(prompt, prompt_file)?;
+        format!(
+            "You are continuing work on PR #{}: {}\nPR URL: {}\n\n{}",
+            pr_number, pr_title, pr_url, user_prompt
+        )
+    } else {
+        format!(
+            "You are continuing work on PR #{}: {}\n\n{}\n\nPR URL: {}\n\nContinue working on this PR. Review the existing changes and complete any remaining work.",
+            pr_number, pr_title, pr_body, pr_url
+        )
+    };
+
+    daemon::lifecycle::ensure_daemon_running(&work_dir).await?;
+
+    // Register workspace
+    let _ = daemon::ipc_client::send_daemon_request(
+        &work_dir,
+        &daemon::protocol::DaemonRequest::RegisterWorkspace {
+            path: work_dir.clone(),
+        },
+    );
+
+    // Create worker with start_point set to the PR branch
+    let req = daemon::protocol::DaemonRequest::CreateWorker {
+        prompt: final_prompt,
+        agent,
+        repo: repo.clone(),
+        start_point: Some(format!("origin/{}", head_ref)),
+        workspace: Some(work_dir.clone()),
+        profile: Some(profile),
+        task_dir: None,
+        role: Some("worker".to_string()),
+        review_pr: None,
+        base_branch: Some("main".to_string()),
+    };
+
+    let wt_id = match daemon::ipc_client::send_daemon_request(&work_dir, &req) {
+        Ok(daemon::protocol::DaemonResponse::Ok { data }) => {
+            if let Some(data) = data
+                && let Some(wt_id) = data.get("worktree_id").and_then(|v| v.as_str())
+            {
+                println!("{}", wt_id);
+                Some(wt_id.to_string())
+            } else {
+                println!("created");
+                None
+            }
+        }
+        Ok(daemon::protocol::DaemonResponse::Error { message }) => {
+            return Err(color_eyre::eyre::eyre!("{}", message));
+        }
+        Ok(_) => {
+            println!("created");
+            None
+        }
+        Err(e) => {
+            return Err(color_eyre::eyre::eyre!("daemon request failed: {}", e));
+        }
+    };
+
+    // Update state with PR info
+    if let Some(wt_id) = wt_id {
+        match core::state::load_state(&work_dir) {
+            Ok(Some(mut state)) => {
+                if let Some(wt) = state.worktrees.iter_mut().find(|w| w.id == wt_id) {
+                    wt.pr = Some(core::state::PrInfo {
+                        number: pr_number,
+                        title: pr_title,
+                        state: "OPEN".to_string(),
+                        url: pr_url,
+                    });
+                    if let Err(e) = core::state::save_state(&work_dir, &state) {
+                        tracing::warn!("failed to save PR info to state: {}", e);
+                    }
+                } else {
+                    tracing::warn!("worktree {} not found in state after creation", wt_id);
+                }
+            }
+            Ok(None) => {
+                tracing::warn!("no state file found after creating worktree {}", wt_id);
+            }
+            Err(e) => {
+                tracing::warn!("failed to load state for PR info update: {}", e);
+            }
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -650,5 +905,41 @@ mod tests {
 
         let result = resolve_prompt(None, Some(path)).unwrap();
         assert_eq!(result, "trimmed prompt");
+    }
+
+    #[test]
+    fn parse_gh_nwo_scp_ssh() {
+        let result = parse_gh_nwo("git@github.com:Owner/Repo.git").unwrap();
+        assert_eq!(result, "Owner/Repo");
+    }
+
+    #[test]
+    fn parse_gh_nwo_scp_ssh_no_dot_git() {
+        let result = parse_gh_nwo("git@github.com:Owner/Repo").unwrap();
+        assert_eq!(result, "Owner/Repo");
+    }
+
+    #[test]
+    fn parse_gh_nwo_https() {
+        let result = parse_gh_nwo("https://github.com/Owner/Repo.git").unwrap();
+        assert_eq!(result, "Owner/Repo");
+    }
+
+    #[test]
+    fn parse_gh_nwo_https_no_dot_git() {
+        let result = parse_gh_nwo("https://github.com/Owner/Repo").unwrap();
+        assert_eq!(result, "Owner/Repo");
+    }
+
+    #[test]
+    fn parse_gh_nwo_ssh_url() {
+        let result = parse_gh_nwo("ssh://git@github.com/Owner/Repo.git").unwrap();
+        assert_eq!(result, "Owner/Repo");
+    }
+
+    #[test]
+    fn parse_gh_nwo_unknown_host() {
+        let err = parse_gh_nwo("git@gitlab.com:Owner/Repo.git").unwrap_err();
+        assert!(err.to_string().contains("cannot parse"));
     }
 }
