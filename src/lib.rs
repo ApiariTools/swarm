@@ -25,11 +25,11 @@
 /// When the `server` feature is enabled, the full set of core submodules is
 /// available (git, config, log, merge, etc.). Otherwise only the subset needed
 /// by library consumers (agent, state, profile, etc.) is exposed.
-#[cfg(feature = "server")]
+#[cfg(all(unix, feature = "server"))]
 #[path = "core/mod.rs"]
 pub mod core;
 
-#[cfg(not(feature = "server"))]
+#[cfg(not(all(unix, feature = "server")))]
 pub mod core {
     pub mod a2a_state;
     pub mod agent;

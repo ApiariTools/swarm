@@ -45,9 +45,17 @@ fn remove_pid() {
 }
 
 /// Check whether a process is alive.
+///
+/// Uses `kill(pid, 0)` which checks existence without sending a signal.
+/// Returns `true` if the process exists (including when we lack permission
+/// to signal it, i.e. `EPERM`).
 pub fn is_process_alive(pid: u32) -> bool {
-    // signal 0 just checks existence
-    unsafe { libc::kill(pid as i32, 0) == 0 }
+    let ret = unsafe { libc::kill(pid as i32, 0) };
+    if ret == 0 {
+        return true;
+    }
+    // EPERM means the process exists but we can't signal it
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 // ── Per-workspace state ──────────────────────────────────

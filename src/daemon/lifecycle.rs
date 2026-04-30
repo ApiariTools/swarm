@@ -17,15 +17,17 @@ pub fn is_daemon_running(_work_dir: &Path) -> bool {
 /// Launches the `swarm daemon start --foreground` command as a detached child
 /// process, redirecting stderr to `.swarm/daemon-stderr.log`.
 pub fn spawn_daemon(work_dir: &Path) -> Result<()> {
-    eprintln!("[swarm] Starting daemon...");
+    tracing::info!("Starting daemon...");
     let exe = std::env::current_exe()
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|_| "swarm".to_string());
 
     let log_dir = work_dir.join(".swarm");
     std::fs::create_dir_all(&log_dir).ok();
-    let daemon_log = std::fs::File::create(log_dir.join("daemon-stderr.log"))
-        .unwrap_or_else(|_| std::fs::File::open("/dev/null").unwrap());
+    let stderr_cfg = std::fs::File::create(log_dir.join("daemon-stderr.log"))
+        .or_else(|_| std::fs::File::open("/dev/null"))
+        .map(std::process::Stdio::from)
+        .unwrap_or_else(|_| std::process::Stdio::null());
 
     std::process::Command::new(&exe)
         .args([
@@ -37,7 +39,7 @@ pub fn spawn_daemon(work_dir: &Path) -> Result<()> {
         ])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::from(daemon_log))
+        .stderr(stderr_cfg)
         .spawn()
         .map_err(|e| color_eyre::eyre::eyre!("failed to spawn daemon: {}", e))?;
 
