@@ -30,30 +30,12 @@ jobs:
         with:
           path: swarm
 
-      - name: Checkout apiari-claude-sdk
-        uses: actions/checkout@v4
-        with:
-          repository: ApiariTools/apiari-claude-sdk
-          path: claude-sdk
-
-      - name: Checkout apiari-codex-sdk
-        uses: actions/checkout@v4
-        with:
-          repository: ApiariTools/apiari-codex-sdk
-          path: codex-sdk
-
-      - name: Checkout apiari-gemini-sdk
-        uses: actions/checkout@v4
-        with:
-          repository: ApiariTools/gemini-sdk
-          path: gemini-sdk
-
       - name: Create workspace root
         run: |
           cat > Cargo.toml << 'TOML'
           [workspace]
           resolver = "3"
-          members = ["swarm", "claude-sdk", "codex-sdk", "gemini-sdk"]
+          members = ["swarm"]
 
           [workspace.package]
           edition = "2024"
@@ -76,9 +58,9 @@ jobs:
           crossterm = { version = "0.28", features = ["event-stream"] }
           apiari-common = "0.1.0"
           apiari-tui = "0.3.0"
-          apiari-claude-sdk = { version = "0.2.0", path = "claude-sdk" }
-          apiari-codex-sdk = { version = "0.1.1", path = "codex-sdk" }
-          apiari-gemini-sdk = { version = "0.2.0", path = "gemini-sdk" }
+          apiari-claude-sdk = "0.2.0"
+          apiari-codex-sdk = "0.1.2"
+          apiari-gemini-sdk = "0.2.0"
           TOML
 
       - uses: dtolnay/rust-toolchain@stable
@@ -108,30 +90,12 @@ jobs:
         with:
           path: swarm
 
-      - name: Checkout apiari-claude-sdk
-        uses: actions/checkout@v4
-        with:
-          repository: ApiariTools/apiari-claude-sdk
-          path: claude-sdk
-
-      - name: Checkout apiari-codex-sdk
-        uses: actions/checkout@v4
-        with:
-          repository: ApiariTools/apiari-codex-sdk
-          path: codex-sdk
-
-      - name: Checkout apiari-gemini-sdk
-        uses: actions/checkout@v4
-        with:
-          repository: ApiariTools/gemini-sdk
-          path: gemini-sdk
-
       - name: Create workspace root
         run: |
           cat > Cargo.toml << 'TOML'
           [workspace]
           resolver = "3"
-          members = ["swarm", "claude-sdk", "codex-sdk", "gemini-sdk"]
+          members = ["swarm"]
 
           [workspace.package]
           edition = "2024"
@@ -154,9 +118,9 @@ jobs:
           crossterm = { version = "0.28", features = ["event-stream"] }
           apiari-common = "0.1.0"
           apiari-tui = "0.3.0"
-          apiari-claude-sdk = { version = "0.2.0", path = "claude-sdk" }
-          apiari-codex-sdk = { version = "0.1.1", path = "codex-sdk" }
-          apiari-gemini-sdk = { version = "0.2.0", path = "gemini-sdk" }
+          apiari-claude-sdk = "0.2.0"
+          apiari-codex-sdk = "0.1.2"
+          apiari-gemini-sdk = "0.2.0"
           TOML
 
       - uses: dtolnay/rust-toolchain@stable
