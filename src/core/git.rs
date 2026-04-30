@@ -310,7 +310,7 @@ pub fn detect_repos(dir: &Path) -> Result<Vec<PathBuf>> {
                 (repo, c)
             })
             .collect();
-        counted.sort_by(|a, b| b.1.cmp(&a.1));
+        counted.sort_by_key(|b| std::cmp::Reverse(b.1));
         child_repos = counted.into_iter().map(|(p, _)| p).collect();
     }
 

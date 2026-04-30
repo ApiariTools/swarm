@@ -903,6 +903,8 @@ mod tests {
     fn translate_gemini_error() {
         let event = apiari_gemini_sdk::Event::Error {
             message: Some("rate limited".into()),
+            status: None,
+            fatal: None,
         };
         let wire = translate_gemini_event(&event);
         match wire {

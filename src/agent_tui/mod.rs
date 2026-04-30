@@ -456,12 +456,11 @@ async fn event_loop(
                     match app.input_mode {
                         InputMode::Normal => match key.code {
                             KeyCode::Char('q') => break,
-                            KeyCode::Char('i') => {
+                            KeyCode::Char('i')
                                 if app.status == SessionStatus::Done
-                                    || app.status == SessionStatus::Waiting
-                                {
-                                    app.input_mode = InputMode::Input;
-                                }
+                                    || app.status == SessionStatus::Waiting =>
+                            {
+                                app.input_mode = InputMode::Input;
                             }
                             KeyCode::Tab => {
                                 app.focus_next_tool();
@@ -471,11 +470,9 @@ async fn event_loop(
                                 app.focus_prev_tool();
                                 app.scroll_to_focused();
                             }
-                            KeyCode::Enter => {
-                                if app.focused_tool.is_some() {
-                                    app.toggle_focused_tool();
-                                    app.scroll_to_focused();
-                                }
+                            KeyCode::Enter if app.focused_tool.is_some() => {
+                                app.toggle_focused_tool();
+                                app.scroll_to_focused();
                             }
                             KeyCode::Esc => {
                                 app.clear_focus();

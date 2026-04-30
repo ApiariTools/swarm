@@ -79,10 +79,8 @@ pub async fn show(work_dir: &Path, repos: &[PathBuf]) -> Result<OnboardingResult
                 KeyCode::Left | KeyCode::Char('h') => {
                     agent_index = agent_index.saturating_sub(1);
                 }
-                KeyCode::Right | KeyCode::Char('l') => {
-                    if agent_index + 1 < AGENTS.len() {
-                        agent_index += 1;
-                    }
+                KeyCode::Right | KeyCode::Char('l') if agent_index + 1 < AGENTS.len() => {
+                    agent_index += 1;
                 }
                 KeyCode::Char(' ') | KeyCode::Tab => {
                     agent_index = (agent_index + 1) % AGENTS.len();

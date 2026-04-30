@@ -53,6 +53,9 @@ default = ["daemon-ipc", "tui"]
 client = []
 # Daemon IPC support (requires daemon module); disabled for lib-only builds
 daemon-ipc = []
+# Server-side daemon: exposes daemon::start() and lifecycle helpers through the library.
+# Does NOT pull in TUI dependencies (ratatui, crossterm).
+server = ["daemon-ipc"]
 # TUI dependencies (ratatui, crossterm, apiari-tui); disable for lightweight lib builds
 tui = ["dep:ratatui", "dep:crossterm", "dep:apiari-tui"]
 

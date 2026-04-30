@@ -22,24 +22,34 @@
 
 /// Core swarm types: agent kinds, worktree/swarm state, and state I/O.
 ///
-/// The `agent` and `state` submodules are always available. Additional
-/// submodules (e.g. `ipc`) are gated behind the `client` feature.
-/// Binary-only modules (git, shell, etc.) live exclusively in the
-/// `swarm` binary crate.
+/// When the `server` feature is enabled, the full set of core submodules is
+/// available (git, config, log, merge, etc.). Otherwise only the subset needed
+/// by library consumers (agent, state, profile, etc.) is exposed.
+#[cfg(all(unix, feature = "server"))]
+#[path = "core/mod.rs"]
+pub mod core;
+
+#[cfg(not(all(unix, feature = "server")))]
 pub mod core {
     pub mod a2a_state;
     pub mod agent;
     pub mod agent_card;
-    // Used internally by the `client` re-exports (socket_path, global_socket_path).
-    // Downstream should use the `client` module at the crate root, not this directly.
     #[cfg(all(unix, feature = "client"))]
     pub(crate) mod ipc;
     pub mod profile;
     pub mod state;
 }
 
-/// Daemon protocol types and IPC client (Unix-only, requires `client` feature).
-#[cfg(all(unix, feature = "client"))]
+/// Full daemon module (Unix-only, requires `server` feature).
+///
+/// Exposes `daemon::start()`, `daemon::stop()`, `daemon::lifecycle`, and all
+/// internal submodules needed to run the swarm daemon as a library.
+#[cfg(all(unix, feature = "server"))]
+#[path = "daemon/mod.rs"]
+pub mod daemon;
+
+/// Daemon protocol types and IPC client only (Unix-only, requires `client` feature, no `server`).
+#[cfg(all(unix, feature = "client", not(feature = "server")))]
 pub mod daemon {
     pub mod ipc_client;
     pub mod protocol;
@@ -55,7 +65,7 @@ pub use core::state::{
 
 // Client re-exports — kept under a `client` sub-module to avoid polluting
 // the crate root namespace and to prevent naming conflicts.
-#[cfg(all(unix, feature = "client"))]
+#[cfg(all(unix, any(feature = "client", feature = "server")))]
 pub mod client {
     //! Convenience re-exports for daemon IPC consumers (Unix-only).
     pub use crate::core::ipc::{global_socket_path, socket_path};

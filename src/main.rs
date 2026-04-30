@@ -141,8 +141,12 @@ async fn main() -> Result<()> {
     // Strip CLAUDECODE-injected GH_TOKEN — it's often a sandbox token that
     // overrides the user's real `gh auth login` credentials and causes 401s.
     if std::env::var("CLAUDECODE").is_ok() {
-        unsafe { std::env::remove_var("GH_TOKEN"); }
-        unsafe { std::env::remove_var("GITHUB_TOKEN"); }
+        unsafe {
+            std::env::remove_var("GH_TOKEN");
+        }
+        unsafe {
+            std::env::remove_var("GITHUB_TOKEN");
+        }
     }
 
     let cli = Cli::parse();
@@ -241,9 +245,9 @@ async fn run_default_tui(work_dir: std::path::PathBuf) -> Result<()> {
         }
     }
 
-    if !is_daemon_running(&work_dir) {
+    if !daemon::lifecycle::is_daemon_running(&work_dir) {
         // TUI has its own reconnect loop, so just spawn — don't block on readiness.
-        spawn_daemon(&work_dir)?;
+        daemon::lifecycle::spawn_daemon(&work_dir)?;
     } else {
         // Daemon already running — register workspace in background (don't block TUI startup)
         let bg_dir = work_dir.clone();
@@ -258,71 +262,6 @@ async fn run_default_tui(work_dir: std::path::PathBuf) -> Result<()> {
     }
 
     daemon_tui::run(work_dir).await
-}
-
-/// Check if the swarm daemon is running (global daemon).
-fn is_daemon_running(_work_dir: &std::path::Path) -> bool {
-    daemon::read_global_pid().is_some_and(daemon::is_process_alive)
-}
-
-/// Spawn the daemon process in the background. Shared by TUI and CLI paths.
-fn spawn_daemon(work_dir: &std::path::Path) -> Result<()> {
-    eprintln!("[swarm] Starting daemon...");
-    let exe = std::env::current_exe()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|_| "swarm".to_string());
-
-    let log_dir = work_dir.join(".swarm");
-    std::fs::create_dir_all(&log_dir).ok();
-    let daemon_log = std::fs::File::create(log_dir.join("daemon-stderr.log"))
-        .unwrap_or_else(|_| std::fs::File::open("/dev/null").unwrap());
-
-    std::process::Command::new(&exe)
-        .args([
-            "-d",
-            &work_dir.to_string_lossy(),
-            "daemon",
-            "start",
-            "--foreground",
-        ])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::from(daemon_log))
-        .spawn()
-        .map_err(|e| color_eyre::eyre::eyre!("failed to spawn daemon: {}", e))?;
-
-    Ok(())
-}
-
-/// Ensure the daemon is running, starting it if necessary.
-/// Waits for the daemon socket to accept connections before returning.
-async fn ensure_daemon_running(work_dir: &std::path::Path) -> Result<()> {
-    if is_daemon_running(work_dir) {
-        return Ok(());
-    }
-
-    spawn_daemon(work_dir)?;
-
-    // Wait for the daemon socket to become available (up to 5 seconds).
-    // Check per-workspace socket first (mirrors send_daemon_request preference),
-    // then fall back to global socket.
-    let local_socket = core::ipc::socket_path(work_dir);
-    let global_socket = core::ipc::global_socket_path();
-    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
-    while tokio::time::Instant::now() < deadline {
-        if tokio::net::UnixStream::connect(&local_socket).await.is_ok()
-            || tokio::net::UnixStream::connect(&global_socket)
-                .await
-                .is_ok()
-        {
-            return Ok(());
-        }
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-    }
-
-    Err(color_eyre::eyre::eyre!(
-        "daemon failed to start within 5 seconds — check .swarm/daemon-stderr.log"
-    ))
 }
 
 /// Debug command: spawn claude via SDK (same code path as daemon) and print events.
@@ -533,7 +472,7 @@ async fn cmd_create(
         None
     };
 
-    ensure_daemon_running(&work_dir).await?;
+    daemon::lifecycle::ensure_daemon_running(&work_dir).await?;
 
     // Register this workspace first (idempotent)
     let _ = daemon::ipc_client::send_daemon_request(
@@ -591,7 +530,7 @@ async fn cmd_create(
 }
 
 async fn cmd_send(work_dir: std::path::PathBuf, worktree: String, message: String) -> Result<()> {
-    ensure_daemon_running(&work_dir).await?;
+    daemon::lifecycle::ensure_daemon_running(&work_dir).await?;
     let req = daemon::protocol::DaemonRequest::SendMessage {
         worktree_id: worktree,
         message,
@@ -612,7 +551,7 @@ async fn cmd_send(work_dir: std::path::PathBuf, worktree: String, message: Strin
 }
 
 async fn cmd_close(work_dir: std::path::PathBuf, worktree: String) -> Result<()> {
-    ensure_daemon_running(&work_dir).await?;
+    daemon::lifecycle::ensure_daemon_running(&work_dir).await?;
     let req = daemon::protocol::DaemonRequest::CloseWorker {
         worktree_id: worktree,
     };
@@ -632,7 +571,7 @@ async fn cmd_close(work_dir: std::path::PathBuf, worktree: String) -> Result<()>
 }
 
 async fn cmd_merge(work_dir: std::path::PathBuf, worktree: String) -> Result<()> {
-    ensure_daemon_running(&work_dir).await?;
+    daemon::lifecycle::ensure_daemon_running(&work_dir).await?;
     let req = daemon::protocol::DaemonRequest::MergeWorker {
         worktree_id: worktree,
     };

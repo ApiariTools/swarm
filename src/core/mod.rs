@@ -1,3 +1,6 @@
+// Only compiled when used as a library (server feature); the binary doesn't need this.
+#[cfg(feature = "server")]
+pub mod a2a_state;
 pub mod agent;
 pub mod agent_card;
 pub mod config;
