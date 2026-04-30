@@ -1003,10 +1003,12 @@ fn draw_conversation_input(frame: &mut Frame, area: Rect, app: &DaemonTuiApp) {
 
     // Compute cursor position accounting for wrapping
     let inner_width = area.width.saturating_sub(4) as usize; // borders + padding
-    if inner_width > 0 {
-        let cursor_row = (app.input_cursor / inner_width) as u16;
-        let cursor_col = (app.input_cursor % inner_width) as u16;
-        frame.set_cursor_position((area.x + 2 + cursor_col, area.y + 1 + cursor_row));
+    if let Some(cursor_row) = app.input_cursor.checked_div(inner_width) {
+        let cursor_col = app.input_cursor % inner_width;
+        frame.set_cursor_position((
+            area.x + 2 + cursor_col as u16,
+            area.y + 1 + cursor_row as u16,
+        ));
     } else {
         frame.set_cursor_position((area.x + 2, area.y + 1));
     }
