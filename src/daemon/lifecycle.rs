@@ -66,86 +66,73 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_is_daemon_running_no_pid_file() {
-        // When no global PID file exists (or it points to a dead process),
-        // is_daemon_running should return false.
-        // We use a tempdir as work_dir — it doesn't affect the check since
-        // is_daemon_running reads the *global* PID file, but if no daemon is
-        // running this should return false.
-        let dir = tempfile::tempdir().unwrap();
-        // This test is only meaningful when no daemon is actually running.
-        // We can at least verify it doesn't panic.
-        let _ = is_daemon_running(dir.path());
-    }
-
-    #[test]
     fn test_is_process_alive_current_process() {
-        // Our own PID should be alive.
         let pid = std::process::id();
         assert!(super::super::is_process_alive(pid));
     }
 
     #[test]
-    fn test_is_process_alive_stale_pid() {
-        // PID 99999 is very unlikely to exist. Even if it does, we just
-        // verify the function doesn't panic. The key scenario is that
-        // a PID pointing to a dead process returns false.
-        // Use a high PID value that's still valid (positive i32).
-        let result = super::super::is_process_alive(4_000_000);
-        // This PID almost certainly doesn't exist
-        assert!(!result, "PID 4000000 should not be alive");
+    fn test_is_process_alive_dead_process() {
+        // Spawn a child, wait for it to exit, then confirm is_process_alive
+        // returns false for its (now-dead) PID.
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .expect("failed to spawn 'true'");
+        let pid = child.id();
+        child.wait().unwrap(); // reap the zombie
+        assert!(
+            !super::super::is_process_alive(pid),
+            "reaped child PID {} should not be alive",
+            pid
+        );
     }
 
     #[test]
-    fn test_read_global_pid_returns_option() {
-        // read_global_pid should return Some(pid) or None without panicking.
-        let result = super::super::read_global_pid();
-        // We can't assert the exact value, but it should not panic.
-        let _ = result;
+    fn test_read_global_pid_matches_running_state() {
+        // Verify that read_global_pid and is_daemon_running are consistent:
+        // if read_global_pid returns Some(pid), then is_process_alive(pid)
+        // should agree with is_daemon_running.
+        let dir = tempfile::tempdir().unwrap();
+        let pid = super::super::read_global_pid();
+        let running = is_daemon_running(dir.path());
+        match pid {
+            Some(p) => assert_eq!(
+                running,
+                super::super::is_process_alive(p),
+                "is_daemon_running should agree with is_process_alive for PID {}",
+                p
+            ),
+            None => assert!(
+                !running,
+                "is_daemon_running should be false when no PID file exists"
+            ),
+        }
     }
 
     #[tokio::test]
-    async fn test_ensure_daemon_running_connects_to_socket() {
-        // Start a mock daemon (just a Unix socket listener) in a tempdir,
-        // write a PID file pointing to our process, then verify
-        // ensure_daemon_running returns Ok when the socket is available.
+    async fn test_ensure_daemon_running_finds_local_socket() {
+        // Pre-bind a listener on the local socket path so
+        // ensure_daemon_running's connect check succeeds immediately.
+        // spawn_daemon will also fire (it reads the global PID file, not
+        // our tempdir), but the local socket is found first.
         let dir = tempfile::tempdir().unwrap();
         let sock_dir = dir.path().join(".swarm");
         std::fs::create_dir_all(&sock_dir).unwrap();
         let sock_path = sock_dir.join("swarm.sock");
 
-        // Bind a listener so the connect check succeeds
         let _listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
 
-        // Write a fake PID file pointing to our own process so
-        // is_daemon_running would return true if it read from this path.
-        // But since is_daemon_running reads the GLOBAL pid file,
-        // spawn_daemon will be called. The socket is already listening
-        // on the local path though, so ensure_daemon_running should
-        // detect it and return Ok.
-        //
-        // Note: spawn_daemon will try to start a real daemon which will
-        // fail (no signal handlers etc. in test), but the socket check
-        // should succeed first.
         let result = tokio::time::timeout(
             tokio::time::Duration::from_secs(3),
             ensure_daemon_running(dir.path()),
         )
-        .await;
+        .await
+        .expect("should not timeout");
 
-        match result {
-            Ok(Ok(())) => {} // Socket was detected, success
-            Ok(Err(e)) => {
-                // The daemon may fail to fully start, but if it got as far
-                // as trying, the test infrastructure is working.
-                let msg = e.to_string();
-                assert!(
-                    msg.contains("daemon") || msg.contains("already running"),
-                    "unexpected error: {}",
-                    msg
-                );
-            }
-            Err(_) => panic!("ensure_daemon_running timed out"),
-        }
+        assert!(
+            result.is_ok(),
+            "ensure_daemon_running should succeed when local socket is listening: {:?}",
+            result.err()
+        );
     }
 }
