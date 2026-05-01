@@ -287,7 +287,7 @@ async fn run_default_tui(work_dir: std::path::PathBuf) -> Result<()> {
 
     if !daemon::lifecycle::is_daemon_running(&work_dir) {
         // TUI has its own reconnect loop, so just spawn — don't block on readiness.
-        daemon::lifecycle::spawn_daemon(&work_dir)?;
+        daemon::lifecycle::spawn_daemon(&work_dir);
     } else {
         // Daemon already running — register workspace in background (don't block TUI startup)
         let bg_dir = work_dir.clone();
