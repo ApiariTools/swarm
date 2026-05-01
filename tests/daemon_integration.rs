@@ -4,10 +4,12 @@
 //! IPC messages to verify the registration and worker creation flow works
 //! end-to-end over the Unix socket protocol.
 
+#![cfg(all(unix, any(feature = "client", feature = "server")))]
+
 use std::io::{BufRead, BufReader, Write};
 use std::time::Duration;
 
-use apiari_swarm::daemon::protocol::{DaemonRequest, DaemonResponse};
+use apiari_swarm::client::{DaemonRequest, DaemonResponse};
 
 /// Helper: send a request over a Unix stream and read one JSON-line response.
 fn send_request(stream: &std::os::unix::net::UnixStream, req: &DaemonRequest) -> DaemonResponse {
