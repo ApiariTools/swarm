@@ -60,3 +60,79 @@ pub async fn ensure_daemon_running(work_dir: &Path) -> Result<()> {
         "daemon failed to start within 5 seconds — check .swarm/swarm.log"
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_process_alive_current_process() {
+        let pid = std::process::id();
+        assert!(super::super::is_process_alive(pid));
+    }
+
+    #[test]
+    fn test_is_process_alive_dead_process() {
+        // Spawn a child, wait for it to exit, then confirm is_process_alive
+        // returns false for its (now-dead) PID.
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .expect("failed to spawn 'true'");
+        let pid = child.id();
+        child.wait().unwrap(); // reap the zombie
+        assert!(
+            !super::super::is_process_alive(pid),
+            "reaped child PID {} should not be alive",
+            pid
+        );
+    }
+
+    #[test]
+    fn test_read_global_pid_matches_running_state() {
+        // Verify that read_global_pid and is_daemon_running are consistent:
+        // if read_global_pid returns Some(pid), then is_process_alive(pid)
+        // should agree with is_daemon_running.
+        let dir = tempfile::tempdir().unwrap();
+        let pid = super::super::read_global_pid();
+        let running = is_daemon_running(dir.path());
+        match pid {
+            Some(p) => assert_eq!(
+                running,
+                super::super::is_process_alive(p),
+                "is_daemon_running should agree with is_process_alive for PID {}",
+                p
+            ),
+            None => assert!(
+                !running,
+                "is_daemon_running should be false when no PID file exists"
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_ensure_daemon_running_finds_local_socket() {
+        // Pre-bind a listener on the local socket path so
+        // ensure_daemon_running's connect check succeeds immediately.
+        // spawn_daemon will also fire (it reads the global PID file, not
+        // our tempdir), but the local socket is found first.
+        let dir = tempfile::tempdir().unwrap();
+        let sock_dir = dir.path().join(".swarm");
+        std::fs::create_dir_all(&sock_dir).unwrap();
+        let sock_path = sock_dir.join("swarm.sock");
+
+        let _listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
+
+        let result = tokio::time::timeout(
+            tokio::time::Duration::from_secs(3),
+            ensure_daemon_running(dir.path()),
+        )
+        .await
+        .expect("should not timeout");
+
+        assert!(
+            result.is_ok(),
+            "ensure_daemon_running should succeed when local socket is listening: {:?}",
+            result.err()
+        );
+    }
+}

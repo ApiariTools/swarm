@@ -744,6 +744,47 @@ mod tests {
     }
 
     #[test]
+    fn create_worker_with_workspace_roundtrip() {
+        let req = DaemonRequest::CreateWorker {
+            prompt: "fix bug".into(),
+            agent: "claude".into(),
+            repo: None,
+            start_point: None,
+            workspace: Some(PathBuf::from("/tmp/my-workspace")),
+            profile: None,
+            task_dir: None,
+            role: None,
+            review_pr: None,
+            base_branch: None,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("/tmp/my-workspace"));
+        let restored: DaemonRequest = serde_json::from_str(&json).unwrap();
+        match restored {
+            DaemonRequest::CreateWorker { workspace, .. } => {
+                assert_eq!(workspace, Some(PathBuf::from("/tmp/my-workspace")));
+            }
+            _ => panic!("expected CreateWorker"),
+        }
+    }
+
+    #[test]
+    fn unregister_workspace_roundtrip() {
+        let req = DaemonRequest::UnregisterWorkspace {
+            path: PathBuf::from("/tmp/project"),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("\"action\":\"unregister_workspace\""));
+        let restored: DaemonRequest = serde_json::from_str(&json).unwrap();
+        match restored {
+            DaemonRequest::UnregisterWorkspace { path } => {
+                assert_eq!(path, PathBuf::from("/tmp/project"));
+            }
+            _ => panic!("expected UnregisterWorkspace"),
+        }
+    }
+
+    #[test]
     fn daemon_request_defaults_agent_to_claude() {
         let json = r#"{"action":"create_worker","prompt":"test"}"#;
         let req: DaemonRequest = serde_json::from_str(json).unwrap();
