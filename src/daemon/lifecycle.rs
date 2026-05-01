@@ -12,38 +12,19 @@ pub fn is_daemon_running(_work_dir: &Path) -> bool {
     super::read_global_pid().is_some_and(super::is_process_alive)
 }
 
-/// Spawn the daemon process in the background.
+/// Spawn the daemon as an in-process background task.
 ///
-/// Launches the `swarm daemon start --foreground` command as a detached child
-/// process, redirecting stderr to `.swarm/daemon-stderr.log`.
-pub fn spawn_daemon(work_dir: &Path) -> Result<()> {
+/// Launches `run_daemon` on a detached tokio task so the daemon runs within
+/// the current process. This avoids shelling out to `current_exe()`, which
+/// breaks when an external binary (e.g. `hive`) embeds apiari-swarm as a library.
+pub fn spawn_daemon(work_dir: &Path) {
     tracing::info!("Starting daemon...");
-    let exe = std::env::current_exe()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|_| "swarm".to_string());
-
-    let log_dir = work_dir.join(".swarm");
-    std::fs::create_dir_all(&log_dir).ok();
-    let stderr_cfg = std::fs::File::create(log_dir.join("daemon-stderr.log"))
-        .or_else(|_| std::fs::File::open("/dev/null"))
-        .map(std::process::Stdio::from)
-        .unwrap_or_else(|_| std::process::Stdio::null());
-
-    std::process::Command::new(&exe)
-        .args([
-            "-d",
-            &work_dir.to_string_lossy(),
-            "daemon",
-            "start",
-            "--foreground",
-        ])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(stderr_cfg)
-        .spawn()
-        .map_err(|e| color_eyre::eyre::eyre!("failed to spawn daemon: {}", e))?;
-
-    Ok(())
+    let work_dir = work_dir.to_path_buf();
+    tokio::spawn(async move {
+        if let Err(e) = super::run_daemon(Some(work_dir), None, None).await {
+            tracing::error!(error = %e, "Daemon task exited with error");
+        }
+    });
 }
 
 /// Ensure the daemon is running, starting it if necessary.
@@ -55,7 +36,7 @@ pub async fn ensure_daemon_running(work_dir: &Path) -> Result<()> {
         return Ok(());
     }
 
-    spawn_daemon(work_dir)?;
+    spawn_daemon(work_dir);
 
     // Wait for the daemon socket to become available (up to 5 seconds).
     let local_socket = crate::core::ipc::socket_path(work_dir);
@@ -73,6 +54,6 @@ pub async fn ensure_daemon_running(work_dir: &Path) -> Result<()> {
     }
 
     Err(color_eyre::eyre::eyre!(
-        "daemon failed to start within 5 seconds — check .swarm/daemon-stderr.log"
+        "daemon failed to start within 5 seconds — check logs"
     ))
 }

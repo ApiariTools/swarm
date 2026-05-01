@@ -350,7 +350,7 @@ async fn register_workspace(
 // ── Main daemon loop ─────────────────────────────────────
 
 /// The main daemon event loop.
-async fn run_daemon(
+pub(crate) async fn run_daemon(
     initial_work_dir: Option<PathBuf>,
     tcp_bind: Option<String>,
     auth_token: Option<String>,
