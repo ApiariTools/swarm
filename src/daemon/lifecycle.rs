@@ -17,6 +17,9 @@ pub fn is_daemon_running(_work_dir: &Path) -> bool {
 /// Launches `run_daemon` on a detached tokio task so the daemon runs within
 /// the current process. This avoids shelling out to `current_exe()`, which
 /// breaks when an external binary (e.g. `hive`) embeds apiari-swarm as a library.
+///
+/// # Panics
+/// Panics if called outside a tokio runtime.
 pub fn spawn_daemon(work_dir: &Path) {
     tracing::info!("Starting daemon...");
     let work_dir = work_dir.to_path_buf();
@@ -54,6 +57,6 @@ pub async fn ensure_daemon_running(work_dir: &Path) -> Result<()> {
     }
 
     Err(color_eyre::eyre::eyre!(
-        "daemon failed to start within 5 seconds — check logs"
+        "daemon failed to start within 5 seconds — check .swarm/swarm.log"
     ))
 }
