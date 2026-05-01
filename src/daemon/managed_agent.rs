@@ -328,6 +328,7 @@ impl CodexManagedAgent {
                     &opts.prompt,
                     apiari_codex_sdk::ExecOptions {
                         full_auto: true,
+                        sandbox: Some(apiari_codex_sdk::SandboxMode::DangerFullAccess),
                         working_dir: Some(opts.working_dir.clone()),
                         ..Default::default()
                     },
@@ -535,6 +536,7 @@ impl GeminiManagedAgent {
                     apiari_gemini_sdk::SessionOptions {
                         session_id: Some(session_id.clone()),
                         working_dir: Some(opts.working_dir.clone()),
+                        yolo: true,
                         ..Default::default()
                     },
                 )
@@ -545,6 +547,7 @@ impl GeminiManagedAgent {
                     &opts.prompt,
                     apiari_gemini_sdk::GeminiOptions {
                         working_dir: Some(opts.working_dir.clone()),
+                        yolo: true,
                         ..Default::default()
                     },
                 )
